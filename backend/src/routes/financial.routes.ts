@@ -8,12 +8,14 @@ import {
   getAffiliateDashboard,
 } from "../controllers/financial.controller.js";
 import { requireAuth, requireRole } from "../middleware/authMiddleware.js";
+import { financialRateLimiter } from "../middleware/rateLimiter.js";
 import { UserRole } from "../types/index.js";
 
 const router = Router({ mergeParams: true });
 
-// All financial actions require valid JWT authentication
+// All financial actions require valid JWT authentication and are protected by financial rate limits
 router.use(requireAuth);
+router.use(financialRateLimiter);
 
 router.get("/requirement", getPaymentRequirement);
 router.post("/submit", submitPayment);
