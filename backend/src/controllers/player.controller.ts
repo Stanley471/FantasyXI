@@ -106,6 +106,10 @@ export async function getPlayers(
       prisma.player.count({ where }),
     ]);
 
+    const totalPages = Math.ceil(total / limitNum);
+    const nextPage = pageNum < totalPages ? pageNum + 1 : null;
+    const prevPage = pageNum > 1 && pageNum <= totalPages + 1 ? pageNum - 1 : null;
+
     res.json({
       success: true,
       data: players,
@@ -113,7 +117,12 @@ export async function getPlayers(
         page: pageNum,
         limit: limitNum,
         total,
-        totalPages: Math.ceil(total / limitNum),
+        totalCount: total,
+        totalPages,
+        nextPage,
+        prevPage,
+        hasNextPage: nextPage !== null,
+        hasPrevPage: pageNum > 1,
       },
     });
   } catch (error) {
