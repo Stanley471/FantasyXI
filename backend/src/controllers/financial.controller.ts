@@ -210,6 +210,45 @@ export async function getSettlementPlan(
   }
 }
 
+export async function executeSettlement(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user || !req.user.id) {
+      res.status(401).json({ success: false, message: "Authentication required" });
+      return;
+    }
+
+    const leagueId = (req.params.leagueId || req.params.id) as string;
+    const result = await financialService.executeSettlement(leagueId, req.user.id);
+    res.status(200).json({
+      success: true,
+      message: "League settlement executed and confirmed",
+      data: result,
+    });
+  } catch (error) {
+    if (error instanceof FinancialValidationError) {
+      res.status(400).json({ success: false, message: error.message });
+      return;
+    }
+    if (error instanceof FinancialNotFoundError) {
+      res.status(404).json({ success: false, message: error.message });
+      return;
+    }
+    if (error instanceof FinancialForbiddenError) {
+      res.status(403).json({ success: false, message: error.message });
+      return;
+    }
+    if (error instanceof FinancialConflictError) {
+      res.status(409).json({ success: false, message: error.message });
+      return;
+    }
+    next(error);
+  }
+}
+
 export async function reconcileLeague(
   req: Request,
   res: Response,

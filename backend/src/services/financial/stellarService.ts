@@ -14,6 +14,7 @@ import {
   Address,
   Keypair,
   scValToNative,
+  rpc,
   xdr,
 } from "@stellar/stellar-sdk";
 import {
@@ -465,6 +466,35 @@ export class StellarService {
       throw new Error("Soroban contract client is not configured");
     }
     return client.getLeague(leagueId);
+  }
+
+  /**
+   * Dispatches an administrator-authorized settlement and waits for finality.
+   */
+  public async settleLeague(
+    leagueId: number | bigint,
+    winners: Array<{ winner: string; amount: string }>,
+    platformFeeStroops: bigint
+  ): Promise<InvocationResult> {
+    const client = this.getSorobanClient();
+    if (!client) {
+      throw new Error("Soroban contract client is not configured");
+    }
+
+    const adminSecret = process.env.TESTNET_ADMIN_SECRET;
+    if (!adminSecret) {
+      throw new Error("TESTNET_ADMIN_SECRET is required to execute settlements");
+    }
+
+    const adminPublic = Keypair.fromSecret(adminSecret).publicKey();
+    return client.settle(
+      adminSecret,
+      adminPublic,
+      leagueId,
+      winners,
+      stellarConfig.treasuryAddress,
+      platformFeeStroops
+    );
   }
 
   /**

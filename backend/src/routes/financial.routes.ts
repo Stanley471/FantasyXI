@@ -4,6 +4,7 @@ import {
   submitPayment,
   verifyPayment,
   getSettlementPlan,
+  executeSettlement,
   reconcileLeague,
 } from "../controllers/financial.controller.js";
 import { requireAuth, requireRole } from "../middleware/authMiddleware.js";
@@ -18,6 +19,7 @@ router.get("/requirement", getPaymentRequirement);
 router.post("/submit", submitPayment);
 router.post("/verify", verifyPayment);
 router.get("/settlement-plan", getSettlementPlan);
+router.post("/settle", requireRole(UserRole.ADMIN), executeSettlement);
 
 // Reconciliation exposes sensitive league financial reports and is restricted
 // to ADMIN / MODERATOR roles via RBAC.
