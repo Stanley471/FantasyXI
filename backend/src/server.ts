@@ -3,10 +3,14 @@ import cors from "cors";
 import dotenv from "dotenv";
 import apiV1Router from "./routes/index.js";
 import { startJobQueue, stopJobQueue, getQueueHealth } from "./queues/jobQueue.js";
+import { apiRateLimiter } from "./middleware/rateLimiter.js";
 
 dotenv.config();
 
 const app = express();
+
+// Trust reverse proxies (Cloudflare, Nginx, ALB) for accurate client IP rate limiting
+app.set("trust proxy", 1);
 
 // ============================================================
 // Middleware
@@ -19,6 +23,7 @@ app.use(
   })
 );
 app.use(express.json());
+app.use(apiRateLimiter);
 
 // ============================================================
 // Routes

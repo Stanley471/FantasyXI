@@ -11,7 +11,8 @@
     "db:generate": "npx prisma generate",
     "db:studio": "npx prisma studio",
     "db:push": "npx prisma db push",
-    "test": "tsx --test src/tests/authMiddleware.test.ts src/tests/authService.test.ts src/tests/authorization.test.ts src/tests/chipsEngine.test.ts src/tests/financialEndpoints.test.ts src/tests/financialService.test.ts src/tests/fplNormalizer.test.ts src/tests/googleAuth.test.ts src/tests/h2hLeague.test.ts src/tests/jobQueue.test.ts src/tests/leagueRefunds.test.ts src/tests/leagueService.test.ts src/tests/prizeService.test.ts src/tests/scoringService.test.ts src/tests/squadValidator.test.ts src/tests/stellarService.test.ts",
+    "db:validate-migration": "tsx src/scripts/validateMigration.ts",
+    "test": "tsx --test src/tests/authMiddleware.test.ts src/tests/authService.test.ts src/tests/authorization.test.ts src/tests/chipsEngine.test.ts src/tests/eventIndexer.test.ts src/tests/financialEndpoints.test.ts src/tests/financialService.test.ts src/tests/fplNormalizer.test.ts src/tests/fplTrackingDaemon.test.ts src/tests/googleAuth.test.ts src/tests/h2hLeague.test.ts src/tests/jobQueue.test.ts src/tests/leagueRefunds.test.ts src/tests/leagueService.test.ts src/tests/liveTimelineService.test.ts src/tests/ownershipStats.test.ts src/tests/prizeService.test.ts src/tests/rateLimiter.test.ts src/tests/referralService.test.ts src/tests/scoringService.test.ts src/tests/squadValidator.test.ts src/tests/stellarService.test.ts src/tests/zeroDowntimeMigration.test.ts",
     "test:testnet": "tsx --test src/tests/testnetEndToEnd.test.ts"
   },
   "keywords": [],
@@ -19,12 +20,14 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "^7.10.0",
     "@stellar/stellar-sdk": "^17.0.1",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "express-rate-limit": "^8.7.0",
     "google-auth-library": "^11.0.2",
     "jsonwebtoken": "^9.0.3",
     "pg-boss": "^10.4.2"

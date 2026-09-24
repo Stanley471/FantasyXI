@@ -18,6 +18,12 @@ export const metadata: Metadata = {
   title: "FantasyXI — Premier League Fantasy & Staking Competitions",
   description:
     "Competitive fantasy Premier League platform with non-custodial USDC prize pools, tactical squad pitch management, and live gameweek scoring.",
+  manifest: "/manifest.json",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "default",
+    title: "FantasyXI",
+  },
 };
 
 export default function RootLayout({

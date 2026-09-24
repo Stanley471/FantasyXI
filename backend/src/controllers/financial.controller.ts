@@ -278,3 +278,30 @@ export async function reconcileLeague(
     next(error);
   }
 }
+
+import { ReferralService } from "../services/auth/referralService.js";
+
+export async function getAffiliateDashboard(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user || !req.user.id) {
+      res.status(401).json({
+        success: false,
+        message: "Authentication required",
+      });
+      return;
+    }
+
+    const data = await ReferralService.getAffiliateDashboard(req.user.id);
+    res.json({
+      success: true,
+      data,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+

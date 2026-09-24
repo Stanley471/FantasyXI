@@ -32,9 +32,75 @@ function depositEvent(txHash: string, ledger = 500, address = participant) {
   } as any;
 }
 
+function settleEvent(txHash: string, ledger = 600, totalPayout = 100_000_000n, platformFee = 5_000_000n) {
+  return {
+    id: `${ledger}-1`,
+    type: "contract",
+    ledger,
+    ledgerClosedAt: "2026-09-20T14:00:00Z",
+    transactionIndex: 1,
+    operationIndex: 0,
+    inSuccessfulContractCall: true,
+    txHash,
+    topic: [
+      xdr.ScVal.scvSymbol("settle"),
+      nativeToScVal(toContractLeagueId(LEAGUE_ID), { type: "u64" }),
+    ],
+    value: nativeToScVal([
+      nativeToScVal(totalPayout, { type: "i128" }),
+      nativeToScVal(platformFee, { type: "i128" }),
+    ]),
+  } as any;
+}
+
+function refundEvent(txHash: string, ledger = 650, count = 1) {
+  return {
+    id: `${ledger}-1`,
+    type: "contract",
+    ledger,
+    ledgerClosedAt: "2026-09-20T15:00:00Z",
+    transactionIndex: 1,
+    operationIndex: 0,
+    inSuccessfulContractCall: true,
+    txHash,
+    topic: [
+      xdr.ScVal.scvSymbol("refund"),
+      nativeToScVal(toContractLeagueId(LEAGUE_ID), { type: "u64" }),
+    ],
+    value: nativeToScVal(count, { type: "u32" }),
+  } as any;
+}
+
+function claimedEvent(txHash: string, ledger = 700, address = participant, amount = 95_000_000n) {
+  return {
+    id: `${ledger}-1`,
+    type: "contract",
+    ledger,
+    ledgerClosedAt: "2026-09-20T16:00:00Z",
+    transactionIndex: 1,
+    operationIndex: 0,
+    inSuccessfulContractCall: true,
+    txHash,
+    topic: [
+      xdr.ScVal.scvSymbol("claimed"),
+      nativeToScVal(toContractLeagueId(LEAGUE_ID), { type: "u64" }),
+    ],
+    value: nativeToScVal([
+      nativeToScVal(address, { type: "address" }),
+      nativeToScVal(amount, { type: "i128" }),
+    ]),
+  } as any;
+}
+
 function createMockDb(memberOverrides: any = {}) {
   const state = {
     cursor: null as any,
+    league: {
+      id: LEAGUE_ID,
+      creatorId: "creator_1",
+      entryFee: 10,
+      status: "ACTIVE",
+    },
     member: {
       id: "member_1",
       userId: "user_1",
@@ -46,6 +112,7 @@ function createMockDb(memberOverrides: any = {}) {
       ...memberOverrides,
     },
     transactions: new Map<string, any>(),
+    contractEvents: [] as any[],
   };
   const db: any = {
     state,
@@ -54,10 +121,14 @@ function createMockDb(memberOverrides: any = {}) {
       upsert: async ({ create, update }: any) => {
         state.cursor = state.cursor ? { ...state.cursor, ...update } : create;
       },
+      deleteMany: async () => {
+        state.cursor = null;
+      },
     },
     league: {
       findFirst: async ({ where }: any) =>
-        LEAGUE_ID.startsWith(where.id.startsWith) ? { id: LEAGUE_ID } : null,
+        LEAGUE_ID.startsWith(where.id.startsWith) ? state.league : null,
+      update: async ({ data }: any) => Object.assign(state.league, data),
     },
     leagueMember: {
       findFirst: async ({ where }: any) => {
@@ -65,10 +136,11 @@ function createMockDb(memberOverrides: any = {}) {
         const m = state.member;
         return where.leagueId === m.leagueId &&
           (byMember.stellarAddress === m.stellarAddress ||
-            byWallet.user.wallet.stellarAddress === m.walletAddress)
+            byWallet.user?.wallet?.stellarAddress === m.walletAddress)
           ? m
           : null;
       },
+      findMany: async () => [state.member],
       update: async ({ data }: any) => Object.assign(state.member, data),
     },
     transaction: {
@@ -76,6 +148,14 @@ function createMockDb(memberOverrides: any = {}) {
         const existing = state.transactions.get(where.stellarTxHash);
         state.transactions.set(where.stellarTxHash, existing ? { ...existing, ...update } : create);
       },
+    },
+    contractEvent: {
+      create: async ({ data }: any) => {
+        state.contractEvents.push(data);
+        return data;
+      },
+      findMany: async ({ where }: any) =>
+        state.contractEvents.filter((e) => !where?.eventType || e.eventType === where.eventType),
     },
     $transaction: async (ops: any[]) => Promise.all(ops),
   };
@@ -178,4 +258,83 @@ describe("Soroban Escrow Event Indexer", () => {
     const delays = [1, 2, 3, 4, 8].map((n) => EscrowEventIndexer.backoffDelay(n, 1000, 10_000));
     assert.deepEqual(delays, [1000, 2000, 4000, 8000, 10_000]);
   });
+
+  it("handles settle events, completing the league and recording platform fees", async () => {
+    const db = createMockDb();
+    const event = settleEvent("s".repeat(64), 600, 100_000_000n, 5_000_000n);
+    const indexer = new EscrowEventIndexer({ db, stellar: createMockStellar([]) });
+
+    const processed = await indexer.handleEvent(event);
+    assert.equal(processed, true);
+    assert.equal(db.state.league.status, "COMPLETED");
+    const feeTx = db.state.transactions.get(`${"s".repeat(64)}-fee`);
+    assert.ok(feeTx);
+    assert.equal(feeTx.type, "PLATFORM_FEE");
+    assert.equal(feeTx.amount, 0.5);
+  });
+
+  it("handles refund events, cancelling the league and refunding members", async () => {
+    const db = createMockDb({
+      paymentStatus: PaymentStatus.PAYMENT_CONFIRMED,
+      status: MembershipStatus.ACTIVE,
+    });
+    const event = refundEvent("r".repeat(64), 650, 1);
+    const indexer = new EscrowEventIndexer({ db, stellar: createMockStellar([]) });
+
+    const processed = await indexer.handleEvent(event);
+    assert.equal(processed, true);
+    assert.equal(db.state.league.status, "CANCELLED");
+    assert.equal(db.state.member.paymentStatus, PaymentStatus.REFUNDED);
+    assert.equal(db.state.member.status, MembershipStatus.REFUNDED);
+    const refundTx = db.state.transactions.get(`${"r".repeat(64)}-${db.state.member.id}`);
+    assert.ok(refundTx);
+    assert.equal(refundTx.type, "REFUND");
+  });
+
+  it("handles claimed events, recording winner prize payouts", async () => {
+    const db = createMockDb({
+      stellarAddress: participant,
+      paymentStatus: PaymentStatus.PAYMENT_CONFIRMED,
+      status: MembershipStatus.ACTIVE,
+    });
+    const event = claimedEvent("w".repeat(64), 700, participant, 95_000_000n);
+    const indexer = new EscrowEventIndexer({ db, stellar: createMockStellar([]) });
+
+    const processed = await indexer.handleEvent(event);
+    assert.equal(processed, true);
+    const prizeTx = db.state.transactions.get(`${"w".repeat(64)}-${participant}`);
+    assert.ok(prizeTx);
+    assert.equal(prizeTx.type, "PRIZE_PAYOUT");
+    assert.equal(prizeTx.amount, 9.5);
+  });
+
+  it("persists ContractEvent records and supports event indexing queries", async () => {
+    const db = createMockDb();
+    const event = depositEvent("p".repeat(64), 550);
+    const indexer = new EscrowEventIndexer({ db, stellar: createMockStellar([]) });
+
+    await indexer.handleEvent(event);
+    assert.equal(db.state.contractEvents.length, 1);
+    assert.equal(db.state.contractEvents[0].eventType, "deposit");
+    assert.equal(db.state.contractEvents[0].txHash, "p".repeat(64));
+
+    const events = await indexer.getIndexedEvents({ leagueId: LEAGUE_ID, eventType: "deposit" });
+    assert.equal(events.length, 1);
+  });
+
+  it("supports resetCursor for replay recovery", async () => {
+    const db = createMockDb();
+    const indexer = new EscrowEventIndexer({ db, stellar: createMockStellar([]) });
+
+    await indexer.resetCursor(500);
+    assert.deepEqual(db.state.cursor, {
+      id: INDEXER_CURSOR_ID,
+      lastLedger: 499,
+      cursor: null,
+    });
+
+    await indexer.resetCursor();
+    assert.equal(db.state.cursor, null);
+  });
 });
+

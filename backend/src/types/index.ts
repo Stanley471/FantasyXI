@@ -114,6 +114,7 @@ export interface RegisterInput {
   password: string;
   name?: string;
   username?: string;
+  referralCode?: string;
 }
 
 /** Backwards-compatible alias */

@@ -1,0 +1,45 @@
+name: Zero-Downtime Database Migration Pipeline
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main, dev ]
+
+jobs:
+  validate-migrations:
+    name: Validate Expand/Contract Migration Backward-Compatibility
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: 'backend/package-lock.json'
+
+      - name: Install dependencies
+        run: |
+          cd backend
+          npm ci
+
+      - name: Generate Prisma Client
+        env:
+          DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/fantasyxi?schema=public"
+        run: |
+          cd backend
+          npx prisma generate
+
+      - name: Run Migration Safety & Compatibility Validator
+        run: |
+          cd backend
+          npm run db:validate-migration
+
+      - name: Run Backend Tests
+        run: |
+          cd backend
+          npm test

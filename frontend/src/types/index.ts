@@ -350,3 +350,68 @@ export const SQUAD_RULES = {
   MAX_PER_TEAM: 3,
   STARTING_BUDGET: 100.0,
 } as const;
+
+// ============================================================
+// Live Match Event Timeline Types
+// ============================================================
+
+export type MatchEventType =
+  | "GOAL"
+  | "ASSIST"
+  | "YELLOW_CARD"
+  | "RED_CARD"
+  | "SAVE"
+  | "BONUS"
+  | "PENALTY_SAVED"
+  | "OWN_GOAL";
+
+export interface TimelineEvent {
+  id: string;
+  fixtureId: number;
+  fixtureName: string;
+  gameweekId: number;
+  playerId: number;
+  fplId: number;
+  playerName: string;
+  teamShortName: string;
+  teamId: number;
+  type: MatchEventType;
+  minute: number;
+  detail: string;
+  pointsAwarded: number;
+  timestamp: string;
+}
+
+export interface FixtureTimelineSummary {
+  id: number;
+  homeTeam: string;
+  awayTeam: string;
+  homeScore: number | null;
+  awayScore: number | null;
+  minutes: number;
+  started: boolean;
+  finished: boolean;
+  kickoffTime: string | null;
+  events: TimelineEvent[];
+}
+
+export interface GameweekTimeline {
+  gameweek: {
+    id: number;
+    name: string;
+    isCurrent: boolean;
+    isFinished: boolean;
+  } | null;
+  fixtures: FixtureTimelineSummary[];
+  events: TimelineEvent[];
+  summary: {
+    totalGoals: number;
+    totalAssists: number;
+    totalYellowCards: number;
+    totalRedCards: number;
+    totalSaves: number;
+    totalBonus: number;
+  };
+  generatedAt: string;
+}
+

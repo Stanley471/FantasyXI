@@ -282,6 +282,29 @@ impl FantasyXIEscrow {
         if Self::is_paused(&env) {
             return Err(EscrowError::ContractPaused);
         }
+        Self::settle_with_affiliate(
+            env,
+            admin,
+            league_id,
+            winners,
+            platform_treasury,
+            platform_fee,
+            None,
+            0,
+        )
+    }
+
+    /// Admin settles the league with optional affiliate payout split from platform fee.
+    pub fn settle_with_affiliate(
+        env: Env,
+        admin: Address,
+        league_id: u64,
+        winners: Vec<WinnerPayout>,
+        platform_treasury: Address,
+        platform_fee: i128,
+        affiliate_address: Option<Address>,
+        affiliate_cut: i128,
+    ) -> Result<(), EscrowError> {
         admin.require_auth();
 
         let stored_admin: Address = env
@@ -315,6 +338,10 @@ impl FantasyXIEscrow {
         let max_fee = (league.total_deposited * 500) / 10000;
         if platform_fee > max_fee {
             return Err(EscrowError::FeeExceedsMaxCap);
+        }
+
+        if affiliate_cut < 0 || affiliate_cut > platform_fee {
+            return Err(EscrowError::InvalidAmount);
         }
 
         // Calculate expected distributions based on prize curve rules
@@ -375,13 +402,28 @@ impl FantasyXIEscrow {
 
         let token_client = token::Client::new(&env, &league.asset);
 
-        // 1. Transfer platform fee
-        if platform_fee > 0 {
+        // 1. Transfer net platform fee and affiliate cut
+        let net_platform_fee = platform_fee - affiliate_cut;
+        if net_platform_fee > 0 {
             token_client.transfer(
                 &env.current_contract_address(),
                 &platform_treasury,
-                &platform_fee,
+                &net_platform_fee,
             );
+        }
+
+        if let Some(affiliate) = affiliate_address {
+            if affiliate_cut > 0 {
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &affiliate,
+                    &affiliate_cut,
+                );
+                env.events().publish(
+                    (symbol_short!("affiliate"), league_id),
+                    (affiliate, affiliate_cut),
+                );
+            }
         }
 
         // 2. Write winner prizes to claimable storage
@@ -1138,6 +1180,41 @@ mod test {
         );
         client.unpause(&admin);
         assert_eq!(client.try_unpause(&admin), Err(Ok(EscrowError::NotPaused)));
+    fn test_settle_with_affiliate_payout() {
+        let (env, admin, token_addr, client) = setup_test();
+        let token_admin_client = token::StellarAssetClient::new(&env, &token_addr);
+
+        let u1 = Address::generate(&env);
+        let u2 = Address::generate(&env);
+        let referrer = Address::generate(&env);
+        let treasury = Address::generate(&env);
+
+        token_admin_client.mint(&u1, &50_000_000);
+        token_admin_client.mint(&u2, &50_000_000);
+
+        client.create_league(&admin, &900, &50_000_000, &token_addr);
+        client.deposit(&u1, &900);
+        client.deposit(&u2, &900);
+
+        let winners = vec![
+            &env,
+            WinnerPayout { winner: u1.clone(), amount: 66_500_000 },
+            WinnerPayout { winner: u2.clone(), amount: 28_500_000 },
+        ];
+
+        client.settle_with_affiliate(
+            &admin,
+            &900,
+            &winners,
+            &treasury,
+            &5_000_000,
+            &Some(referrer.clone()),
+            &1_000_000,
+        );
+
+        let token_client = token::Client::new(&env, &token_addr);
+        assert_eq!(token_client.balance(&treasury), 4_000_000);
+        assert_eq!(token_client.balance(&referrer), 1_000_000);
     }
 
     fn release_wasm() -> &'static [u8] {
@@ -1215,3 +1292,4 @@ mod test {
         assert_eq!(league.participant_count, 0);
     }
 }
+

@@ -54,7 +54,7 @@ describe("Transfer Market Economics", () => {
         [2, { minutes: 90, totalPoints: 5 }],
       ]);
 
-      const result = ScoringService.calculateLineupScore(lineup, stats, 8);
+      const result = ScoringService.calculateLineupScore(lineup, stats, { transferCost: 8 });
       assert.equal(result.startingPoints, 16);
       assert.equal(result.transferCost, 8);
       assert.equal(result.totalPoints, 8);

@@ -7,6 +7,7 @@ import fixtureRoutes from "./fixture.routes.js";
 import squadRoutes from "./squad.routes.js";
 import leagueRoutes from "./league.routes.js";
 import authRoutes from "./auth.routes.js";
+import liveRoutes from "./live.routes.js";
 
 /**
  * Main API v1 router.
@@ -23,5 +24,6 @@ apiV1Router.use("/gameweeks", gameweekRoutes);
 apiV1Router.use("/fixtures", fixtureRoutes);
 apiV1Router.use("/squads", squadRoutes);
 apiV1Router.use("/leagues", leagueRoutes);
+apiV1Router.use("/live", liveRoutes);
 
 export default apiV1Router;

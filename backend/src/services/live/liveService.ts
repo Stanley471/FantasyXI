@@ -163,7 +163,7 @@ export class LiveService {
           positionOrder: sp.positionOrder,
         })),
         statsMap,
-        hitsBySquad.get(m.squadId) ?? 0
+        { transferCost: hitsBySquad.get(m.squadId) ?? 0 }
       );
       const byId = new Map<number, any>(squadPlayers.map((sp: any) => [sp.playerId, sp.player]));
       const livePoints = inWindow ? live.totalPoints : 0;

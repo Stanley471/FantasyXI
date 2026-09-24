@@ -11,6 +11,7 @@ import {
   IconChevronRight,
   IconCheck,
 } from "@/components/ui/Icons";
+import { LiveMatchEventsTimeline } from "@/components/live/LiveMatchEventsTimeline";
 
 export default function FixturesPage() {
   const [gameweeks, setGameweeks] = useState<Gameweek[]>([]);
@@ -260,6 +261,12 @@ export default function FixturesPage() {
           No matches scheduled for {selectedGw ? selectedGw.name : "this gameweek"}.
         </div>
       )}
+
+      {/* Live Match Events Timeline */}
+      <LiveMatchEventsTimeline
+        gameweekId={selectedGwId ?? 1}
+        className="mt-8"
+      />
     </div>
   );
 }

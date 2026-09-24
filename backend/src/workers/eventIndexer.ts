@@ -127,89 +127,331 @@ export class EscrowEventIndexer {
   }
 
   /**
-   * Applies a single escrow event. Returns true when a deposit was reconciled.
+   * Applies a single escrow event. Returns true when an event was processed.
    */
   public async handleEvent(event: rpc.Api.EventResponse): Promise<boolean> {
     const name = String(scValToNative(event.topic[0]));
     const contractLeagueId = BigInt(scValToNative(event.topic[1]));
 
-    if (name !== "deposit") {
-      console.log(`[indexer] ${name} event for league ${contractLeagueId} at ledger ${event.ledger}`);
-      return false;
-    }
     if (!event.inSuccessfulContractCall) {
       return false;
     }
 
-    const [participant, amountStroops] = scValToNative(event.value) as [string, bigint];
-
     const league = await this.db.league.findFirst({
       where: { id: { startsWith: leagueIdPrefixFromContractId(contractLeagueId) } },
     });
-    if (!league) {
-      console.warn(`[indexer] Deposit for unknown league ${contractLeagueId} (tx ${event.txHash})`);
-      return false;
-    }
 
-    const member = await this.db.leagueMember.findFirst({
-      where: {
-        leagueId: league.id,
-        OR: [
-          { stellarAddress: participant },
-          { user: { wallet: { stellarAddress: participant } } },
-        ],
-      },
-    });
-    if (!member) {
-      console.warn(`[indexer] No member of league ${league.id} for ${participant} (tx ${event.txHash})`);
-      return false;
-    }
+    // Persist ContractEvent for audit trail and replay recovery
+    if (this.db.contractEvent) {
+      try {
+        let serializedValue: unknown;
+        try {
+          const raw = scValToNative(event.value);
+          if (typeof raw === "bigint") {
+            serializedValue = raw.toString();
+          } else if (Array.isArray(raw)) {
+            serializedValue = raw.map((v) => (typeof v === "bigint" ? v.toString() : v));
+          } else {
+            serializedValue = raw;
+          }
+        } catch {
+          serializedValue = null;
+        }
 
-    // A replayed deposit must never undo a refund
-    if (
-      member.paymentStatus === PaymentStatus.REFUND_PENDING ||
-      member.paymentStatus === PaymentStatus.REFUNDED
-    ) {
-      return false;
+        await this.db.contractEvent.create({
+          data: {
+            contractId:
+              (event as { contractId?: string }).contractId ??
+              process.env.STELLAR_ESCROW_CONTRACT_ID ??
+              stellarConfig.escrowContractId,
+            eventType: name,
+            leagueId: league?.id ?? null,
+            txHash: event.txHash,
+            ledgerSeq: event.ledger,
+            payload: {
+              contractLeagueId: contractLeagueId.toString(),
+              value: serializedValue,
+              closedAt: event.ledgerClosedAt,
+            },
+          },
+        });
+      } catch (err) {
+        console.warn(`[indexer] Failed to record ContractEvent:`, (err as Error).message);
+      }
     }
 
     const confirmedAt = new Date(event.ledgerClosedAt);
-    await this.db.$transaction([
-      this.db.leagueMember.update({
-        where: { id: member.id },
-        data: {
-          paymentStatus: PaymentStatus.PAYMENT_CONFIRMED,
-          status: MembershipStatus.ACTIVE,
-          hasPaid: true,
-          stellarAddress: participant,
-        },
-      }),
-      this.db.transaction.upsert({
-        where: { stellarTxHash: event.txHash },
-        update: {
-          status: TransactionStatus.CONFIRMED,
-          ledgerSeq: event.ledger,
-          confirmedAt,
-          memberId: member.id,
-        },
-        create: {
-          userId: member.userId,
-          leagueId: league.id,
-          memberId: member.id,
-          type: TransactionType.ENTRY_FEE,
-          amount: Number(amountStroops) / 10_000_000,
-          asset: stellarConfig.usdcAssetCode,
-          assetIssuer: stellarConfig.usdcIssuer,
-          stellarTxHash: event.txHash,
-          ledgerSeq: event.ledger,
-          status: TransactionStatus.CONFIRMED,
-          confirmedAt,
-        },
-      }),
-    ]);
 
-    console.log(`[indexer] Confirmed deposit of member ${member.id} in league ${league.id} (tx ${event.txHash})`);
-    return true;
+    switch (name) {
+      case "deposit": {
+        const [participant, amountStroops] = scValToNative(event.value) as [string, bigint];
+
+        if (!league) {
+          console.warn(`[indexer] Deposit for unknown league ${contractLeagueId} (tx ${event.txHash})`);
+          return false;
+        }
+
+        const member = await this.db.leagueMember.findFirst({
+          where: {
+            leagueId: league.id,
+            OR: [
+              { stellarAddress: participant },
+              { user: { wallet: { stellarAddress: participant } } },
+            ],
+          },
+        });
+        if (!member) {
+          console.warn(
+            `[indexer] No member of league ${league.id} for ${participant} (tx ${event.txHash})`
+          );
+          return false;
+        }
+
+        // A replayed deposit must never undo a refund
+        if (
+          member.paymentStatus === PaymentStatus.REFUND_PENDING ||
+          member.paymentStatus === PaymentStatus.REFUNDED
+        ) {
+          return false;
+        }
+
+        await this.db.$transaction([
+          this.db.leagueMember.update({
+            where: { id: member.id },
+            data: {
+              paymentStatus: PaymentStatus.PAYMENT_CONFIRMED,
+              status: MembershipStatus.ACTIVE,
+              hasPaid: true,
+              stellarAddress: participant,
+            },
+          }),
+          this.db.transaction.upsert({
+            where: { stellarTxHash: event.txHash },
+            update: {
+              status: TransactionStatus.CONFIRMED,
+              ledgerSeq: event.ledger,
+              confirmedAt,
+              memberId: member.id,
+            },
+            create: {
+              userId: member.userId,
+              leagueId: league.id,
+              memberId: member.id,
+              type: TransactionType.ENTRY_FEE,
+              amount: Number(amountStroops) / 10_000_000,
+              asset: stellarConfig.usdcAssetCode,
+              assetIssuer: stellarConfig.usdcIssuer,
+              stellarTxHash: event.txHash,
+              ledgerSeq: event.ledger,
+              status: TransactionStatus.CONFIRMED,
+              confirmedAt,
+            },
+          }),
+        ]);
+
+        console.log(
+          `[indexer] Confirmed deposit of member ${member.id} in league ${league.id} (tx ${event.txHash})`
+        );
+        return true;
+      }
+
+      case "settle": {
+        const [totalPayoutStroops, platformFeeStroops] = scValToNative(event.value) as [bigint, bigint];
+        console.log(
+          `[indexer] Settle event for league ${contractLeagueId} (payout: ${totalPayoutStroops}, fee: ${platformFeeStroops})`
+        );
+
+        if (!league) {
+          console.warn(`[indexer] Settle for unknown league ${contractLeagueId} (tx ${event.txHash})`);
+          return false;
+        }
+
+        const updates: Promise<unknown>[] = [
+          this.db.league.update({
+            where: { id: league.id },
+            data: { status: "COMPLETED" },
+          }),
+        ];
+
+        if (platformFeeStroops > 0n && league.creatorId) {
+          updates.push(
+            this.db.transaction.upsert({
+              where: { stellarTxHash: `${event.txHash}-fee` },
+              update: {
+                status: TransactionStatus.CONFIRMED,
+                ledgerSeq: event.ledger,
+                confirmedAt,
+              },
+              create: {
+                userId: league.creatorId,
+                leagueId: league.id,
+                type: TransactionType.PLATFORM_FEE,
+                amount: Number(platformFeeStroops) / 10_000_000,
+                asset: stellarConfig.usdcAssetCode,
+                assetIssuer: stellarConfig.usdcIssuer,
+                stellarTxHash: `${event.txHash}-fee`,
+                ledgerSeq: event.ledger,
+                status: TransactionStatus.CONFIRMED,
+                confirmedAt,
+              },
+            })
+          );
+        }
+
+        await this.db.$transaction(updates);
+        return true;
+      }
+
+      case "refund": {
+        const count = Number(scValToNative(event.value));
+        console.log(`[indexer] Refund event for league ${contractLeagueId} (${count} participants)`);
+
+        if (!league) {
+          console.warn(`[indexer] Refund for unknown league ${contractLeagueId} (tx ${event.txHash})`);
+          return false;
+        }
+
+        const membersToRefund = await this.db.leagueMember.findMany({
+          where: {
+            leagueId: league.id,
+            paymentStatus: { in: [PaymentStatus.PAYMENT_CONFIRMED, PaymentStatus.REFUND_PENDING] },
+          },
+        });
+
+        const txOps: Promise<unknown>[] = [
+          this.db.league.update({
+            where: { id: league.id },
+            data: { status: "CANCELLED" },
+          }),
+        ];
+
+        for (const m of membersToRefund) {
+          txOps.push(
+            this.db.leagueMember.update({
+              where: { id: m.id },
+              data: {
+                paymentStatus: PaymentStatus.REFUNDED,
+                status: MembershipStatus.REFUNDED,
+              },
+            })
+          );
+          txOps.push(
+            this.db.transaction.upsert({
+              where: { stellarTxHash: `${event.txHash}-${m.id}` },
+              update: {
+                status: TransactionStatus.CONFIRMED,
+                ledgerSeq: event.ledger,
+                confirmedAt,
+              },
+              create: {
+                userId: m.userId,
+                leagueId: league.id,
+                memberId: m.id,
+                type: TransactionType.REFUND,
+                amount: Number(league.entryFee ?? 0),
+                asset: stellarConfig.usdcAssetCode,
+                assetIssuer: stellarConfig.usdcIssuer,
+                stellarTxHash: `${event.txHash}-${m.id}`,
+                ledgerSeq: event.ledger,
+                status: TransactionStatus.CONFIRMED,
+                confirmedAt,
+              },
+            })
+          );
+        }
+
+        await this.db.$transaction(txOps);
+        return true;
+      }
+
+      case "claimed": {
+        const [winner, amountStroops] = scValToNative(event.value) as [string, bigint];
+        console.log(
+          `[indexer] Claimed prize for league ${contractLeagueId} by ${winner} (amount: ${amountStroops})`
+        );
+
+        if (!league) {
+          return false;
+        }
+
+        const member = await this.db.leagueMember.findFirst({
+          where: {
+            leagueId: league.id,
+            OR: [
+              { stellarAddress: winner },
+              { user: { wallet: { stellarAddress: winner } } },
+            ],
+          },
+        });
+
+        if (member) {
+          await this.db.transaction.upsert({
+            where: { stellarTxHash: `${event.txHash}-${winner}` },
+            update: {
+              status: TransactionStatus.CONFIRMED,
+              ledgerSeq: event.ledger,
+              confirmedAt,
+              memberId: member.id,
+            },
+            create: {
+              userId: member.userId,
+              leagueId: league.id,
+              memberId: member.id,
+              type: TransactionType.PRIZE_PAYOUT,
+              amount: Number(amountStroops) / 10_000_000,
+              asset: stellarConfig.usdcAssetCode,
+              assetIssuer: stellarConfig.usdcIssuer,
+              stellarTxHash: `${event.txHash}-${winner}`,
+              ledgerSeq: event.ledger,
+              status: TransactionStatus.CONFIRMED,
+              confirmedAt,
+            },
+          });
+        }
+        return true;
+      }
+
+      case "created": {
+        console.log(`[indexer] League created on-chain: ${contractLeagueId} (tx ${event.txHash})`);
+        return true;
+      }
+
+      default:
+        console.log(`[indexer] Unhandled event ${name} for league ${contractLeagueId}`);
+        return false;
+    }
+  }
+
+  /**
+   * Resets the indexer cursor to replay events from a specific ledger or from the beginning.
+   */
+  public async resetCursor(startLedger?: number): Promise<void> {
+    if (startLedger !== undefined) {
+      await this.db.indexerCursor.upsert({
+        where: { id: INDEXER_CURSOR_ID },
+        create: { id: INDEXER_CURSOR_ID, lastLedger: startLedger - 1, cursor: null },
+        update: { lastLedger: startLedger - 1, cursor: null },
+      });
+    } else {
+      await this.db.indexerCursor.deleteMany({
+        where: { id: INDEXER_CURSOR_ID },
+      });
+    }
+  }
+
+  /**
+   * Retrieves stored contract events for a league or event type.
+   */
+  public async getIndexedEvents(query: { leagueId?: string; eventType?: string; limit?: number } = {}) {
+    if (!this.db.contractEvent) return [];
+    return this.db.contractEvent.findMany({
+      where: {
+        ...(query.leagueId ? { leagueId: query.leagueId } : {}),
+        ...(query.eventType ? { eventType: query.eventType } : {}),
+      },
+      orderBy: { ledgerSeq: "desc" },
+      take: query.limit ?? 50,
+    });
   }
 
   public start(): void {

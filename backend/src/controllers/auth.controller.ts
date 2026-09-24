@@ -6,6 +6,7 @@ import {
   AuthUnauthorizedError,
   AuthNotFoundError,
 } from "../services/auth/authService.js";
+import { ReferralService } from "../services/auth/referralService.js";
 
 /**
  * Authentication Controller.
@@ -222,4 +223,28 @@ export async function handleGoogleCallback(
     next(error);
   }
 }
+
+export async function getUserReferralCode(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      res.status(401).json({ success: false, message: "Authentication required" });
+      return;
+    }
+
+    const data = await ReferralService.getOrCreateReferralCode(userId);
+    res.json({
+      success: true,
+      data,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+
 

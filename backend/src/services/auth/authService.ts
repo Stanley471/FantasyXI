@@ -189,6 +189,23 @@ export class AuthService {
       },
     });
 
+    if (input.referralCode) {
+      try {
+        const referrer = await this.db.user.findUnique({
+          where: { referralCode: input.referralCode.trim() },
+          select: { id: true },
+        });
+        if (referrer && referrer.id !== user.id) {
+          await this.db.user.update({
+            where: { id: user.id },
+            data: { referrerId: referrer.id },
+          });
+        }
+      } catch (err) {
+        console.warn("[AuthService] Failed to attribute referral code:", err);
+      }
+    }
+
     const safeUser = toSafeUser(user);
     const token = signAccessToken({
       userId: user.id,

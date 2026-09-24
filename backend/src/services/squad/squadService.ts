@@ -3,6 +3,8 @@ import {
   ChipType,
   CreateSquadInput,
   UpdateSquadInput,
+  SQUAD_RULES,
+  Position,
 } from "../../types/index.js";
 import {
   SquadValidator,

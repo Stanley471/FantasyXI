@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Sidebar } from "./Sidebar";
 import { MobileNav } from "./MobileNav";
 import { GameweekBanner } from "./GameweekBanner";
+import { OfflineIndicator } from "./OfflineIndicator";
 import { FootballIcon } from "@/components/ui/Icons";
 
 export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -15,6 +16,9 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0 pb-20 md:pb-8">
+        {/* Offline Indicator Banner */}
+        <OfflineIndicator />
+
         {/* Top Header Bar */}
         <header className="sticky top-0 z-30 flex items-center justify-between px-4 sm:px-8 py-3 bg-slate-950/80 backdrop-blur-md border-b border-slate-800/80">
           {/* Mobile Logo */}

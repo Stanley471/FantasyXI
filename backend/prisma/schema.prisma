@@ -103,6 +103,8 @@ model User {
   googleId      String?  @unique @map("google_id")
   countryCode   String?  @map("country_code")
   role          UserRole @default(USER)
+  referrerId    String?  @map("referrer_id")
+  referralCode  String?  @unique @map("referral_code")
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @updatedAt @map("updated_at")
 
@@ -112,6 +114,8 @@ model User {
   createdLeagues League[]       @relation("LeagueCreator")
   memberships   LeagueMember[]
   transactions  Transaction[]
+  referrer      User?          @relation("UserReferrals", fields: [referrerId], references: [id])
+  referrees     User[]         @relation("UserReferrals")
 
   @@map("users")
 }
@@ -132,18 +136,18 @@ model Wallet {
 
 /// A Premier League club. Data synced from the FPL API.
 model Team {
-  id                  Int       @id @default(autoincrement())
-  fplId               Int       @unique @map("fpl_id")
+  id                  Int     @id @default(autoincrement())
+  fplId               Int     @unique @map("fpl_id")
   name                String
-  shortName           String    @map("short_name")
-  logoUrl             String?   @map("logo_url")
+  shortName           String  @map("short_name")
+  logoUrl             String? @map("logo_url")
   strength            Int?
-  strengthOverallHome Int?      @map("strength_overall_home")
-  strengthOverallAway Int?      @map("strength_overall_away")
-  strengthAttackHome  Int?      @map("strength_attack_home")
-  strengthAttackAway  Int?      @map("strength_attack_away")
-  strengthDefenceHome Int?      @map("strength_defence_home")
-  strengthDefenceAway Int?      @map("strength_defence_away")
+  strengthOverallHome Int?    @map("strength_overall_home")
+  strengthOverallAway Int?    @map("strength_overall_away")
+  strengthAttackHome  Int?    @map("strength_attack_home")
+  strengthAttackAway  Int?    @map("strength_attack_away")
+  strengthDefenceHome Int?    @map("strength_defence_home")
+  strengthDefenceAway Int?    @map("strength_defence_away")
 
   // Relations
   players      Player[]
@@ -184,18 +188,20 @@ model Player {
   gameweekStats PlayerGameweekStats[]
   transfersIn   SquadTransfer[]       @relation("TransferIn")
   transfersOut  SquadTransfer[]       @relation("TransferOut")
+  priceChanges  PlayerPriceChange[]
+  statusHistory PlayerStatusHistory[]
 
   @@map("players")
 }
 
 /// A round of Premier League matches (38 per season).
 model Gameweek {
-  id         Int      @id @default(autoincrement())
-  fplId      Int      @unique @map("fpl_id")
+  id         Int       @id @default(autoincrement())
+  fplId      Int       @unique @map("fpl_id")
   name       String
   deadline   DateTime
-  isCurrent  Boolean  @default(false) @map("is_current")
-  isFinished Boolean  @default(false) @map("is_finished")
+  isCurrent  Boolean   @default(false) @map("is_current")
+  isFinished Boolean   @default(false) @map("is_finished")
   isLocked   Boolean   @default(false) @map("is_locked")
   settledAt  DateTime? @map("settled_at")
   season     String
@@ -209,6 +215,7 @@ model Gameweek {
   leaguesEnding   League[]              @relation("LeagueEndGW")
   chipUsages      SquadChipUsage[]
   leagueFixtures  LeagueFixture[]
+  squadTransfers  SquadTransfer[]
 
   @@map("gameweeks")
 }
@@ -261,16 +268,16 @@ model PlayerGameweekStats {
 
 /// A user's fantasy football squad.
 model Squad {
-  id              String   @id @default(uuid())
-  userId          String   @map("user_id")
-  name            String
-  budgetRemaining Decimal  @default(100.0) @map("budget_remaining") @db.Decimal(5, 1)
-  totalPoints     Int      @default(0) @map("total_points")
+  id                      String   @id @default(uuid())
+  userId                  String   @map("user_id")
+  name                    String
+  budgetRemaining         Decimal  @default(100.0) @map("budget_remaining") @db.Decimal(5, 1)
+  totalPoints             Int      @default(0) @map("total_points")
   /// Free transfers left for freeTransfersGameweekId (rolls over +1 per gameweek)
   freeTransfers           Int      @default(1) @map("free_transfers")
   freeTransfersGameweekId Int?     @map("free_transfers_gameweek_id")
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @updatedAt @map("updated_at")
+  createdAt               DateTime @default(now()) @map("created_at")
+  updatedAt               DateTime @updatedAt @map("updated_at")
 
   // Relations
   user           User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -279,6 +286,7 @@ model Squad {
   transfers      SquadTransfer[]
   memberships    LeagueMember[]
   chipUsages     SquadChipUsage[]
+  squadTransfers SquadTransfer[]
 
   @@map("squads")
 }
@@ -286,14 +294,14 @@ model Squad {
 /// A player selected in a squad — the join table between Squad and Player.
 /// Tracks whether the player is starting, captain, bench order, and purchase price.
 model SquadPlayer {
-  id             Int     @id @default(autoincrement())
-  squadId        String  @map("squad_id")
-  playerId       Int     @map("player_id")
-  isCaptain      Boolean @default(false) @map("is_captain")
-  isViceCaptain  Boolean @default(false) @map("is_vice_captain")
-  isStarter      Boolean @default(true) @map("is_starter")
-  positionOrder  Int     @map("position_order")
-  purchasePrice  Decimal @map("purchase_price") @db.Decimal(4, 1)
+  id            Int     @id @default(autoincrement())
+  squadId       String  @map("squad_id")
+  playerId      Int     @map("player_id")
+  isCaptain     Boolean @default(false) @map("is_captain")
+  isViceCaptain Boolean @default(false) @map("is_vice_captain")
+  isStarter     Boolean @default(true) @map("is_starter")
+  positionOrder Int     @map("position_order")
+  purchasePrice Decimal @map("purchase_price") @db.Decimal(4, 1)
 
   // Relations
   squad  Squad  @relation(fields: [squadId], references: [id], onDelete: Cascade)
@@ -323,9 +331,9 @@ model League {
   updatedAt       DateTime     @updatedAt @map("updated_at")
 
   // Relations
-  creator       User           @relation("LeagueCreator", fields: [creatorId], references: [id])
-  startGameweek Gameweek       @relation("LeagueStartGW", fields: [startGameweekId], references: [id])
-  endGameweek   Gameweek       @relation("LeagueEndGW", fields: [endGameweekId], references: [id])
+  creator       User            @relation("LeagueCreator", fields: [creatorId], references: [id])
+  startGameweek Gameweek        @relation("LeagueStartGW", fields: [startGameweekId], references: [id])
+  endGameweek   Gameweek        @relation("LeagueEndGW", fields: [endGameweekId], references: [id])
   members       LeagueMember[]
   transactions  Transaction[]
   fixtures      LeagueFixture[]
@@ -336,9 +344,9 @@ model League {
 /// A user's membership in a league — links user, squad, and league together.
 /// Like a Laravel pivot table: `league_user` with extra columns.
 model LeagueMember {
-  id          String           @id @default(uuid())
-  leagueId    String           @map("league_id")
-  userId      String           @map("user_id")
+  id             String           @id @default(uuid())
+  leagueId       String           @map("league_id")
+  userId         String           @map("user_id")
   squadId        String           @map("squad_id")
   status         MembershipStatus @default(PENDING)
   paymentStatus  PaymentStatus    @default(PENDING) @map("payment_status")
@@ -349,12 +357,12 @@ model LeagueMember {
   totalPoints    Int              @default(0) @map("total_points")
 
   // Head-to-head statistics
-  matchesWon     Int              @default(0) @map("matches_won")
-  matchesDrawn   Int              @default(0) @map("matches_drawn")
-  matchesLost    Int              @default(0) @map("matches_lost")
-  pointsFor      Int              @default(0) @map("points_for")
-  pointsAgainst  Int              @default(0) @map("points_against")
-  h2hPoints      Int              @default(0) @map("h2h_points")
+  matchesWon    Int @default(0) @map("matches_won")
+  matchesDrawn  Int @default(0) @map("matches_drawn")
+  matchesLost   Int @default(0) @map("matches_lost")
+  pointsFor     Int @default(0) @map("points_for")
+  pointsAgainst Int @default(0) @map("points_against")
+  h2hPoints     Int @default(0) @map("h2h_points")
 
   // Relations
   league       League          @relation(fields: [leagueId], references: [id], onDelete: Cascade)
@@ -411,21 +419,21 @@ model SquadTransfer {
 
 /// Records USDC transactions — entry fees, prizes, deposits, withdrawals.
 model Transaction {
-  id             String            @id @default(uuid())
-  userId         String            @map("user_id")
-  leagueId       String?           @map("league_id")
-  memberId       String?           @map("member_id")
-  type           TransactionType
-  amount         Decimal           @db.Decimal(10, 2)
-  asset          String            @default("USDC")
-  assetIssuer    String?           @map("asset_issuer")
-  stellarTxHash  String?           @map("stellar_tx_hash")
-  ledgerSeq      Int?              @map("ledger_seq")
-  memo           String?
-  status         TransactionStatus @default(PENDING)
-  confirmedAt    DateTime?         @map("confirmed_at")
-  errorMessage   String?           @map("error_message")
-  createdAt      DateTime          @default(now()) @map("created_at")
+  id            String            @id @default(uuid())
+  userId        String            @map("user_id")
+  leagueId      String?           @map("league_id")
+  memberId      String?           @map("member_id")
+  type          TransactionType
+  amount        Decimal           @db.Decimal(10, 2)
+  asset         String            @default("USDC")
+  assetIssuer   String?           @map("asset_issuer")
+  stellarTxHash String?           @map("stellar_tx_hash")
+  ledgerSeq     Int?              @map("ledger_seq")
+  memo          String?
+  status        TransactionStatus @default(PENDING)
+  confirmedAt   DateTime?         @map("confirmed_at")
+  errorMessage  String?           @map("error_message")
+  createdAt     DateTime          @default(now()) @map("created_at")
 
   // Relations
   user   User          @relation(fields: [userId], references: [id])
@@ -440,15 +448,15 @@ model Transaction {
 /// A chip played by a squad for a gameweek.
 /// Each chip can be used once per season, and only one chip per gameweek.
 model SquadChipUsage {
-  id              Int       @id @default(autoincrement())
-  squadId         String    @map("squad_id")
-  gameweekId      Int       @map("gameweek_id")
-  chipType        ChipType  @map("chip_type")
-  season          String
-  usedAt          DateTime  @default(now()) @map("used_at")
+  id             Int       @id @default(autoincrement())
+  squadId        String    @map("squad_id")
+  gameweekId     Int       @map("gameweek_id")
+  chipType       ChipType  @map("chip_type")
+  season         String
+  usedAt         DateTime  @default(now()) @map("used_at")
   /// Free Hit only: the squad's lineup before the chip, restored after the gameweek
-  previousLineup  Json?     @map("previous_lineup")
-  revertedAt      DateTime? @map("reverted_at")
+  previousLineup Json?     @map("previous_lineup")
+  revertedAt     DateTime? @map("reverted_at")
 
   // Relations
   squad    Squad    @relation(fields: [squadId], references: [id], onDelete: Cascade)
@@ -479,4 +487,67 @@ model LeagueFixture {
 
   @@unique([leagueId, gameweekId, homeMemberId])
   @@map("league_fixtures")
+}
+
+/// Tracks Soroban RPC event indexer position and pagination cursor
+model IndexerCursor {
+  id         String   @id
+  lastLedger Int      @map("last_ledger")
+  cursor     String?
+  updatedAt  DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@map("indexer_cursors")
+}
+
+/// Stores indexed Soroban escrow contract events for audit, reconciliation, and history
+model ContractEvent {
+  id         String   @id @default(uuid())
+  contractId String?  @map("contract_id")
+  eventType  String   @map("event_type")
+  leagueId   String?  @map("league_id")
+  txHash     String   @map("tx_hash")
+  ledgerSeq  Int      @map("ledger_seq")
+  payload    Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([eventType])
+  @@index([leagueId])
+  @@index([txHash])
+  @@index([ledgerSeq])
+  @@map("contract_events")
+}
+
+/// Tracks player price movements detected by the FPL tracking daemon
+model PlayerPriceChange {
+  id        Int      @id @default(autoincrement())
+  playerId  Int      @map("player_id")
+  fplId     Int      @map("fpl_id")
+  oldPrice  Decimal  @map("old_price") @db.Decimal(4, 1)
+  newPrice  Decimal  @map("new_price") @db.Decimal(4, 1)
+  diff      Decimal  @db.Decimal(4, 1)
+  changedAt DateTime @default(now()) @map("changed_at")
+
+  player Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@index([playerId])
+  @@index([changedAt])
+  @@map("player_price_changes")
+}
+
+/// Tracks player injury and availability status updates detected by the FPL tracking daemon
+model PlayerStatusHistory {
+  id                       Int      @id @default(autoincrement())
+  playerId                 Int      @map("player_id")
+  fplId                    Int      @map("fpl_id")
+  oldStatus                String?  @map("old_status")
+  newStatus                String?  @map("new_status")
+  news                     String?
+  chanceOfPlayingNextRound Int?     @map("chance_of_playing_next_round")
+  changedAt                DateTime @default(now()) @map("changed_at")
+
+  player Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@index([playerId])
+  @@index([changedAt])
+  @@map("player_status_history")
 }

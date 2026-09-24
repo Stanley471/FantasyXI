@@ -16,6 +16,7 @@ import {
   scValToNative,
   rpc,
   xdr,
+  rpc,
 } from "@stellar/stellar-sdk";
 import {
   getHorizonServer,
@@ -50,7 +51,13 @@ export interface ContractReconciliationResult {
 }
 
 /** Escrow contract event names emitted as the first topic (symbol_short!). */
-export const ESCROW_EVENT_TOPICS = ["created", "deposit", "settle", "refund"] as const;
+export const ESCROW_EVENT_TOPICS = [
+  "created",
+  "deposit",
+  "settle",
+  "refund",
+  "claimed",
+] as const;
 
 export class StellarService {
   private server: Horizon.Server;
