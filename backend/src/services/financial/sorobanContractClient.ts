@@ -40,6 +40,24 @@ if (fs.existsSync(envTestnetPath)) {
 /** Well-known empty account used as the source of read-only simulations. */
 const SIMULATION_SOURCE = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 
+import {
+  parseSorobanError,
+  executeWithRetry,
+  executeWithRollback,
+  EscrowContractErrorCode,
+  ESCROW_ERROR_CATALOG,
+  type ParsedSorobanError,
+} from "./sorobanErrorRecovery.js";
+
+export {
+  parseSorobanError,
+  executeWithRetry,
+  executeWithRollback,
+  EscrowContractErrorCode,
+  ESCROW_ERROR_CATALOG,
+  type ParsedSorobanError,
+};
+
 export interface OnChainLeagueState {
   creator: string;
   entry_fee: bigint;
@@ -59,6 +77,8 @@ export interface InvocationResult {
   returnValue?: unknown;
   error?: string;
   contractErrorCode?: number;
+  humanError?: string;
+  isRetryable?: boolean;
 }
 
 export class SorobanContractClient {
@@ -120,11 +140,14 @@ export class SorobanContractClient {
   }
 
   private failure(error: string, txHash?: string): InvocationResult {
+    const parsed = parseSorobanError(error);
     return {
       success: false,
       txHash,
       error,
-      contractErrorCode: SorobanContractClient.parseContractErrorCode(error),
+      contractErrorCode: parsed.errorCode ?? SorobanContractClient.parseContractErrorCode(error),
+      humanError: parsed.humanMessage,
+      isRetryable: parsed.isRetryable,
     };
   }
 
@@ -206,36 +229,50 @@ export class SorobanContractClient {
     method: string,
     args: xdr.ScVal[]
   ): Promise<InvocationResult> {
-    try {
-      const keypair = Keypair.fromSecret(sourceSecret);
+    return executeWithRetry(
+      async () => {
+        try {
+          const keypair = Keypair.fromSecret(sourceSecret);
 
-      let account = await this.server.getAccount(keypair.publicKey());
-      let tx = this.buildInvocation(account, contractId, method, args);
-      let simulation = await this.server.simulateTransaction(tx);
+          let account = await this.server.getAccount(keypair.publicKey());
+          let tx = this.buildInvocation(account, contractId, method, args);
+          let simulation = await this.server.simulateTransaction(tx);
 
-      if (rpc.Api.isSimulationError(simulation)) {
-        return this.failure(`Simulation failed: ${simulation.error}`);
-      }
+          if (rpc.Api.isSimulationError(simulation)) {
+            return this.failure(`Simulation failed: ${simulation.error}`);
+          }
 
-      if (rpc.Api.isSimulationRestore(simulation)) {
-        const restored = await this.restoreFootprint(keypair, simulation.restorePreamble);
-        if (!restored.success) {
-          return this.failure(`Footprint restoration failed: ${restored.error}`, restored.txHash);
+          if (rpc.Api.isSimulationRestore(simulation)) {
+            const restored = await this.restoreFootprint(keypair, simulation.restorePreamble);
+            if (!restored.success) {
+              return this.failure(`Footprint restoration failed: ${restored.error}`, restored.txHash);
+            }
+            account = await this.server.getAccount(keypair.publicKey());
+            tx = this.buildInvocation(account, contractId, method, args);
+            simulation = await this.server.simulateTransaction(tx);
+            if (rpc.Api.isSimulationError(simulation)) {
+              return this.failure(`Simulation failed: ${simulation.error}`);
+            }
+          }
+
+          const prepared = rpc.assembleTransaction(tx, simulation).build();
+          prepared.sign(keypair);
+          const pollRes = await this.sendAndPoll(prepared);
+          if (!pollRes.success && pollRes.isRetryable) {
+            throw new Error(pollRes.error || "Retryable transaction failure");
+          }
+          return pollRes;
+        } catch (error) {
+          const errorMsg = (error as Error).message;
+          const parsed = parseSorobanError(errorMsg);
+          if (parsed.isRetryable) {
+            throw error;
+          }
+          return this.failure(errorMsg);
         }
-        account = await this.server.getAccount(keypair.publicKey());
-        tx = this.buildInvocation(account, contractId, method, args);
-        simulation = await this.server.simulateTransaction(tx);
-        if (rpc.Api.isSimulationError(simulation)) {
-          return this.failure(`Simulation failed: ${simulation.error}`);
-        }
-      }
-
-      const prepared = rpc.assembleTransaction(tx, simulation).build();
-      prepared.sign(keypair);
-      return await this.sendAndPoll(prepared);
-    } catch (error) {
-      return this.failure((error as Error).message);
-    }
+      },
+      { maxRetries: 2, initialDelayMs: 250 }
+    );
   }
 
   /**

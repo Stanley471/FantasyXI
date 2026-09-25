@@ -57,6 +57,11 @@ export const Pitch: React.FC = () => {
           <div className="flex items-center gap-2">
             <span className="text-slate-400 uppercase tracking-wider text-[11px]">Formation</span>
             <span className="text-emerald-400 font-bold">{currentFormation}</span>
+            {useTeamStore.getState().activeDragPlayer && (
+              <span className="ml-2 hidden sm:inline-block px-2 py-0.5 rounded bg-emerald-950/70 border border-emerald-500/40 text-[10px] text-emerald-300 animate-pulse">
+                Dragging {useTeamStore.getState().activeDragPlayer?.player.displayName} - Drop to Substitute
+              </span>
+            )}
           </div>
 
           <div className="text-[11px] text-slate-300 tracking-wide">
