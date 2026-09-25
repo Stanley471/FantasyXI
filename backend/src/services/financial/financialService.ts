@@ -15,6 +15,7 @@ import { stellarConfig } from "../../config/stellar.js";
 import { StellarService, stellarService } from "./stellarService.js";
 import { PrizeService } from "../league/prizeService.js";
 import { createSettlementProof } from "./settlementProof.js";
+import { EmailService, emailService } from "../email/emailService.js";
 import {
   LeagueStatus,
   MembershipStatus,
@@ -82,7 +83,8 @@ export class FinancialService {
   constructor(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     private readonly db: any = prisma,
-    private readonly stellar: StellarService = stellarService
+    private readonly stellar: StellarService = stellarService,
+    private readonly email: EmailService = emailService
   ) {}
 
   /**
@@ -318,6 +320,7 @@ export class FinancialService {
       },
       include: {
         league: true,
+        user: true,
       },
     });
 
@@ -389,6 +392,20 @@ export class FinancialService {
         },
       }),
     ]);
+
+    if (member.user?.email) {
+      try {
+        await this.email.sendDepositConfirmation({
+          to: member.user.email,
+          username: member.user.username || member.user.name || "Manager",
+          leagueName: member.league.name,
+          amount: member.league.entryFee,
+          txHash: stellarTxHash,
+        });
+      } catch (err) {
+        console.error("Failed to send deposit confirmation email:", err);
+      }
+    }
 
     return verification;
   }
