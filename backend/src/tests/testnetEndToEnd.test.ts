@@ -25,7 +25,18 @@ if (fs.existsSync(envTestnetPath)) {
   dotenv.config({ path: envTestnetPath });
 }
 
-describe("Stellar Testnet Live Soroban Escrow Lifecycle", () => {
+const configured = Boolean(
+  process.env.TESTNET_ADMIN_PUBLIC &&
+  process.env.TESTNET_ADMIN_SECRET &&
+  process.env.TESTNET_MANAGER_A_PUBLIC &&
+  process.env.TESTNET_MANAGER_A_SECRET &&
+  process.env.TESTNET_MANAGER_B_PUBLIC &&
+  process.env.TESTNET_MANAGER_B_SECRET &&
+  process.env.TESTNET_MANAGER_C_PUBLIC &&
+  process.env.TESTNET_MANAGER_C_SECRET
+);
+
+describe("Stellar Testnet Live Soroban Escrow Lifecycle", { skip: !configured && "testnet env not configured" }, () => {
   let client: SorobanContractClient;
 
   // Keypairs from Testnet deployer
@@ -45,12 +56,7 @@ describe("Stellar Testnet Live Soroban Escrow Lifecycle", () => {
   const ENTRY_FEE_10_USDC = 100_000_000n;
 
   before(() => {
-    assert.ok(adminPublic, "TESTNET_ADMIN_PUBLIC must be set in .env.testnet.local");
-    assert.ok(adminSecret, "TESTNET_ADMIN_SECRET must be set in .env.testnet.local");
-    assert.ok(managerAPublic, "TESTNET_MANAGER_A_PUBLIC must be set in .env.testnet.local");
-    assert.ok(managerBPublic, "TESTNET_MANAGER_B_PUBLIC must be set in .env.testnet.local");
-    assert.ok(managerCPublic, "TESTNET_MANAGER_C_PUBLIC must be set in .env.testnet.local");
-
+    if (!configured) return;
     client = new SorobanContractClient();
   });
 

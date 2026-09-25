@@ -5,7 +5,7 @@ import { Player, Position } from "@/types";
 import { PositionBadge } from "@/components/ui/Badge";
 import { IconFootball, IconSwap } from "@/components/ui/Icons";
 import { useDraggable, useDroppable } from "@dnd-kit/core";
-
+import { validateSubstitution } from "@/lib/formation";
 import { useTeamStore } from "@/store/teamStore";
 
 export interface PlayerCardProps {
@@ -34,10 +34,13 @@ export const PlayerCard: React.FC<PlayerCardProps> = ({
     (state) => state.selectedPlayerId !== null && player?.id === state.selectedPlayerId
   );
   const handlePlayerClick = useTeamStore((state) => state.handlePlayerClick);
+  const activeDragPlayer = useTeamStore((state) => state.activeDragPlayer);
+  const allSquadPlayers = useTeamStore((state) => state.players);
+
   const onClick = () => handlePlayerClick(player || null, positionSlot);
 
   // Drag and Drop integration
-  const dropId = player?.id?.toString() || `empty-${positionSlot}-${benchIndex ?? 'starter'}`;
+  const dropId = player?.id?.toString() || `empty-${positionSlot}-${benchIndex ?? "starter"}`;
   const {
     attributes,
     listeners,
@@ -45,11 +48,12 @@ export const PlayerCard: React.FC<PlayerCardProps> = ({
     isDragging,
   } = useDraggable({
     id: player?.id?.toString() || "no-drag",
-    disabled: !player, // cannot drag an empty slot
+    disabled: !player || isOverlay,
   });
 
   const { isOver, setNodeRef: setDroppableRef } = useDroppable({
     id: dropId,
+    disabled: isOverlay,
   });
 
   // Combine refs (since the card acts as both draggable item and droppable slot target)
@@ -57,6 +61,29 @@ export const PlayerCard: React.FC<PlayerCardProps> = ({
     setDraggableRef(node);
     setDroppableRef(node);
   };
+
+  // Drag state evaluation: is this card an eligible or ineligible target?
+  const isDragInProgress = !!activeDragPlayer && !isOverlay;
+  const isSelfBeingDragged =
+    activeDragPlayer && player && String(activeDragPlayer.playerId) === String(player.id);
+
+  let isSubstitutionEligible = false;
+  let invalidReason: string | undefined = undefined;
+
+  if (isDragInProgress && player && !isSelfBeingDragged) {
+    const targetSquadPlayer = allSquadPlayers.find(
+      (p) => String(p.playerId) === String(player.id)
+    );
+    if (targetSquadPlayer) {
+      const validation = validateSubstitution(
+        activeDragPlayer,
+        targetSquadPlayer,
+        allSquadPlayers
+      );
+      isSubstitutionEligible = validation.valid;
+      invalidReason = validation.reason;
+    }
+  }
 
   // Empty slot (when building or drafting)
   if (!player) {
@@ -105,22 +132,80 @@ export const PlayerCard: React.FC<PlayerCardProps> = ({
 
   const jerseyStyle = getJerseyStyle(player.position);
 
+  // Dynamic styling based on Drag & Drop and substitution validation
+  let interactiveStyles = "hover:scale-105 cursor-grab active:cursor-grabbing";
+
+  if (isOverlay) {
+    interactiveStyles = "cursor-grabbing shadow-2xl";
+  } else if (isDragging || isSelfBeingDragged) {
+    interactiveStyles = "opacity-25 scale-95 cursor-grabbing";
+  } else if (isDragInProgress) {
+    if (isSubstitutionEligible) {
+      if (isOver) {
+        interactiveStyles =
+          "scale-110 ring-4 ring-emerald-400 bg-emerald-950/90 shadow-[0_0_25px_rgba(52,211,153,0.8)] cursor-pointer";
+      } else {
+        interactiveStyles =
+          "scale-105 ring-2 ring-emerald-400/80 bg-emerald-950/30 animate-pulse cursor-pointer";
+      }
+    } else {
+      if (isOver) {
+        interactiveStyles =
+          "scale-95 ring-4 ring-rose-500 bg-rose-950/90 shadow-[0_0_20px_rgba(244,63,94,0.8)] cursor-not-allowed";
+      } else {
+        interactiveStyles =
+          "opacity-35 grayscale-[50%] cursor-not-allowed border-rose-900/40";
+      }
+    }
+  } else if (isSelectedForSwap) {
+    interactiveStyles = "scale-105 ring-4 ring-emerald-400 rounded-xl bg-emerald-950/60 p-1";
+  } else if (isSwapCandidate) {
+    interactiveStyles = "scale-105 ring-2 ring-amber-400 rounded-xl bg-amber-950/40 p-1 animate-pulse";
+  }
+
   return (
-    <div ref={setNodeRef} className={`relative flex flex-col items-center ${isDragging && !isOverlay ? 'opacity-30' : ''}`}>
+    <div
+      ref={setNodeRef}
+      className={`relative flex flex-col items-center transition-all duration-150 ${
+        isDragging && !isOverlay ? "opacity-30" : ""
+      }`}
+    >
+      {/* Floating Status Tooltip during Drag */}
+      {isDragInProgress && !isSelfBeingDragged && isOver && (
+        <div
+          className={`absolute -top-7 z-40 text-[10px] font-black px-2.5 py-0.5 rounded-full shadow-xl whitespace-nowrap font-mono pointer-events-none ${
+            isSubstitutionEligible
+              ? "bg-emerald-500 text-slate-950 animate-bounce"
+              : "bg-rose-600 text-white max-w-[210px] truncate"
+          }`}
+        >
+          {isSubstitutionEligible
+            ? "✓ Drop to Substitute"
+            : `✕ ${invalidReason || "Invalid Move"}`}
+        </div>
+      )}
+
       <button
         type="button"
         onClick={onClick}
         {...(!isOverlay ? listeners : {})}
         {...(!isOverlay ? attributes : {})}
-        style={!isOverlay ? { touchAction: 'none' } : undefined}
-        className={`group relative flex flex-col items-center focus:outline-none transition-all duration-200 ${
-          isSelectedForSwap
-            ? "scale-105 ring-4 ring-emerald-400 rounded-xl bg-emerald-950/60 p-1"
-            : isSwapCandidate || isOver
-            ? "scale-105 ring-2 ring-amber-400 rounded-xl bg-amber-950/40 p-1 animate-pulse"
-            : "hover:scale-105 cursor-grab active:cursor-grabbing"
-        }`}
+        style={!isOverlay ? { touchAction: "none" } : undefined}
+        className={`group relative flex flex-col items-center focus:outline-none transition-all duration-200 ${interactiveStyles}`}
       >
+        {/* Valid / Invalid Move Indicators during Drag */}
+        {isDragInProgress && !isSelfBeingDragged && (
+          <div
+            className={`absolute -top-1.5 -left-1.5 z-30 w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-black shadow ring-1 ring-slate-900 font-mono ${
+              isSubstitutionEligible
+                ? "bg-emerald-400 text-slate-950"
+                : "bg-rose-600 text-white"
+            }`}
+          >
+            {isSubstitutionEligible ? "✓" : "✕"}
+          </div>
+        )}
+
         {/* Captain / Vice Captain Badge */}
         {isCaptain && (
           <div className="absolute -top-2 -right-1 z-20 w-5 h-5 rounded-full bg-amber-400 text-slate-950 font-black text-[10px] flex items-center justify-center shadow-md shadow-amber-950 ring-2 ring-slate-900 font-mono">

@@ -131,10 +131,28 @@ export async function depositToSorobanEscrow(
     preparedTx = await server.prepareTransaction(tx);
   } catch (simErr: unknown) {
     const errMsg = simErr instanceof Error ? simErr.message : String(simErr);
-    if (errMsg.includes("HostError") || errMsg.includes("Error(Contract")) {
-      throw new Error(
-        `Contract simulation rejected deposit. Ensure you have sufficient USDC balance and trustline. Details: ${errMsg}`
-      );
+    const contractMatch = errMsg.match(/Error\(Contract,\s*#?(\d+)\)/i);
+    if (contractMatch) {
+      const code = parseInt(contractMatch[1], 10);
+      switch (code) {
+        case 6:
+          throw new Error("You have already deposited for this league. Your entry is already confirmed!");
+        case 5:
+          throw new Error("This league is no longer accepting deposits (deadline locked or active).");
+        case 4:
+          throw new Error("The league escrow partition was not found on-chain.");
+        case 7:
+          throw new Error("This competition has already settled.");
+        case 8:
+          throw new Error("Invalid deposit amount specified.");
+        case 10:
+          throw new Error("Unauthorized: your account is not permitted to perform this action.");
+        default:
+          throw new Error(`Smart contract rejected deposit (Error #${code}).`);
+      }
+    }
+    if (errMsg.toLowerCase().includes("balance") || errMsg.toLowerCase().includes("underfunded")) {
+      throw new Error("Insufficient USDC balance or missing USDC trustline in your connected wallet.");
     }
     throw new Error(`Transaction simulation failed: ${errMsg}`);
   }
@@ -188,9 +206,16 @@ export async function depositToSorobanEscrow(
         confirmedLedgerSeq = txStatus.latestLedger;
         break;
       } else if (txStatus.status === "FAILED") {
-        throw new Error(
-          `Transaction failed on ledger. Soroban execution reverted: ${txStatus.resultXdr || "Check contract preconditions"}`
-        );
+        const resultXdrStr = txStatus.resultXdr ? String(txStatus.resultXdr) : "";
+        const contractMatch = resultXdrStr.match(/Error\(Contract,\s*#?(\d+)\)/i);
+        let friendlyReason = "Soroban execution reverted on ledger.";
+        if (contractMatch) {
+          const code = parseInt(contractMatch[1], 10);
+          if (code === 6) friendlyReason = "Deposit was already completed on-chain.";
+          else if (code === 5) friendlyReason = "League deposit window has closed.";
+          else if (code === 4) friendlyReason = "League partition not found.";
+        }
+        throw new Error(`Transaction failed on ledger: ${friendlyReason}`);
       }
       // status is NOT_FOUND (pending) - keep polling
     } catch (pollErr: unknown) {
