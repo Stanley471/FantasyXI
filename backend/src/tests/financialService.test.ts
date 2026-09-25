@@ -84,7 +84,8 @@ function createMockDb(overrides?: any) {
             );
           if (!m) return null;
           const league = state.leagues.get(m.leagueId);
-          return { ...m, league };
+          const user = m.user || { email: "user@example.com", username: "user1" };
+          return { ...m, league, user };
         }
         return null;
       },
@@ -482,6 +483,97 @@ describe("FinancialService State Machine & Accounting", () => {
 
       assert.equal(result.success, true);
       assert.equal(verifyCalled, false); // No redundant network call!
+    });
+
+    it("should trigger email notification with deposit amount and league name upon confirmed USDC deposit", async () => {
+      const mockDb = createMockDb();
+      mockDb.state.leagues.set("league_email", {
+        id: "league_email",
+        name: "Premier Champions Cup",
+        entryFee: 25.5,
+        status: LeagueStatus.UPCOMING,
+      });
+      mockDb.state.members.set("league_email:user_email", {
+        id: "member_email",
+        leagueId: "league_email",
+        userId: "user_email",
+        status: MembershipStatus.PENDING,
+        paymentStatus: PaymentStatus.PAYMENT_SUBMITTED,
+        stellarAddress: testWallet1,
+        user: {
+          email: "player1@fantasyxi.com",
+          username: "PlayerOne",
+        },
+      });
+      mockDb.state.transactions.set("tx_email", {
+        id: "tx_email",
+        stellarTxHash: VALID_TX_HASH_1,
+        memberId: "member_email",
+        status: TransactionStatus.SUBMITTED,
+      });
+
+      const dispatchedEmails: any[] = [];
+      const mockEmailService = {
+        sendDepositConfirmation: async (payload: any) => {
+          dispatchedEmails.push(payload);
+          return { success: true, messageId: "msg_123" };
+        },
+      } as any;
+
+      const service = new FinancialService(
+        mockDb,
+        createMockStellar(),
+        mockEmailService
+      );
+
+      const result = await service.verifyAndConfirmPayment(
+        "user_email",
+        "league_email",
+        VALID_TX_HASH_1
+      );
+
+      assert.equal(result.success, true);
+      assert.equal(dispatchedEmails.length, 1);
+      assert.equal(dispatchedEmails[0].to, "player1@fantasyxi.com");
+      assert.equal(dispatchedEmails[0].leagueName, "Premier Champions Cup");
+      assert.equal(dispatchedEmails[0].amount, 25.5);
+      assert.equal(dispatchedEmails[0].txHash, VALID_TX_HASH_1);
+    });
+
+    it("should NOT trigger email notification if payment verification fails", async () => {
+      const mockDb = createMockDb();
+      mockDb.state.leagues.set("league_fail", {
+        id: "league_fail",
+        name: "Failed Cup",
+        entryFee: 10,
+        status: LeagueStatus.UPCOMING,
+      });
+      mockDb.state.members.set("league_fail:user_fail", {
+        id: "member_fail",
+        leagueId: "league_fail",
+        userId: "user_fail",
+        status: MembershipStatus.PENDING,
+        paymentStatus: PaymentStatus.PAYMENT_SUBMITTED,
+        stellarAddress: testWallet1,
+        user: { email: "fail@fantasyxi.com" },
+      });
+
+      const dispatchedEmails: any[] = [];
+      const mockEmailService = {
+        sendDepositConfirmation: async (payload: any) => {
+          dispatchedEmails.push(payload);
+          return { success: true };
+        },
+      } as any;
+
+      const mockStellar = createMockStellar({
+        verificationResult: { success: false, error: "Invalid ledger" },
+      });
+
+      const service = new FinancialService(mockDb, mockStellar, mockEmailService);
+      await service.verifyAndConfirmPayment("user_fail", "league_fail", VALID_TX_HASH_1);
+
+      assert.equal(dispatchedEmails.length, 0);
     });
   });
 
