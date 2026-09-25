@@ -371,6 +371,7 @@ model LeagueMember {
   awayFixtures LeagueFixture[] @relation("AwayLeagueFixtures")
 
   @@unique([leagueId, userId])
+  @@index([leagueId, joinedAt, id])
   @@map("league_members")
 }
 

@@ -2,8 +2,10 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   LeagueService,
+  LeagueNotFoundError,
   LeagueValidationError,
   LeagueForbiddenError,
+  MAX_LEAGUE_MEMBERS,
 } from "../services/league/leagueService.js";
 import { LeagueStatus, MembershipStatus } from "../types/index.js";
 
@@ -176,7 +178,7 @@ describe("LeagueService Competition Engine & Standings", () => {
       );
     });
 
-    it("should reject invalid participant limits (< 2 or > 100)", () => {
+    it("should reject participant limits below 2", () => {
       assert.throws(
         () => {
           const maxMembers = 1;
@@ -248,6 +250,50 @@ describe("LeagueService Competition Engine & Standings", () => {
         LeagueValidationError
       );
     });
+  });
+
+  it("should support participant limits in the thousands", () => {
+    assert.ok(5_000 >= 2 && 5_000 <= MAX_LEAGUE_MEMBERS);
+    assert.ok(MAX_LEAGUE_MEMBERS > 5_000);
+  });
+
+  it("should paginate league members with stable ordering and total metadata", async () => {
+    const memberFindMany = async (args: any) => {
+      assert.deepEqual(args.where, { leagueId: "league-1" });
+      assert.deepEqual(args.orderBy, [{ joinedAt: "asc" }, { id: "asc" }]);
+      assert.equal(args.skip, 20);
+      assert.equal(args.take, 20);
+      return [{ id: "member-21" }];
+    };
+    const service = new LeagueService({
+      league: { findUnique: async () => ({ id: "league-1" }) },
+      leagueMember: {
+        findMany: memberFindMany,
+        count: async () => 45,
+      },
+    });
+
+    const result = await service.getLeagueMembers("league-1", 2, 20);
+
+    assert.deepEqual(result, {
+      members: [{ id: "member-21" }],
+      total: 45,
+      page: 2,
+      limit: 20,
+      totalPages: 3,
+    });
+  });
+
+  it("should reject paginated member reads for an unknown league", async () => {
+    const service = new LeagueService({
+      league: { findUnique: async () => null },
+      leagueMember: { findMany: async () => [], count: async () => 0 },
+    });
+
+    await assert.rejects(
+      service.getLeagueMembers("missing-league", 1, 20),
+      LeagueNotFoundError
+    );
   });
 
   describe("Lifecycle State Machine", () => {

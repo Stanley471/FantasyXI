@@ -159,11 +159,23 @@ export async function getLeagueMembers(
 ): Promise<void> {
   try {
     const { id } = req.params;
-    const league = await leagueService.getLeagueById(id as string);
+    const requestedPage = Number.parseInt(req.query.page as string, 10);
+    const requestedLimit = Number.parseInt(req.query.limit as string, 10);
+    const page = Number.isFinite(requestedPage) ? Math.max(1, requestedPage) : 1;
+    const limit = Number.isFinite(requestedLimit)
+      ? Math.min(100, Math.max(1, requestedLimit))
+      : 50;
+    const membersPage = await leagueService.getLeagueMembers(id as string, page, limit);
 
     res.json({
       success: true,
-      data: league.members,
+      data: membersPage.members,
+      pagination: {
+        page: membersPage.page,
+        limit: membersPage.limit,
+        total: membersPage.total,
+        totalPages: membersPage.totalPages,
+      },
     });
   } catch (error) {
     if (error instanceof LeagueNotFoundError) {
