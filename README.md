@@ -333,6 +333,7 @@ npm run build
 - **Envelope XDR Verification**: Payments are verified on-chain by decoding `invokeHostFunction` transaction envelopes, matching contract ID, function call, sender public key, and league ID.
 - **SQL & Injection Protection**: Database interactions are performed using Prisma ORM with parameterized queries.
 - **Rate Limiting & Authentication**: Endpoints requiring user context are guarded by JWT authorization middleware with CSRF-protected OAuth state tokens.
+- **Google Sign-In & Account Linking**: Managers can sign in with email/password or Google (OAuth 2.0 / OpenID Connect); both open the same account. A verified Google email matching an existing account is linked automatically, and signed-in managers can link or unlink Google (and add a password to a Google-only account) from their profile. The OAuth state is HMAC-signed and bound to the initiating browser with an HttpOnly nonce cookie, return paths are restricted to same-site paths, and the issued JWT is handed to the frontend in the URL fragment so it never reaches server logs.
 - Consult [`REGULATORY_CONSIDERATIONS.md`](file:///c:/ReactApps/FantasyXI/REGULATORY_CONSIDERATIONS.md) for legal classifications, skill-game exemptions, and AML operational considerations.
 
 ---
