@@ -4,6 +4,8 @@ import dotenv from "dotenv";
 import apiV1Router from "./routes/index.js";
 import { startJobQueue, stopJobQueue, getQueueHealth } from "./queues/jobQueue.js";
 import { apiRateLimiter } from "./middleware/rateLimiter.js";
+import { requireAuth, requirePermission } from "./middleware/authMiddleware.js";
+import { Permission } from "./types/index.js";
 import { ApolloServer } from "@apollo/server";
 import { expressMiddleware } from "@as-integrations/express5";
 import DataLoader from "dataloader";
@@ -54,31 +56,43 @@ app.get("/api/health", (_req: Request, res: Response) => {
   });
 });
 
-app.get("/api/health/queues", async (_req: Request, res: Response, next: NextFunction) => {
-  try {
-    const health = await getQueueHealth();
-    res.status(health.running ? 200 : 503).json({
-      success: health.running,
-      data: health,
+// Queue internals are operational data: staff and SERVICE (e.g. monitoring) only
+app.get(
+  "/api/health/queues",
+  requireAuth,
+  requirePermission(Permission.SYSTEM_HEALTH_READ),
+  async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+      const health = await getQueueHealth();
+      res.status(health.running ? 200 : 503).json({
+        success: health.running,
+        data: health,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// Replica topology and lag are operational data, like queue health
+app.get(
+  "/api/health/replicas",
+  requireAuth,
+  requirePermission(Permission.SYSTEM_HEALTH_READ),
+  (_req: Request, res: Response) => {
+    const replicas = getReadReplicaStatus();
+    res.json({
+      success: true,
+      data: {
+        enabled: replicas.length > 0,
+        appRegion: process.env.APP_REGION ?? null,
+        replicas,
+      },
       timestamp: new Date().toISOString(),
     });
-  } catch (error) {
-    next(error);
   }
-});
-
-app.get("/api/health/replicas", (_req: Request, res: Response) => {
-  const replicas = getReadReplicaStatus();
-  res.json({
-    success: true,
-    data: {
-      enabled: replicas.length > 0,
-      appRegion: process.env.APP_REGION ?? null,
-      replicas,
-    },
-    timestamp: new Date().toISOString(),
-  });
-});
+);
 
 // API v1 Routes
 app.use("/api/v1", apiV1Router);
