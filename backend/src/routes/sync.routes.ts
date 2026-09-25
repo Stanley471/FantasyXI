@@ -6,6 +6,7 @@ import {
 } from "../controllers/sync.controller.js";
 import { requireAuth, requireRole } from "../middleware/authMiddleware.js";
 import { UserRole } from "../types/index.js";
+import { authenticatedRateLimiter, mutationRateLimiter } from "../middleware/rateLimiter.js";
 
 const router = Router();
 
@@ -14,7 +15,12 @@ const router = Router();
 // Global sync triggers mutate shared data and are restricted to
 // ADMIN / MODERATOR roles via RBAC.
 // ============================================================
-router.use(requireAuth, requireRole(UserRole.ADMIN, UserRole.MODERATOR));
+router.use(
+  requireAuth,
+  authenticatedRateLimiter,
+  requireRole(UserRole.ADMIN, UserRole.MODERATOR),
+  mutationRateLimiter
+);
 
 // POST /api/v1/admin/sync/bootstrap
 router.post("/bootstrap", syncBootstrap);

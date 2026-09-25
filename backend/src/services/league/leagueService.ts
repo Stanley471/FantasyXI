@@ -19,6 +19,8 @@ export interface H2HPairing {
   awayMemberId: string | null;
 }
 
+export const MAX_LEAGUE_MEMBERS = 100_000;
+
 export class LeagueValidationError extends Error {
   constructor(message: string) {
     super(message);
@@ -73,8 +75,10 @@ export class LeagueService {
     const maxMembers = input.maxMembers ?? 20;
     const minMembers = input.minMembers ?? 2;
 
-    if (maxMembers < 2 || maxMembers > 100) {
-      throw new LeagueValidationError("Maximum participants must be between 2 and 100");
+    if (maxMembers < 2 || maxMembers > MAX_LEAGUE_MEMBERS) {
+      throw new LeagueValidationError(
+        `Maximum participants must be between 2 and ${MAX_LEAGUE_MEMBERS}`
+      );
     }
     if (minMembers < 2 || minMembers > maxMembers) {
       throw new LeagueValidationError(
@@ -790,7 +794,7 @@ export class LeagueService {
   }
 
   /**
-   * Retrieves a single league with members, gameweeks, and creator info.
+  * Retrieves a single league with gameweeks and creator info.
    */
   public async getLeagueById(leagueId: string) {
     const league = await prisma.league.findUnique({
@@ -799,13 +803,6 @@ export class LeagueService {
         creator: { select: { id: true, username: true } },
         startGameweek: true,
         endGameweek: true,
-        members: {
-          include: {
-            user: { select: { id: true, username: true } },
-            squad: { select: { id: true, name: true } },
-          },
-          orderBy: { joinedAt: "asc" },
-        },
       },
     });
 
@@ -821,6 +818,41 @@ export class LeagueService {
     return {
       ...league,
       prizeDistribution,
+    };
+  }
+
+  /** Retrieves one page without loading the full membership relation. */
+  public async getLeagueMembers(leagueId: string, page: number, limit: number) {
+    const league = await this.db.league.findUnique({
+      where: { id: leagueId },
+      select: { id: true },
+    });
+
+    if (!league) {
+      throw new LeagueNotFoundError(leagueId);
+    }
+
+    const skip = (page - 1) * limit;
+    const [members, total] = await Promise.all([
+      this.db.leagueMember.findMany({
+        where: { leagueId },
+        include: {
+          user: { select: { id: true, username: true } },
+          squad: { select: { id: true, name: true } },
+        },
+        orderBy: [{ joinedAt: "asc" }, { id: "asc" }],
+        skip,
+        take: limit,
+      }),
+      this.db.leagueMember.count({ where: { leagueId } }),
+    ]);
+
+    return {
+      members,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
     };
   }
 
