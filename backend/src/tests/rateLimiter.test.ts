@@ -1,7 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
-import { authRateLimiter, apiRateLimiter } from "../middleware/rateLimiter.js";
+import {
+  authRateLimiter,
+  apiRateLimiter,
+  authenticatedRateLimiter,
+} from "../middleware/rateLimiter.js";
 
 describe("Rate-Limiting & DDoS Mitigation Middleware", () => {
   it("should block auth requests exceeding strict limit with 429 Too Many Requests", async () => {
@@ -53,6 +57,32 @@ describe("Rate-Limiting & DDoS Mitigation Middleware", () => {
 
       assert.strictEqual(res1.status, 200);
       assert.strictEqual(res2.status, 200);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("should apply a separate limit to authenticated endpoints", async () => {
+    const app = express();
+    app.set("trust proxy", true);
+    app.get("/api/private", authenticatedRateLimiter, (_req, res) => {
+      res.status(200).json({ success: true });
+    });
+
+    const server = app.listen(0);
+    const address = server.address() as any;
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    try {
+      let lastStatus = 200;
+      for (let i = 0; i < 61; i++) {
+        const res = await fetch(`${baseUrl}/api/private`, {
+          headers: { "X-Forwarded-For": "203.0.113.196" },
+        });
+        lastStatus = res.status;
+      }
+
+      assert.strictEqual(lastStatus, 429);
     } finally {
       server.close();
     }
