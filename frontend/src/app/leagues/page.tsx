@@ -27,6 +27,7 @@ export default function LeaguesPage() {
   const [userSquads, setUserSquads] = useState<Squad[]>([]);
   const [activeTab, setActiveTab] = useState<"all" | "my">("all");
   const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<string>("ALL");
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
   // Join private league state
@@ -118,13 +119,15 @@ export default function LeaguesPage() {
     }
   };
 
-  // Filter leagues
+  // Filter leagues with search term and status filter in O(N) time & O(1) extra space
   const filteredLeagues = leagues.filter((lg) => {
-    if (search.trim() && !lg.name.toLowerCase().includes(search.toLowerCase())) {
+    if (search.trim() && !lg.name.toLowerCase().includes(search.trim().toLowerCase())) {
+      return false;
+    }
+    if (statusFilter !== "ALL" && lg.status !== statusFilter) {
       return false;
     }
     if (activeTab === "my") {
-      // In a real database, this matches leagues where user is creator or member
       return lg.creatorId === user?.id;
     }
     return true;
@@ -203,16 +206,31 @@ export default function LeaguesPage() {
           )}
         </div>
 
-        {/* Search */}
-        <div className="relative w-full sm:w-64">
-          <IconSearch className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search leagues..."
-            className="w-full pl-9 pr-3 py-1.5 bg-pitch-surface border border-pitch-border rounded-lg text-slate-200 placeholder-slate-500 text-xs focus:outline-none focus:border-emerald-500"
-          />
+        {/* Search & Status Filter */}
+        <div className="flex flex-col sm:flex-row items-center gap-3 w-full sm:w-auto">
+          {/* Status Dropdown */}
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            className="w-full sm:w-44 px-3 py-1.5 bg-pitch-surface border border-pitch-border rounded-lg text-slate-200 text-xs focus:outline-none focus:border-emerald-500"
+          >
+            <option value="ALL">All Statuses</option>
+            <option value="UPCOMING">Open / Upcoming</option>
+            <option value="ACTIVE">In Progress / Active</option>
+            <option value="COMPLETED">Completed</option>
+          </select>
+
+          {/* Search Bar */}
+          <div className="relative w-full sm:w-64">
+            <IconSearch className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search leagues by name..."
+              className="w-full pl-9 pr-3 py-1.5 bg-pitch-surface border border-pitch-border rounded-lg text-slate-200 placeholder-slate-500 text-xs focus:outline-none focus:border-emerald-500"
+            />
+          </div>
         </div>
       </div>
 
