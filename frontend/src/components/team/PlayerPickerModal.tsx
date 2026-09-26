@@ -1,11 +1,12 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Player, Position, SQUAD_RULES } from "@/types";
 import { api } from "@/lib/api";
 import { PositionBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { IconSearch, IconClose, IconCheck, IconAlertCircle } from "@/components/ui/Icons";
+import { useVirtualList } from "@/hooks/useVirtualList";
 
 export interface PlayerPickerModalProps {
   isOpen: boolean;
@@ -33,6 +34,12 @@ export const PlayerPickerModal: React.FC<PlayerPickerModalProps> = ({
   const [selectedPosition, setSelectedPosition] = useState<string>(requiredPosition || "ALL");
   const [sortBy, setSortBy] = useState<string>("totalPoints");
   const [isLoading, setIsLoading] = useState<boolean>(false);
+
+  // Ref on the scrollable list container for the virtualiser
+  const listRef = useRef<HTMLDivElement>(null);
+
+  // Virtualise: 64 px per row, 8-row overscan
+  const { virtualItems, totalHeight } = useVirtualList(players, 64, listRef, 8);
 
   // Sync selectedPosition when requiredPosition changes
   useEffect(() => {
@@ -161,91 +168,103 @@ export const PlayerPickerModal: React.FC<PlayerPickerModalProps> = ({
           </div>
         </div>
 
-        {/* Players List Table */}
-        <div className="flex-1 overflow-y-auto divide-y divide-slate-800/60 p-2">
+        {/* Players List — virtualised */}
+        <div
+          ref={listRef}
+          className="flex-1 overflow-y-auto p-2"
+          style={{ position: "relative" }}
+        >
           {isLoading ? (
             <div className="py-16 text-center text-slate-400">
               <div className="inline-block w-8 h-8 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin mb-2" />
               <p className="text-xs">Scouting available footballers...</p>
             </div>
           ) : players.length > 0 ? (
-            players.map((p) => {
-              const isAlreadyInSquad = currentSquadPlayerIds.includes(p.id);
-              const isReplacingSame = replacingPlayer?.id === p.id;
-              const isOverBudget = p.price > effectiveBudget;
+            /* Full logical-height spacer so the scrollbar reflects the true list size */
+            <div style={{ position: "relative", height: totalHeight, willChange: "transform" }}>
+              {virtualItems.map(({ index, item: p, offsetTop }) => {
+                const isAlreadyInSquad = currentSquadPlayerIds.includes(p.id);
+                const isReplacingSame = replacingPlayer?.id === p.id;
+                const isOverBudget = p.price > effectiveBudget;
 
-              // Club limit check: if replacing player is from the same club, no net increase
-              const currentClubCount = clubCounts[p.teamId] || 0;
-              const isSameClubAsReplacement = replacingPlayer?.teamId === p.teamId;
-              const exceedsClubLimit =
-                !isSameClubAsReplacement && currentClubCount >= SQUAD_RULES.MAX_PER_TEAM;
+                const currentClubCount = clubCounts[p.teamId] || 0;
+                const isSameClubAsReplacement = replacingPlayer?.teamId === p.teamId;
+                const exceedsClubLimit =
+                  !isSameClubAsReplacement && currentClubCount >= SQUAD_RULES.MAX_PER_TEAM;
 
-              const isDisabled = (isAlreadyInSquad && !isReplacingSame) || isOverBudget || exceedsClubLimit;
+                const isDisabled =
+                  (isAlreadyInSquad && !isReplacingSame) || isOverBudget || exceedsClubLimit;
 
-              return (
-                <div
-                  key={p.id}
-                  className={`flex items-center justify-between p-3 rounded-lg transition-colors ${
-                    isDisabled ? "opacity-50 bg-slate-950/30" : "hover:bg-slate-900/60"
-                  }`}
-                >
-                  <div className="flex items-center gap-3">
-                    <PositionBadge position={p.position} />
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="font-bold text-sm text-slate-100">
-                          {p.displayName || `${p.firstName} ${p.lastName}`}
-                        </span>
-                        <span className="text-xs font-mono uppercase text-slate-400 px-1.5 py-0.5 rounded bg-slate-800">
-                          {p.team?.shortName || "PL"}
-                        </span>
-                      </div>
+                return (
+                  <div
+                    key={p.id}
+                    style={{
+                      position: "absolute",
+                      top: offsetTop,
+                      width: "100%",
+                      height: 64,
+                    }}
+                    className={`flex items-center justify-between px-3 rounded-lg transition-colors ${
+                      isDisabled ? "opacity-50 bg-slate-950/30" : "hover:bg-slate-900/60"
+                    }`}
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <PositionBadge position={p.position} />
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-sm text-slate-100 truncate">
+                            {p.displayName || `${p.firstName} ${p.lastName}`}
+                          </span>
+                          <span className="text-xs font-mono uppercase text-slate-400 px-1.5 py-0.5 rounded bg-slate-800 shrink-0">
+                            {p.team?.shortName || "PL"}
+                          </span>
+                        </div>
 
-                      {/* Reasons if disabled */}
-                      <div className="flex items-center gap-3 text-[11px] text-slate-500 mt-0.5 font-mono">
-                        <span>Form: {p.form ?? "—"}</span>
-                        <span>Goals: {p.goalsScored}</span>
-                        <span>Assists: {p.assists}</span>
-                        {isAlreadyInSquad && !isReplacingSame && (
-                          <span className="text-amber-400 font-semibold">Already in Squad</span>
-                        )}
-                        {isOverBudget && (
-                          <span className="text-rose-400 font-semibold">Over Budget</span>
-                        )}
-                        {exceedsClubLimit && (
-                          <span className="text-amber-400 font-semibold">Max 3 per Club</span>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-4">
-                    <div className="text-right">
-                      <div className="font-mono font-bold text-white text-sm">
-                        £{(p.price / 10).toFixed(1)}m
-                      </div>
-                      <div className="font-mono text-emerald-400 font-bold text-xs">
-                        {p.totalPoints} pts
+                        <div className="flex items-center gap-3 text-[11px] text-slate-500 mt-0.5 font-mono">
+                          <span>Form: {p.form ?? "—"}</span>
+                          <span>Goals: {p.goalsScored}</span>
+                          <span>Assists: {p.assists}</span>
+                          {isAlreadyInSquad && !isReplacingSame && (
+                            <span className="text-amber-400 font-semibold">Already in Squad</span>
+                          )}
+                          {isOverBudget && (
+                            <span className="text-rose-400 font-semibold">Over Budget</span>
+                          )}
+                          {exceedsClubLimit && (
+                            <span className="text-amber-400 font-semibold">Max 3 per Club</span>
+                          )}
+                        </div>
                       </div>
                     </div>
 
-                    <Button
-                      type="button"
-                      variant="primary"
-                      size="sm"
-                      disabled={isDisabled}
-                      onClick={() => {
-                        onSelectPlayer(p);
-                        onClose();
-                      }}
-                      className="text-xs uppercase font-bold"
-                    >
-                      {isReplacingSame ? "Selected" : "Pick"}
-                    </Button>
+                    <div className="flex items-center gap-4 shrink-0">
+                      <div className="text-right">
+                        <div className="font-mono font-bold text-white text-sm">
+                          £{(p.price / 10).toFixed(1)}m
+                        </div>
+                        <div className="font-mono text-emerald-400 font-bold text-xs">
+                          {p.totalPoints} pts
+                        </div>
+                      </div>
+
+                      <Button
+                        type="button"
+                        variant="primary"
+                        size="sm"
+                        disabled={isDisabled}
+                        onClick={() => {
+                          onSelectPlayer(p);
+                          onClose();
+                        }}
+                        className="text-xs uppercase font-bold"
+                      >
+                        {isReplacingSame ? "Selected" : "Pick"}
+                      </Button>
+                    </div>
                   </div>
-                </div>
-              );
-            })
+                );
+              })}
+            </div>
           ) : (
             <div className="py-16 text-center text-slate-500 text-xs">
               No players found matching current filters.
