@@ -19,18 +19,21 @@ export const authRateLimiter: RateLimitRequestHandler = rateLimit({
 });
 
 /**
- * General rate limiter for generic public API routes.
- * Protects platform resources from high-frequency automated scraping / DDoS attacks.
+ * General rate limiter for generic public API routes (issue #139).
+ * Protects platform resources and the external FPL API polling paths from
+ * high-frequency automated scraping / abuse: max 100 requests per minute,
+ * per IP. Mounted globally in server.ts ahead of every route, so every
+ * public-facing endpoint returns HTTP 429 once the limit is exceeded.
  */
 export const apiRateLimiter: RateLimitRequestHandler = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes window
-  max: parseInt(process.env.API_RATE_LIMIT_MAX || "100", 10), // Max 100 requests per 15 minutes
+  windowMs: 60 * 1000, // 1 minute window
+  max: parseInt(process.env.API_RATE_LIMIT_MAX || "100", 10), // Max 100 requests per minute per IP
   standardHeaders: true,
   legacyHeaders: false,
   validate: { trustProxy: false },
   message: {
     success: false,
-    message: "Too many API requests from this IP. Please try again later.",
+    message: "Too many API requests from this IP. Please try again in a minute.",
   },
 });
 

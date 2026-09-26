@@ -54,7 +54,12 @@ export async function login(
   next: NextFunction
 ): Promise<void> {
   try {
-    const result = await authService.login(req.body);
+    // Client IP/user agent drive anomalous-login detection (issue #117):
+    // failed-login spike tracking and new-device/new-IP email alerts.
+    const result = await authService.login(req.body, {
+      ip: req.ip ?? req.socket.remoteAddress ?? "unknown",
+      userAgent: req.headers["user-agent"] ?? null,
+    });
     res.json({
       success: true,
       message: "Logged in successfully",
