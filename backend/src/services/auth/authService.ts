@@ -9,6 +9,21 @@ import {
   AuthResult,
   UserRole,
 } from "../../types/index.js";
+import { eventBus, EventBus } from "../events/eventBus.js";
+import { USER_SIGNED_UP_EVENT } from "../events/domainEvents.js";
+// Imported for its side effect: subscribes the signup analytics handler to
+// USER_SIGNED_UP_EVENT (issue #118).
+import "../events/userEventHandlers.js";
+import {
+  loginSecurityService as defaultLoginSecurityService,
+  LoginSecurityService,
+} from "../security/loginSecurityService.js";
+
+/** Request-derived context used for anomalous-login detection (issue #117). */
+export interface AuthRequestContext {
+  ip: string;
+  userAgent?: string | null;
+}
 
 /**
  * Custom error classes for Authentication domain rules.
@@ -78,8 +93,12 @@ export function toSafeUser(user: {
  *   RegistersUsers, AuthenticatesUsers, Hash::make, Hash::check.
  */
 export class AuthService {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  constructor(private readonly db: any = defaultPrisma) {}
+  constructor(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    private readonly db: any = defaultPrisma,
+    private readonly events: EventBus = eventBus,
+    private readonly security: LoginSecurityService = defaultLoginSecurityService
+  ) {}
 
   /**
    * Normalizes an email address consistently.
@@ -214,6 +233,15 @@ export class AuthService {
       role: user.role ?? UserRole.USER,
     });
 
+    // Best-effort: a signup analytics/notification subscriber failing must
+    // never fail registration itself, so this uses `publish` (which never
+    // throws) rather than `publishOrThrow` - see events/eventBus.ts.
+    await this.events.publish(USER_SIGNED_UP_EVENT, {
+      userId: user.id,
+      email: user.email,
+      username: user.username,
+    });
+
     return {
       user: safeUser,
       token,
@@ -223,8 +251,15 @@ export class AuthService {
   /**
    * Authenticates user with email and password.
    * Returns generic 401 message on any credential mismatch to prevent enumeration.
+   *
+   * `context` (client IP / user agent) is optional so existing callers and
+   * tests that don't have request metadata keep working unchanged; when
+   * provided, it drives the anomalous-login detection in issue #117: failed
+   * attempts are tracked per email for spike detection, and a successful
+   * login from a device/IP not seen before for this user triggers an email
+   * alert (see services/security/loginSecurityService.ts).
    */
-  public async login(input: LoginInput): Promise<AuthResult> {
+  public async login(input: LoginInput, context?: AuthRequestContext): Promise<AuthResult> {
     if (!input.email || !input.password) {
       throw new AuthUnauthorizedError("Invalid email or password");
     }
@@ -237,6 +272,9 @@ export class AuthService {
 
     // Timing-safe / generic rejection if user does not exist or has no password set (e.g. Google-only user)
     if (!user || !user.passwordHash) {
+      if (context) {
+        await this.security.recordFailedLogin(normalizedEmail, context.ip);
+      }
       throw new AuthUnauthorizedError("Invalid email or password");
     }
 
@@ -247,7 +285,20 @@ export class AuthService {
     );
 
     if (!isPasswordValid) {
+      if (context) {
+        await this.security.recordFailedLogin(normalizedEmail, context.ip);
+      }
       throw new AuthUnauthorizedError("Invalid email or password");
+    }
+
+    if (context) {
+      await this.security.handleSuccessfulLogin({
+        userId: user.id,
+        email: user.email,
+        username: user.username,
+        ip: context.ip,
+        userAgent: context.userAgent,
+      });
     }
 
     const safeUser = toSafeUser(user);

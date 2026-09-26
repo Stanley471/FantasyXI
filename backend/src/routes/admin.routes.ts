@@ -6,6 +6,7 @@ import {
   discardFailedPayout,
   listFinancialAuditLog,
 } from "../controllers/payoutAdmin.controller.js";
+import { listSecurityAnomalies } from "../controllers/securityAdmin.controller.js";
 import { requireAuth, requireRole } from "../middleware/authMiddleware.js";
 import { UserRole } from "../types/index.js";
 
@@ -32,5 +33,9 @@ router.post("/payouts/dead-letter/:id/discard", requireRole(UserRole.ADMIN), dis
 
 // GET /api/v1/admin/audit/financial (ADMIN only: exposes every user's ledger history)
 router.get("/audit/financial", requireRole(UserRole.ADMIN), listFinancialAuditLog);
+
+// GET /api/v1/admin/security/anomalies (issue #117): failed-login spikes and
+// new-device/new-IP logins detected across all accounts, for admin review.
+router.get("/security/anomalies", listSecurityAnomalies);
 
 export default router;
