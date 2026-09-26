@@ -13,6 +13,7 @@ import {
   LeagueStatus,
 } from "@/types";
 import { StandingsTable } from "@/components/leagues/StandingsTable";
+import { LeagueChat } from "@/components/chat/LeagueChat";
 import { PrizeCalculator } from "@/components/leagues/PrizeCalculator";
 import { PaymentModal } from "@/components/leagues/PaymentModal";
 import { InvitationManager } from "@/components/leagues/InvitationManager";
@@ -528,6 +529,10 @@ export default function LeagueDetailPage({
               onSelectEntry={livePoints ? setLiveSquadUserId : undefined}
             />
           </div>
+
+          {user && (isMember || isCreator) && (
+            <LeagueChat leagueId={league.id} currentUser={{ id: user.id, username: user.username }} />
+          )}
         </div>
 
         {/* Right 1 Col: Prize Payout Calculator & Rules */}

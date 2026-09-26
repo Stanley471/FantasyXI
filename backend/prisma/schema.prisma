@@ -137,13 +137,14 @@ model User {
   // Relations
   wallet             Wallet?
   squads             Squad[]
-  createdLeagues     League[]           @relation("LeagueCreator")
+  createdLeagues     League[]            @relation("LeagueCreator")
   memberships        LeagueMember[]
   transactions       Transaction[]
-  referrer           User?              @relation("UserReferrals", fields: [referrerId], references: [id])
-  referrees          User[]             @relation("UserReferrals")
-  createdInvitations LeagueInvitation[] @relation("InvitationCreator")
-  usedInvitations    LeagueInvitation[] @relation("InvitationUser")
+  referrer           User?               @relation("UserReferrals", fields: [referrerId], references: [id])
+  referrees          User[]              @relation("UserReferrals")
+  createdInvitations LeagueInvitation[]  @relation("InvitationCreator")
+  usedInvitations    LeagueInvitation[]  @relation("InvitationUser")
+  chatMessages       LeagueChatMessage[]
 
   @@map("users")
 }
@@ -359,13 +360,14 @@ model League {
   updatedAt       DateTime     @updatedAt @map("updated_at")
 
   // Relations
-  creator       User               @relation("LeagueCreator", fields: [creatorId], references: [id])
-  startGameweek Gameweek           @relation("LeagueStartGW", fields: [startGameweekId], references: [id])
-  endGameweek   Gameweek           @relation("LeagueEndGW", fields: [endGameweekId], references: [id])
+  creator       User                @relation("LeagueCreator", fields: [creatorId], references: [id])
+  startGameweek Gameweek            @relation("LeagueStartGW", fields: [startGameweekId], references: [id])
+  endGameweek   Gameweek            @relation("LeagueEndGW", fields: [endGameweekId], references: [id])
   members       LeagueMember[]
   transactions  Transaction[]
   fixtures      LeagueFixture[]
   invitations   LeagueInvitation[]
+  chatMessages  LeagueChatMessage[]
 
   @@index([status, isPrivate])
   @@index([entryFee])
@@ -603,6 +605,22 @@ model LeagueInvitation {
 
   @@index([leagueId])
   @@map("league_invitations")
+}
+
+/// A chat message posted by a member in a league's real-time chat.
+/// History is paged newest-first by (leagueId, createdAt).
+model LeagueChatMessage {
+  id        String   @id @default(uuid())
+  leagueId  String   @map("league_id")
+  userId    String   @map("user_id")
+  body      String   @db.VarChar(500)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  league League @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([leagueId, createdAt])
+  @@map("league_chat_messages")
 }
 
 /// Dead-letter queue entry for a payout batch that failed on-chain.
