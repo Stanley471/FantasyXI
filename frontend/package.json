@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "type-check": "tsc --noEmit",
-    "test": "tsx --test src/tests/toast.test.ts"
+    "test": "tsx --test src/tests/toast.test.ts src/tests/analyticsDashboard.test.tsx"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

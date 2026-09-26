@@ -270,6 +270,61 @@ export interface LeagueStandingsEntry {
 }
 
 // ============================================================
+// Historical Performance Analytics (GET /api/v1/analytics/me/performance)
+// ============================================================
+
+export type ChipType = "TRIPLE_CAPTAIN" | "BENCH_BOOST" | "FREE_HIT" | "WILDCARD";
+
+export interface GameweekPerformance {
+  gameweekId: number;
+  gameweekFplId: number;
+  gameweekName: string;
+  deadline: string;
+  points: number;
+  benchPoints: number;
+  captainPoints: number;
+  transferCost: number;
+  cumulativePoints: number;
+  rollingAverage: number;
+  /** Mean score of every squad on the platform that gameweek */
+  averagePoints: number | null;
+  cumulativeAveragePoints: number | null;
+  highestPoints: number | null;
+  differenceVsAverage: number | null;
+  chip: ChipType | null;
+}
+
+export interface GameweekHighlight {
+  gameweekId: number;
+  gameweekName: string;
+  points: number;
+}
+
+export interface PerformanceSummary {
+  gameweeksPlayed: number;
+  totalPoints: number;
+  averagePoints: number;
+  medianPoints: number;
+  standardDeviation: number;
+  bestGameweek: GameweekHighlight | null;
+  worstGameweek: GameweekHighlight | null;
+  recentForm: number;
+  gameweeksAboveAverage: number;
+  totalBenchPoints: number;
+  totalCaptainPoints: number;
+  totalTransferCost: number;
+  captainShare: number;
+}
+
+export interface PerformanceAnalytics {
+  squads: Array<{ id: string; name: string }>;
+  squadId: string | null;
+  summary: PerformanceSummary;
+  history: GameweekPerformance[];
+  chips: Array<{ chipType: ChipType; gameweekId: number; gameweekName: string }>;
+}
+
+// ============================================================
 // Live Matchday Feed (GET /api/v1/leagues/:id/live, Server-Sent Events)
 // ============================================================
 

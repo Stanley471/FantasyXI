@@ -458,6 +458,24 @@ export const AlertTriangleIcon: React.FC<IconProps> = ({ size = 20, className = 
   </svg>
 );
 
+export const ChartIcon: React.FC<IconProps> = ({ size = 20, className = "", ...props }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+    {...props}
+  >
+    <path d="M3 3v18h18" />
+    <path d="m19 9-5 5-4-4-3 3" />
+  </svg>
+);
+
 // Convenient Icon* aliases
 export {
   FootballIcon as IconFootball,
@@ -485,6 +503,7 @@ export {
   GoogleIcon as IconGoogle,
   InfoIcon as IconInfo,
   AlertTriangleIcon as IconAlertTriangle,
+  ChartIcon as IconChart,
 };
 
 
