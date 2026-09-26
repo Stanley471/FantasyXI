@@ -18,6 +18,7 @@ import {
   FinancialAuditRecorder,
 } from "../services/audit/financialAuditLog.js";
 import adminRoutes from "../routes/admin.routes.js";
+import { setRoleResolver } from "../middleware/authMiddleware.js";
 import { signAccessToken } from "../config/jwt.js";
 import {
   LeagueStatus,
@@ -343,6 +344,8 @@ describe("Payout Dead-Letter Queue", () => {
       });
 
     before(async () => {
+      // No database here: elevated permissions re-check the role, so resolve it from the test user id
+      setRoleResolver(async (userId) => userId.replace(/^usr_/, "").toUpperCase() as UserRole);
       const app = express();
       app.use(express.json());
       app.use("/api/v1/admin", adminRoutes);
@@ -351,7 +354,10 @@ describe("Payout Dead-Letter Queue", () => {
       baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     });
 
-    after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+    after(() => {
+      setRoleResolver(null);
+      return new Promise<void>((resolve) => server.close(() => resolve()));
+    });
 
     it("rejects unauthenticated access", async () => {
       const res = await call("GET", "/api/v1/admin/payouts/dead-letter");

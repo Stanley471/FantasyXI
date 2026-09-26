@@ -190,12 +190,21 @@ const resolveRoleFromDatabase: RoleResolver = async (userId) => {
   return user ? user.role : null;
 };
 
+let defaultRoleResolver: RoleResolver = resolveRoleFromDatabase;
+
 /**
- * Builds the permission guard. The role resolver is injectable for tests.
+ * Replaces the role lookup used by `requirePermission` (tests without a
+ * database). Pass null to restore the database lookup.
  */
-export function createPermissionGuard(
-  resolveRole: RoleResolver = resolveRoleFromDatabase
-) {
+export function setRoleResolver(resolver: RoleResolver | null): void {
+  defaultRoleResolver = resolver ?? resolveRoleFromDatabase;
+}
+
+/**
+ * Builds the permission guard. The role resolver is injectable for tests;
+ * without one, the current default resolver is used.
+ */
+export function createPermissionGuard(resolveRole?: RoleResolver) {
   /**
    * Permission-based RBAC middleware factory (see config/permissions.ts).
    *
@@ -234,7 +243,7 @@ export function createPermissionGuard(
       }
 
       if (elevated && req.user.role !== Role.SERVICE) {
-        const currentRole = await resolveRole(req.user.id);
+        const currentRole = await (resolveRole ?? defaultRoleResolver)(req.user.id);
         if (!currentRole) {
           res.status(401).json({
             success: false,
