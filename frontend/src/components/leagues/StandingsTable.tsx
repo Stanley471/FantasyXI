@@ -18,6 +18,12 @@ export interface StandingsTableProps {
   onSelectEntry?: (userId: string) => void;
 }
 
+/**
+ * StandingsTableClient — prop-driven, 'use client' component.
+ *
+ * Used by LeagueInteractivePanel for live SSE standings updates.
+ * The RSC variant below (StandingsTable) fetches data server-side.
+ */
 export const StandingsTable: React.FC<StandingsTableProps> = ({
   standings,
   entryFee = 0,
@@ -105,7 +111,7 @@ export const StandingsTable: React.FC<StandingsTableProps> = ({
         <thead>
           <tr className="border-b border-pitch-border text-slate-400 uppercase font-semibold text-[11px] bg-slate-950/50">
             <th className="py-3 px-3 w-12 text-center">Rank</th>
-            <th className="py-3 px-3">Manager & Squad</th>
+            <th className="py-3 px-3">Manager &amp; Squad</th>
             <th className="py-3 px-3">Escrow Status</th>
             <th className="py-3 px-3 text-center">Best GW</th>
             {livePoints && <th className="py-3 px-3 text-right">Live GW</th>}
@@ -235,3 +241,62 @@ export const StandingsTable: React.FC<StandingsTableProps> = ({
     </div>
   );
 };
+
+// ─── Async RSC wrapper — fetches standings on the server ──────────────────────
+
+interface StandingsRscProps {
+  leagueId: string;
+  entryFee?: number;
+  prizePool?: number;
+}
+
+/**
+ * StandingsTableRSC — async Server Component.
+ *
+ * Fetches league standings server-side so they stream in via React Suspense
+ * without blocking the initial page render.
+ * Wrapped in <Suspense fallback={<StandingsLoading />}> by the page.
+ */
+export async function StandingsTableRSC({
+  leagueId,
+  entryFee = 0,
+  prizePool = 0,
+}: StandingsRscProps) {
+  const apiBase =
+    process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+
+  let standings: LeagueStandingsEntry[] = [];
+
+  try {
+    const res = await fetch(
+      `${apiBase}/api/v1/leagues/${leagueId}/standings`,
+      {
+        next: { revalidate: 60 },
+        cache: "no-store",
+      }
+    );
+
+    if (res.ok) {
+      const json = (await res.json()) as {
+        success: boolean;
+        data: LeagueStandingsEntry[] | { standings: LeagueStandingsEntry[] };
+      };
+
+      if (json?.data) {
+        standings = Array.isArray(json.data)
+          ? json.data
+          : json.data.standings;
+      }
+    }
+  } catch (err) {
+    console.error("[StandingsTableRSC] Failed to fetch standings:", err);
+  }
+
+  return (
+    <StandingsTable
+      standings={standings}
+      entryFee={entryFee}
+      prizePool={prizePool}
+    />
+  );
+}
