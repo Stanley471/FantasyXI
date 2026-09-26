@@ -469,3 +469,32 @@ export interface GameweekTimeline {
   };
   generatedAt: string;
 }
+
+// ============================================================
+// Toast Notification Types
+// ============================================================
+
+export type ToastType = "success" | "error" | "info" | "warning";
+
+export interface ToastAction {
+  label: string;
+  onClick: () => void;
+}
+
+export interface ToastOptions {
+  id?: string;
+  title?: string;
+  duration?: number;
+  action?: ToastAction;
+}
+
+export interface ToastItem {
+  id: string;
+  type: ToastType;
+  message: string;
+  title?: string;
+  duration: number;
+  action?: ToastAction;
+  createdAt: number;
+}
+

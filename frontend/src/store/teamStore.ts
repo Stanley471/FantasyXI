@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { Player, Position } from "@/types";
+import { emitToast } from "@/context/ToastContext";
 
 export interface LocalSquadPlayer {
   id?: number | string;
@@ -93,7 +94,7 @@ export const useTeamStore = create<TeamState>((set, get) => ({
       const aIsGkp = a.player.position === Position.GKP;
       const bIsGkp = b.player.position === Position.GKP;
       if (aIsGkp !== bIsGkp) {
-        alert("Goalkeepers can only be swapped with other Goalkeepers.");
+        emitToast.warning("Goalkeepers can only be swapped with other Goalkeepers.");
         return { players: prev };
       }
 
@@ -136,7 +137,9 @@ export const useTeamStore = create<TeamState>((set, get) => ({
         const fwd = newStarters.filter(p => p.player.position === Position.FWD).length;
         
         if (def < 3 || def > 5 || mid < 2 || mid > 5 || fwd < 1 || fwd > 3) {
-          alert(`Invalid Formation: This substitution would result in an invalid formation (${def}-${mid}-${fwd}).`);
+          emitToast.warning(
+            `Invalid Formation: This substitution would result in an invalid formation (${def}-${mid}-${fwd}).`
+          );
           return { players: prev };
         }
       }
