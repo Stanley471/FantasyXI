@@ -1,3 +1,4 @@
+import type { PrismaClient } from "@prisma/client";
 import { prisma } from "../../config/db.js";
 import { ChipType, Position, SQUAD_RULES } from "../../types/index.js";
 
@@ -200,6 +201,9 @@ export class AutoSubstitutionEngine {
 }
 
 export class ScoringService {
+  /** The database client is injectable so scoring can be exercised against in-memory fakes. */
+  constructor(private readonly db: PrismaClient = prisma) {}
+
   /**
    * Pure function to calculate gameweek score for a squad given players and their stats.
    * Enables complete automated unit testing without requiring database mocks.
@@ -254,7 +258,9 @@ export class ScoringService {
       }
     }
 
-    // Sort bench by positionOrder ascending (standard bench priority)
+    // Sort bench by positionOrder ascending (standard bench priority), and starters
+    // too so auto-subs resolve in pitch order whatever order the caller supplied
+    starterDetails.sort((a, b) => a.positionOrder - b.positionOrder);
     benchDetails.sort((a, b) => a.positionOrder - b.positionOrder);
 
     // 2. Perform auto-substitutions for starters who played 0 minutes
@@ -352,7 +358,7 @@ export class ScoringService {
     squadId: string,
     gameweekId: number
   ): Promise<GameweekCalculationResult> {
-    const squad = await prisma.squad.findUnique({
+    const squad = await this.db.squad.findUnique({
       where: { id: squadId },
       include: {
         players: {
@@ -368,7 +374,7 @@ export class ScoringService {
 
     // Fetch stats for all players in the squad for this gameweek
     const playerIds = squad.players.map((p) => p.playerId);
-    const statsList = await prisma.playerGameweekStats.findMany({
+    const statsList = await this.db.playerGameweekStats.findMany({
       where: {
         gameweekId,
         playerId: { in: playerIds },
@@ -393,10 +399,10 @@ export class ScoringService {
     }));
 
     const [chipUsage, existingScore] = await Promise.all([
-      prisma.squadChipUsage.findUnique({
+      this.db.squadChipUsage.findUnique({
         where: { squadId_gameweekId: { squadId, gameweekId } },
       }),
-      prisma.squadGameweekScore.findUnique({
+      this.db.squadGameweekScore.findUnique({
         where: { squadId_gameweekId: { squadId, gameweekId } },
       }),
     ]);
@@ -408,7 +414,7 @@ export class ScoringService {
     });
 
     // Persist into SquadGameweekScore
-    await prisma.squadGameweekScore.upsert({
+    await this.db.squadGameweekScore.upsert({
       where: {
         squadId_gameweekId: {
           squadId,
@@ -433,13 +439,13 @@ export class ScoringService {
     });
 
     // Recalculate and update Squad.totalPoints
-    const allScores = await prisma.squadGameweekScore.findMany({
+    const allScores = await this.db.squadGameweekScore.findMany({
       where: { squadId },
       select: { points: true },
     });
     const newTotalPoints = allScores.reduce((sum, s) => sum + s.points, 0);
 
-    await prisma.squad.update({
+    await this.db.squad.update({
       where: { id: squadId },
       data: { totalPoints: newTotalPoints },
     });
@@ -476,7 +482,7 @@ export class ScoringService {
       if (endGameweekId !== undefined) whereClause.gameweekId.lte = endGameweekId;
     }
 
-    const scores = await prisma.squadGameweekScore.findMany({
+    const scores = await this.db.squadGameweekScore.findMany({
       where: whereClause,
       select: { points: true },
     });
