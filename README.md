@@ -298,6 +298,16 @@ npm run build
 ```
 **Output**: `13/13 static & dynamic routes compiled with zero errors`.
 
+### 5. Progressive Web App (Offline Mode)
+The frontend installs as a PWA (manifest + service worker in `frontend/public/`). The service worker is only registered in production builds:
+```bash
+cd frontend
+npm run build && npm start
+```
+- Open the app once online and sign in; the squad page and its assets are cached at install, and each successful squad load saves a per-user snapshot on the device.
+- In DevTools > Application, check the manifest and service worker, then tick **Network > Offline** and reload `/team`: the squad is shown read-only with an offline banner. Uncached pages fall back to `/offline.html`.
+- Saving the squad and transfers always require a connection. Authenticated API responses are never stored in the shared service worker cache, and offline snapshots are cleared on sign-out.
+
 ---
 
 ## Production Deployment Guide

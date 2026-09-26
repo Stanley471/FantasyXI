@@ -1,9 +1,11 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { api, ApiError } from "@/lib/api";
+import { isOfflineError, loadSquadSnapshot, saveSquadSnapshot } from "@/lib/offlineStore";
+import { useOnlineStatus } from "@/lib/useOnlineStatus";
 import { Squad, Player, Position, SQUAD_RULES } from "@/types";
 import { Pitch } from "@/components/pitch/Pitch";
 import { Bench } from "@/components/pitch/Bench";
@@ -52,6 +54,11 @@ export default function TeamPage() {
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [saveSuccessMsg, setSaveSuccessMsg] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const isOnline = useOnlineStatus();
+  // When set, the pitch shows the squad saved on this device at that time
+  const [offlineSnapshotAt, setOfflineSnapshotAt] = useState<string | null>(null);
+  const showingSnapshot = useRef(false);
+  const userId = user?.id;
 
   // Load existing squad
   useEffect(() => {
@@ -59,43 +66,75 @@ export default function TeamPage() {
       router.replace("/login?returnTo=/team");
       return;
     }
+    if (!isAuthenticated || !userId) return;
+
+    let cancelled = false;
+
+    const applySquads = (squads: Squad[]) => {
+      if (squads.length === 0) return;
+      const s = squads[0];
+      setSquadId(s.id);
+      setSquadName(s.name);
+
+      if (s.players && s.players.length > 0) {
+        const mapped: LocalSquadPlayer[] = s.players
+          .filter((sp) => sp.player)
+          .map((sp) => ({
+            id: sp.id,
+            playerId: sp.playerId,
+            player: sp.player!,
+            isStarter: sp.isStarter,
+            isCaptain: sp.isCaptain,
+            isViceCaptain: sp.isViceCaptain,
+            positionOrder: sp.positionOrder,
+          }));
+        setPlayers(mapped);
+      }
+    };
 
     async function loadSquad() {
-      if (!isAuthenticated) return;
       setIsLoading(true);
       try {
         const res = await api.get<{ success: boolean; data: Squad[] }>("/api/v1/squads/me");
-        if (res?.data && res.data.length > 0) {
-          const s = res.data[0];
-          setSquadId(s.id);
-          setSquadName(s.name);
-
-          if (s.players && s.players.length > 0) {
-            const mapped: LocalSquadPlayer[] = s.players
-              .filter((sp) => sp.player)
-              .map((sp) => ({
-                id: sp.id,
-                playerId: sp.playerId,
-                player: sp.player!,
-                isStarter: sp.isStarter,
-                isCaptain: sp.isCaptain,
-                isViceCaptain: sp.isViceCaptain,
-                positionOrder: sp.positionOrder,
-              }));
-            setPlayers(mapped);
-          }
+        if (cancelled) return;
+        if (res?.data) {
+          saveSquadSnapshot(userId!, res.data);
+          applySquads(res.data);
         }
+        showingSnapshot.current = false;
+        setOfflineSnapshotAt(null);
       } catch (err) {
-        console.error("Failed to load user squad:", err);
+        if (cancelled) return;
+        const snapshot = isOfflineError(err) ? loadSquadSnapshot(userId!) : null;
+        if (snapshot) {
+          applySquads(snapshot.squads);
+          showingSnapshot.current = true;
+          setOfflineSnapshotAt(snapshot.savedAt);
+        } else if (isOfflineError(err)) {
+          setErrorMessage("You are offline and this device has no saved copy of your squad yet.");
+        } else {
+          console.error("Failed to load user squad:", err);
+        }
       } finally {
-        setIsLoading(false);
+        if (!cancelled) setIsLoading(false);
       }
     }
 
-    if (isAuthenticated) {
-      loadSquad();
-    }
-  }, [isAuthenticated, authLoading, router]);
+    loadSquad();
+
+    // Swap the saved copy for live data as soon as the connection returns
+    const handleOnline = () => {
+      if (showingSnapshot.current) {
+        setErrorMessage(null);
+        loadSquad();
+      }
+    };
+    window.addEventListener("online", handleOnline);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("online", handleOnline);
+    };
+  }, [isAuthenticated, authLoading, router, userId, setSquadId, setSquadName, setPlayers]);
 
   // Derived state
   const starters = players
@@ -358,6 +397,10 @@ export default function TeamPage() {
   // Save changes to backend
   const handleSaveSquad = async () => {
     if (!canSave) return;
+    if (!isOnline) {
+      setErrorMessage("You are offline. Reconnect to save your squad or make transfers.");
+      return;
+    }
     setIsSaving(true);
     setErrorMessage(null);
     setSaveSuccessMsg(null);
@@ -455,6 +498,22 @@ export default function TeamPage() {
           </div>
         </div>
 
+        {/* Offline mode: read-only view of the squad saved on this device */}
+        {(offlineSnapshotAt || !isOnline) && (
+          <div
+            role="status"
+            className="p-3.5 rounded-lg bg-amber-950/40 border border-amber-500/40 flex items-center gap-3 text-amber-200 text-xs"
+          >
+            <IconAlertCircle className="w-4 h-4 text-amber-400 flex-shrink-0" />
+            <span className="font-semibold">
+              {offlineSnapshotAt
+                ? `Offline mode: showing your squad as saved on this device ${new Date(offlineSnapshotAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}.`
+                : "You are offline."}{" "}
+              Saving and transfers need a connection.
+            </span>
+          </div>
+        )}
+
         {/* Notifications */}
         {saveSuccessMsg && (
           <div className="p-3.5 rounded-lg bg-emerald-950/40 border border-emerald-500/40 flex items-center gap-3 text-emerald-300 text-xs animate-fadeIn">
@@ -479,7 +538,7 @@ export default function TeamPage() {
           }}
           isSaving={isSaving}
           onSave={handleSaveSquad}
-          canSave={canSave}
+          canSave={canSave && isOnline}
         />
 
         {/* Validation Errors Pill if invalid */}

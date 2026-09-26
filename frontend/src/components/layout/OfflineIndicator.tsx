@@ -1,36 +1,17 @@
 "use client";
 
-import React, { useEffect, useSyncExternalStore } from "react";
-
-function subscribe(callback: () => void) {
-  window.addEventListener("online", callback);
-  window.addEventListener("offline", callback);
-  return () => {
-    window.removeEventListener("online", callback);
-    window.removeEventListener("offline", callback);
-  };
-}
-
-function getSnapshot() {
-  return navigator.onLine;
-}
-
-function getServerSnapshot() {
-  return true;
-}
+import React, { useEffect } from "react";
+import { useOnlineStatus } from "@/lib/useOnlineStatus";
 
 export function OfflineIndicator() {
-  const isOnline = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
-  const isOffline = !isOnline;
+  const isOffline = !useOnlineStatus();
 
   useEffect(() => {
     // Register Service Worker for PWA offline capabilities
     if ("serviceWorker" in navigator && process.env.NODE_ENV !== "development") {
       navigator.serviceWorker
-        .register("/sw.js")
-        .then((registration) => {
-          console.log("[PWA] Service Worker registered with scope:", registration.scope);
-        })
+        // Always re-check sw.js itself so new versions roll out promptly
+        .register("/sw.js", { scope: "/", updateViaCache: "none" })
         .catch((err) => {
           console.warn("[PWA] Service Worker registration failed:", err);
         });
@@ -63,7 +44,7 @@ export function OfflineIndicator() {
           />
         </svg>
         <span className="font-medium">
-          You are offline. Showing cached team & gameweek points.
+          You are offline. Showing pages and your squad saved on this device.
         </span>
         <button
           type="button"

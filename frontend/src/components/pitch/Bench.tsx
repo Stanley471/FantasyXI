@@ -1,14 +1,17 @@
 "use client";
 
-import React from "react";
+import React, { useMemo } from "react";
 import { Position, SquadPlayer, Player } from "@/types";
 import { PlayerCard } from "./PlayerCard";
 
 import { useTeamStore } from "@/store/teamStore";
 
 export const Bench: React.FC = () => {
-  const benchPlayers = useTeamStore((state) => 
-    state.players.filter((p) => !p.isStarter).sort((a, b) => a.positionOrder - b.positionOrder)
+  // Derived with useMemo: a selector returning a new array loops forever in zustand
+  const players = useTeamStore((state) => state.players);
+  const benchPlayers = useMemo(
+    () => players.filter((p) => !p.isStarter).sort((a, b) => a.positionOrder - b.positionOrder),
+    [players]
   );
   // Ensure exactly 4 slots (1 GK, 3 Outfield)
   const defaultSlots: Position[] = [

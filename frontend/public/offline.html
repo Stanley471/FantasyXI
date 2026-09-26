@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#059669" />
+    <title>Offline · FantasyXI</title>
+    <link rel="icon" href="/icons/icon-192.png" />
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px 16px;
+        background: #020617;
+        color: #e2e8f0;
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      }
+      main {
+        width: 100%;
+        max-width: 420px;
+        padding: 32px 24px;
+        text-align: center;
+        background: #0f172a;
+        border: 1px solid #1e293b;
+        border-radius: 16px;
+      }
+      img { width: 64px; height: 64px; border-radius: 16px; }
+      h1 { margin: 16px 0 8px; font-size: 20px; color: #fff; }
+      p { margin: 0 0 24px; font-size: 14px; line-height: 1.5; color: #94a3b8; }
+      .actions { display: flex; flex-direction: column; gap: 10px; }
+      a, button {
+        display: block;
+        width: 100%;
+        padding: 12px 16px;
+        border-radius: 10px;
+        font: inherit;
+        font-size: 14px;
+        font-weight: 700;
+        text-decoration: none;
+        cursor: pointer;
+      }
+      a { background: #059669; color: #fff; border: 0; }
+      button { background: transparent; color: #e2e8f0; border: 1px solid #334155; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <img src="/icons/icon-192.png" alt="" />
+      <h1>You're offline</h1>
+      <p>
+        This page hasn't been saved for offline use yet. Your squad saved on this
+        device is still available. Transfers and saving need a connection.
+      </p>
+      <div class="actions">
+        <a href="/team">View my squad</a>
+        <button type="button" onclick="location.reload()">Try again</button>
+      </div>
+    </main>
+    <script>
+      // Return to the requested page as soon as the connection comes back
+      window.addEventListener("online", function () { location.reload(); });
+    </script>
+  </body>
+</html>

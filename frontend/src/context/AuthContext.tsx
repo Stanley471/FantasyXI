@@ -3,6 +3,12 @@
 import React, { createContext, useContext, useState, useEffect } from "react";
 import { User, AuthResponse, ApiSuccessResponse } from "@/types";
 import { api } from "@/lib/api";
+import {
+  clearOfflineData,
+  isOfflineError,
+  loadOfflineUser,
+  saveOfflineUser,
+} from "@/lib/offlineStore";
 
 interface AuthContextType {
   user: User | null;
@@ -27,14 +33,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const res = await api.get<ApiSuccessResponse<User>>("/api/v1/auth/me");
       if (res?.success && res.data) {
         setUser(res.data);
+        saveOfflineUser(res.data);
       } else {
         // Token invalid
         localStorage.removeItem("token");
         setToken(null);
         setUser(null);
       }
-    } catch {
-      // Offline or expired
+    } catch (error) {
+      // Offline: keep the session and use the profile saved on the last visit,
+      // so cached pages (e.g. the squad) stay available without a connection
+      const cachedUser = isOfflineError(error) ? loadOfflineUser() : null;
+      if (cachedUser) {
+        setUser(cachedUser);
+        return;
+      }
+      // Expired / revoked token
       localStorage.removeItem("token");
       setToken(null);
       setUser(null);
@@ -54,6 +68,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const login = (newToken: string, newUser: User) => {
     if (typeof window !== "undefined") {
       localStorage.setItem("token", newToken);
+      saveOfflineUser(newUser);
     }
     setToken(newToken);
     setUser(newUser);
@@ -62,6 +77,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const logout = () => {
     if (typeof window !== "undefined") {
       localStorage.removeItem("token");
+      clearOfflineData();
     }
     setToken(null);
     setUser(null);
