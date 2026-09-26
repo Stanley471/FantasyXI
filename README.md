@@ -232,9 +232,17 @@ npm run dev
 Backend API will be running at `http://localhost:5000`.
 
 ### 3. Frontend Setup
-Navigate to `frontend/`:
+The frontend is a Next.js app and should be started from the `frontend/` directory using a supported Node.js version.
+
+Requirements:
+- **Node.js**: `v20.x` or `v24.x`
+- **Package manager**: `npm`
+
+From the repository root:
 ```bash
-cd ../frontend
+cd frontend
+node -v
+npm install
 cp .env.example .env.local
 ```
 
@@ -247,12 +255,13 @@ NEXT_PUBLIC_STELLAR_SOROBAN_RPC_URL="https://soroban-testnet.stellar.org"
 NEXT_PUBLIC_STELLAR_NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
 ```
 
-Install dependencies and start Next.js:
+Install dependencies and start the local Next.js development server:
 ```bash
 npm install
 npm run dev
 ```
-Frontend will be accessible at `http://localhost:3000`.
+
+For the current Next.js setup, `npm run dev` starts the local development server (using the standard Next.js app setup; in v16 this can use Turbopack under the hood). The frontend will be available at `http://localhost:3000`.
 
 ---
 
@@ -340,3 +349,50 @@ npm run build
 ## License
 
 This project is licensed under the **ISC License**. See the `LICENSE` file for details.
+
+## Stellar Testnet Setup
+
+This section helps contributors configure the Stellar Testnet environment locally to interact with Soroban contracts and the USDC Stellar Asset used by FantasyXI.
+
+- **Network & endpoints**:
+   - Horizon: `https://horizon-testnet.stellar.org`
+   - Soroban RPC: `https://soroban-testnet.stellar.org`
+   - Network passphrase: `Test SDF Network ; September 2015`
+
+- **Required environment variables** (add these to `backend/.env` and `frontend/.env.local` as appropriate):
+   - `STELLAR_NETWORK` (e.g. `TESTNET`)
+   - `STELLAR_HORIZON_URL` (e.g. `https://horizon-testnet.stellar.org`)
+   - `STELLAR_SOROBAN_RPC_URL` (e.g. `https://soroban-testnet.stellar.org`)
+   - `STELLAR_NETWORK_PASSPHRASE` (e.g. `Test SDF Network ; September 2015`)
+   - `STELLAR_USDC_ASSET_CODE` (e.g. `USDC`)
+   - `STELLAR_USDC_ISSUER` (classic issuer public key, e.g. `GC43IGCUMQYECKMRKGSJE2RPQPJ2QNHFB6VAHNNBO4NONKK3PVHEXN25`)
+   - `STELLAR_USDC_TOKEN_CONTRACT_ID` (SAC contract id, e.g. `CBKWOGJ7CQSVZXIOIIPCDAUT6APQYBCEE7QTSGDZZ2RO6D3JYRMKWZNG`)
+   - `STELLAR_ESCROW_CONTRACT_ID` (Escrow contract id, e.g. `CB4KIK42P32SZHKG4JBDCJUV4A4KGCDN6RHOOTIFSBGZHS2IF653VOEA`)
+
+- **Creating & funding testnet accounts**:
+   1. Generate a new keypair using the Stellar Laboratory or the SDK of your choice.
+       - Stellar Laboratory Keypair tool: https://laboratory.stellar.org/#account-creator?network=test
+   2. Fund your testnet account using Friendbot:
+       - Friendbot URL: `https://friendbot.stellar.org/?addr=YOUR_PUBLIC_KEY`
+       - Example: `curl "https://friendbot.stellar.org/?addr=G...YOUR_PUBLIC...KEY"`
+
+- **Obtaining testnet USDC**:
+   - On Testnet, USDC is represented by a token issuer and/or SAC contract. If the repo provides a test USDC faucet script, run it; otherwise request USDC by contacting the test asset issuer or minting via a local/authorized issuer key (not in production).
+   - Helpful links:
+      - Stellar Laboratory (Transactions & Assets): https://laboratory.stellar.org/
+      - Horizon Testnet Explorer: https://stellar.expert/explorer/testnet
+
+- **Trustline note**: Before receiving USDC or interacting with the USDC SAC, ensure your test account establishes a trustline to the USDC asset (unless using contract-controlled flows that don't require a classic trustline). In the Stellar Laboratory, add an Asset with code `USDC` and issuer `GC43IGCUMQYECKMRKGSJE2RPQPJ2QNHFB6VAHNNBO4NONKK3PVHEXN25` and submit a change-trust operation.
+
+- **Quick example: fund + trustline via `stellar-sdk` (Node.js)**
+```js
+// install: npm install stellar-sdk
+const StellarSdk = require('stellar-sdk');
+const server = new StellarSdk.Server('https://horizon-testnet.stellar.org');
+const pair = StellarSdk.Keypair.random();
+console.log('Public:', pair.publicKey());
+console.log('Secret:', pair.secret());
+// Fund using Friendbot (curl in shell) then create trustline and optionally request test USDC from issuer-owned faucet.
+```
+
+If you follow the steps above you will be able to fund a testnet account and configure your local environment to interact with the Soroban RPC and the FantasyXI escrow contract on Stellar Testnet.
