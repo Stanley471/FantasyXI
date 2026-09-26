@@ -1,9 +1,11 @@
 import { prisma } from "../config/db.js";
-import { ChipType, LeagueStatus, ScoringType } from "../types/index.js";
 import { fplSyncService } from "../services/fpl/fplSyncService.js";
-import { scoringService } from "../services/scoring/scoringService.js";
-import { squadService } from "../services/squad/squadService.js";
-import { leagueService } from "../services/league/leagueService.js";
+import { eventBus, publishOrThrow } from "../services/events/eventBus.js";
+import { GAMEWEEK_UPDATED_EVENT } from "../services/events/domainEvents.js";
+// Imported for its side effect: subscribes the scoring, free-hit and league
+// settlement handlers to GAMEWEEK_UPDATED_EVENT (issue #118). This job no
+// longer needs to know which services react to a gameweek update.
+import "../services/events/gameweekEventHandlers.js";
 
 /**
  * A gameweek can be settled once all its fixtures are finished.
@@ -18,6 +20,14 @@ export function isGameweekReadyForSettlement(fixtures: Array<{ finished: boolean
  * Settles one gameweek: final stats sync, squad scores (auto-subs and chips applied),
  * Free Hit reverts, H2H results and completion of leagues ending this gameweek.
  * Every step is idempotent, so a retried job does not double count.
+ *
+ * The scoring, free-hit-revert and league-settlement steps are no longer
+ * called directly (issue #118): this job publishes a single
+ * GAMEWEEK_UPDATED_EVENT and the independent subscribers registered in
+ * services/events/gameweekEventHandlers.ts react to it. `publishOrThrow` is
+ * used (rather than a bare `eventBus.publish`) because settlement must not be
+ * marked finished unless every subscriber actually completed - a retried
+ * pg-boss job re-publishes the same event and all steps are idempotent.
  */
 export async function settleGameweek(gameweekId: number): Promise<void> {
   const gameweek = await prisma.gameweek.findUniqueOrThrow({
@@ -26,34 +36,10 @@ export async function settleGameweek(gameweekId: number): Promise<void> {
 
   await fplSyncService.syncGameweekLiveStats(gameweek.fplId);
 
-  const squads = await prisma.squad.findMany({ select: { id: true } });
-  for (const squad of squads) {
-    await scoringService.calculateAndPersistSquadScore(squad.id, gameweekId);
-  }
-
-  const freeHits = await prisma.squadChipUsage.findMany({
-    where: { gameweekId, chipType: ChipType.FREE_HIT, revertedAt: null },
-    select: { squadId: true },
+  await publishOrThrow(eventBus, GAMEWEEK_UPDATED_EVENT, {
+    gameweekId,
+    gameweekFplId: gameweek.fplId,
   });
-  for (const usage of freeHits) {
-    await squadService.revertFreeHit(usage.squadId, gameweekId);
-  }
-
-  const leagues = await prisma.league.findMany({
-    where: {
-      status: LeagueStatus.ACTIVE,
-      startGameweekId: { lte: gameweekId },
-      endGameweekId: { gte: gameweekId },
-    },
-  });
-  for (const league of leagues) {
-    if (league.scoringType === ScoringType.HEAD_TO_HEAD) {
-      await leagueService.settleH2HGameweek(league.id, gameweekId);
-    }
-    if (league.endGameweekId === gameweekId) {
-      await leagueService.transitionStatus(league.id, LeagueStatus.COMPLETED);
-    }
-  }
 
   await prisma.gameweek.update({
     where: { id: gameweekId },
