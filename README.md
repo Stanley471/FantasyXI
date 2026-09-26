@@ -333,6 +333,8 @@ npm run build
 - **Envelope XDR Verification**: Payments are verified on-chain by decoding `invokeHostFunction` transaction envelopes, matching contract ID, function call, sender public key, and league ID.
 - **SQL & Injection Protection**: Database interactions are performed using Prisma ORM with parameterized queries.
 - **Rate Limiting & Authentication**: Endpoints requiring user context are guarded by JWT authorization middleware with CSRF-protected OAuth state tokens.
+- **Role-Based Access Control**: Every protected endpoint declares the permission it needs via `requirePermission`; the role-to-permission matrix lives in [`backend/src/config/permissions.ts`](backend/src/config/permissions.ts). Roles are `USER` (managers), `MODERATOR`, `ADMIN` and `SERVICE` (automated callers). Elevated permissions are re-checked against the database on each request, so demoting an account takes effect immediately. A route audit test fails the build if a non-public endpoint is added without a permission guard.
+- **Service Credentials**: Schedulers and monitoring authenticate with the `X-Service-Key` header using keys from `SERVICE_API_KEYS` (`name:key` pairs, keys of at least 32 characters). The `SERVICE` role can run syncs, score calculation, reconciliation and queue health checks, but cannot act as a manager, and it can never be claimed through a user JWT.
 - Consult [`REGULATORY_CONSIDERATIONS.md`](file:///c:/ReactApps/FantasyXI/REGULATORY_CONSIDERATIONS.md) for legal classifications, skill-game exemptions, and AML operational considerations.
 
 ---
