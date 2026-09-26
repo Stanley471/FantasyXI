@@ -355,7 +355,7 @@ export default function TeamPage() {
     setSelectedPlayerId(null);
   };
 
-  // Save changes to backend
+  // Save changes to backend with optimistic rollback
   const handleSaveSquad = async () => {
     if (!canSave) return;
     setIsSaving(true);
@@ -373,39 +373,59 @@ export default function TeamPage() {
       })),
     };
 
+    // Snapshot current state for rollback
+    const previousPlayers = players.map((p) => ({ ...p, player: p.player ? { ...p.player } : undefined }));
+
     try {
       if (squadId) {
-        // Update existing squad
-        await api.put(`/api/v1/squads/${squadId}`, payload);
-        const msg = "Squad lineup and tactics updated successfully!";
-        setSaveSuccessMsg(msg);
-        toast.success(msg);
+        // Optimistic update: assume success, rollback on failure
+        let rollback = false;
+        try {
+          await api.put(`/api/v1/squads/${squadId}`, payload);
+          const msg = "Squad lineup and tactics updated successfully!";
+          setSaveSuccessMsg(msg);
+          toast.success(msg);
+        } catch (err: unknown) {
+          rollback = true;
+          const msg =
+            err instanceof ApiError
+              ? err.message || "Failed to save squad."
+              : err instanceof Error
+                ? err.message
+                : "An unexpected error occurred while saving squad.";
+          setPlayers(previousPlayers);
+          setErrorMessage(msg);
+          toast.error(msg);
+        }
       } else {
         // Create new squad
         const createPayload = {
           ...payload,
           userId: user?.id,
         };
-        const res = await api.post<{ success: boolean; data: Squad }>(
-          "/api/v1/squads",
-          createPayload
-        );
-        if (res?.data?.id) {
-          setSquadId(res.data.id);
+        try {
+          const res = await api.post<{ success: boolean; data: Squad }>(
+            "/api/v1/squads",
+            createPayload
+          );
+          if (res?.data?.id) {
+            setSquadId(res.data.id);
+          }
+          const msg = "Squad created and registered in FantasyXI!";
+          setSaveSuccessMsg(msg);
+          toast.success(msg);
+        } catch (err: unknown) {
+          const msg =
+            err instanceof ApiError
+              ? err.message || "Failed to create squad."
+              : err instanceof Error
+                ? err.message
+                : "An unexpected error occurred while creating squad.";
+          setPlayers(previousPlayers);
+          setErrorMessage(msg);
+          toast.error(msg);
         }
-        const msg = "Squad created and registered in FantasyXI!";
-        setSaveSuccessMsg(msg);
-        toast.success(msg);
       }
-    } catch (err: unknown) {
-      const msg =
-        err instanceof ApiError
-          ? err.message || "Failed to save squad."
-          : err instanceof Error
-            ? err.message
-            : "An unexpected error occurred while saving squad.";
-      setErrorMessage(msg);
-      toast.error(msg);
     } finally {
       setIsSaving(false);
     }
