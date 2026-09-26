@@ -9,6 +9,7 @@ import leagueRoutes from "./league.routes.js";
 import authRoutes from "./auth.routes.js";
 import liveRoutes from "./live.routes.js";
 import adminRoutes from "./admin.routes.js";
+import leaderboardRoutes from "./leaderboard.routes.js";
 import { replicaReads } from "../middleware/readConsistency.js";
 
 /**
@@ -31,5 +32,6 @@ apiV1Router.use("/fixtures", replicaReads, fixtureRoutes);
 apiV1Router.use("/squads", squadRoutes);
 apiV1Router.use("/leagues", replicaReads, leagueRoutes);
 apiV1Router.use("/live", replicaReads, liveRoutes);
+apiV1Router.use("/leaderboard", replicaReads, leaderboardRoutes);
 
 export default apiV1Router;

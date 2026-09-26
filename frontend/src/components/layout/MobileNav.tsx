@@ -40,7 +40,7 @@ export const MobileNav: React.FC = () => {
           <Link
             key={item.href}
             href={item.href}
-            className={`flex flex-col items-center justify-center min-w-[56px] min-h-[48px] py-1 px-2 rounded-lg transition-colors ${
+            className={`flex flex-1 min-w-0 flex-col items-center justify-center min-h-[48px] py-1 px-1 rounded-lg transition-colors ${
               active ? "text-emerald-400 font-bold" : "text-slate-400 hover:text-slate-200"
             }`}
           >
@@ -51,7 +51,7 @@ export const MobileNav: React.FC = () => {
       })}
       <Link
         href="/profile"
-        className={`flex flex-col items-center justify-center min-w-[56px] min-h-[48px] py-1 px-2 rounded-lg transition-colors ${
+        className={`flex flex-1 min-w-0 flex-col items-center justify-center min-h-[48px] py-1 px-1 rounded-lg transition-colors ${
           pathname.startsWith("/profile") ? "text-emerald-400 font-bold" : "text-slate-400 hover:text-slate-200"
         }`}
       >
