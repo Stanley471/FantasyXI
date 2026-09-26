@@ -30,6 +30,8 @@ export type Role = (typeof Role)[keyof typeof Role];
 export enum Permission {
   // Own account
   PROFILE_READ = "profile:read",
+  /** Account settings: sign-in methods, password */
+  PROFILE_UPDATE_OWN = "profile:update:own",
 
   // Squads (ownership is enforced additionally by the squad service)
   SQUAD_CREATE = "squad:create",
@@ -63,6 +65,7 @@ export enum Permission {
 /** Everything a signed-in manager can do with their own data. */
 const USER_PERMISSIONS: readonly Permission[] = [
   Permission.PROFILE_READ,
+  Permission.PROFILE_UPDATE_OWN,
   Permission.SQUAD_CREATE,
   Permission.SQUAD_UPDATE_OWN,
   Permission.SQUAD_READ_OWN,
