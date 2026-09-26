@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, use } from "react";
+import React, { useState, useEffect, useCallback, use } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
@@ -22,15 +22,14 @@ import { LiveSquadModal } from "@/components/live/LiveSquadModal";
 import { useLiveLeague } from "@/components/live/useLiveLeague";
 import { LeagueStatusBadge, Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { useToast } from "@/context/ToastContext";
 import {
   IconTrophy,
-  IconUsers,
   IconCopy,
   IconCheck,
   IconAlertCircle,
   IconChevronLeft,
   IconShield,
-  IconPlus,
 } from "@/components/ui/Icons";
 
 export default function LeagueDetailPage({
@@ -43,6 +42,7 @@ export default function LeagueDetailPage({
 
   const router = useRouter();
   const { user, isAuthenticated } = useAuth();
+  const { toast } = useToast();
 
   const [league, setLeague] = useState<League | null>(null);
   const [standings, setStandings] = useState<LeagueStandingsEntry[]>([]);
@@ -78,7 +78,7 @@ export default function LeagueDetailPage({
   );
 
   // Load league data, standings, and user squads
-  const loadLeagueData = async () => {
+  const loadLeagueData = useCallback(async () => {
     try {
       // 1. Fetch league details
       const lgRes = await api.get<{ success: boolean; data: League }>(
@@ -117,10 +117,56 @@ export default function LeagueDetailPage({
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [leagueId, isAuthenticated]);
 
   useEffect(() => {
-    loadLeagueData();
+    let cancelled = false;
+
+    async function init() {
+      try {
+        const lgRes = await api.get<{ success: boolean; data: League }>(
+          `/api/v1/leagues/${leagueId}`
+        );
+        if (!cancelled && lgRes?.data) {
+          setLeague(lgRes.data);
+        }
+
+        const stdRes = await api.get<{
+          success: boolean;
+          data: LeagueStandingsEntry[] | { standings: LeagueStandingsEntry[] };
+        }>(`/api/v1/leagues/${leagueId}/standings`);
+        if (!cancelled && stdRes?.data) {
+          setStandings(Array.isArray(stdRes.data) ? stdRes.data : stdRes.data.standings);
+        }
+
+        if (isAuthenticated) {
+          const squadRes = await api.get<{ success: boolean; data: Squad[] }>(
+            "/api/v1/squads/me"
+          );
+          if (!cancelled && squadRes?.data && squadRes.data.length > 0) {
+            setUserSquads(squadRes.data);
+            setSelectedSquadId(squadRes.data[0].id);
+          }
+        }
+      } catch (err: unknown) {
+        if (!cancelled) {
+          if (err instanceof ApiError) {
+            setErrorMessage(err.message || "Failed to load league details.");
+          } else {
+            setErrorMessage("Could not load competition data.");
+          }
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
+      }
+    }
+
+    init();
+    return () => {
+      cancelled = true;
+    };
   }, [leagueId, isAuthenticated]);
 
   useEffect(() => {
@@ -147,6 +193,7 @@ export default function LeagueDetailPage({
     if (league?.inviteCode) {
       navigator.clipboard.writeText(league.inviteCode);
       setCopiedCode(true);
+      toast.success("League invite code copied to clipboard!");
       setTimeout(() => setCopiedCode(false), 2000);
     }
   };
@@ -159,7 +206,9 @@ export default function LeagueDetailPage({
     }
 
     if (!selectedSquadId) {
-      setErrorMessage("Please select a squad to enter this league.");
+      const msg = "Please select a squad to enter this league.";
+      setErrorMessage(msg);
+      toast.warning(msg);
       return;
     }
 
@@ -171,6 +220,8 @@ export default function LeagueDetailPage({
         squadId: selectedSquadId,
       });
 
+      toast.success(`Successfully joined ${league?.name || "league"}!`);
+
       // Reload standings
       await loadLeagueData();
 
@@ -179,13 +230,14 @@ export default function LeagueDetailPage({
         setShowPaymentModal(true);
       }
     } catch (err: unknown) {
-      if (err instanceof ApiError) {
-        setErrorMessage(err.message || "Failed to join league.");
-      } else if (err instanceof Error) {
-        setErrorMessage(err.message);
-      } else {
-        setErrorMessage("An unexpected error occurred.");
-      }
+      const msg =
+        err instanceof ApiError
+          ? err.message || "Failed to join league."
+          : err instanceof Error
+            ? err.message
+            : "An unexpected error occurred.";
+      setErrorMessage(msg);
+      toast.error(msg);
     } finally {
       setIsJoining(false);
     }

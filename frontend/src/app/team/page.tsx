@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/Icons";
 import { Button } from "@/components/ui/Button";
 import { PositionBadge } from "@/components/ui/Badge";
+import { useToast } from "@/context/ToastContext";
 import {
   DndContext,
   MouseSensor,
@@ -36,6 +37,7 @@ import { PlayerCard } from "@/components/pitch/PlayerCard";
 export default function TeamPage() {
   const router = useRouter();
   const { user, isAuthenticated, isLoading: authLoading } = useAuth();
+  const { toast } = useToast();
 
   const { 
     squadId, setSquadId, 
@@ -173,9 +175,12 @@ export default function TeamPage() {
         data: { players: Player[] } | Player[];
       }>("/api/v1/players?limit=100&sortBy=totalPoints&sortOrder=desc");
 
-      const pool: Player[] = Array.isArray(res?.data)
-        ? res.data
-        : (res?.data as any)?.players || [];
+      const data = res?.data;
+      const pool: Player[] = Array.isArray(data)
+        ? data
+        : data && typeof data === "object" && "players" in data && Array.isArray((data as { players: Player[] }).players)
+          ? (data as { players: Player[] }).players
+          : [];
 
       if (pool.length < 15) {
         setErrorMessage("Not enough players in database to auto-draft a squad.");
@@ -294,10 +299,13 @@ export default function TeamPage() {
 
         setPlayers(newPlayers);
         setSelectedPlayerId(null);
+        toast.info("Auto-drafted a balanced squad! Review tactics before saving.");
       }
     } catch (err) {
       console.error("Auto-pick error:", err);
-      setErrorMessage("Failed to auto-generate squad. Please try picking manually.");
+      const msg = "Failed to auto-generate squad. Please try picking manually.";
+      setErrorMessage(msg);
+      toast.error(msg);
     } finally {
       setIsLoading(false);
     }
@@ -369,7 +377,9 @@ export default function TeamPage() {
       if (squadId) {
         // Update existing squad
         await api.put(`/api/v1/squads/${squadId}`, payload);
-        setSaveSuccessMsg("Squad lineup and tactics updated successfully!");
+        const msg = "Squad lineup and tactics updated successfully!";
+        setSaveSuccessMsg(msg);
+        toast.success(msg);
       } else {
         // Create new squad
         const createPayload = {
@@ -383,16 +393,19 @@ export default function TeamPage() {
         if (res?.data?.id) {
           setSquadId(res.data.id);
         }
-        setSaveSuccessMsg("Squad created and registered in FantasyXI!");
+        const msg = "Squad created and registered in FantasyXI!";
+        setSaveSuccessMsg(msg);
+        toast.success(msg);
       }
     } catch (err: unknown) {
-      if (err instanceof ApiError) {
-        setErrorMessage(err.message || "Failed to save squad.");
-      } else if (err instanceof Error) {
-        setErrorMessage(err.message);
-      } else {
-        setErrorMessage("An unexpected error occurred while saving squad.");
-      }
+      const msg =
+        err instanceof ApiError
+          ? err.message || "Failed to save squad."
+          : err instanceof Error
+            ? err.message
+            : "An unexpected error occurred while saving squad.";
+      setErrorMessage(msg);
+      toast.error(msg);
     } finally {
       setIsSaving(false);
     }
@@ -437,7 +450,7 @@ export default function TeamPage() {
           <div className="flex items-center gap-2 text-xs font-mono">
             <span className="text-slate-400 uppercase tracking-wider text-[11px]">Formation</span>
             <span className="text-emerald-400 font-bold text-sm">
-              {detectFormation(starters as any)}
+              {detectFormation(starters)}
             </span>
           </div>
         </div>

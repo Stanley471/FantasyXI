@@ -6,6 +6,7 @@ import { CreatedLeagueInvitation, LeagueInvitation, LeagueInvitationState } from
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { IconCheck, IconCopy, IconAlertCircle, IconPlus } from "@/components/ui/Icons";
+import { useToast } from "@/context/ToastContext";
 
 const EXPIRY_OPTIONS = [
   { hours: 24, label: "24 hours" },
@@ -38,6 +39,7 @@ function inviteUrl(token: string): string {
  * links, and review or revoke the ones already issued.
  */
 export const InvitationManager: React.FC<{ leagueId: string }> = ({ leagueId }) => {
+  const { toast } = useToast();
   const [invitations, setInvitations] = useState<LeagueInvitation[]>([]);
   const [expiresInHours, setExpiresInHours] = useState<number>(72);
   const [created, setCreated] = useState<CreatedLeagueInvitation | null>(null);
@@ -77,9 +79,12 @@ export const InvitationManager: React.FC<{ leagueId: string }> = ({ leagueId }) 
         { expiresInHours }
       );
       setCreated(res.data);
+      toast.success("Invitation link generated successfully!");
       await loadInvitations();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not create an invitation.");
+      const msg = err instanceof ApiError ? err.message : "Could not create an invitation.";
+      setError(msg);
+      toast.error(msg);
     } finally {
       setIsCreating(false);
     }
@@ -89,6 +94,7 @@ export const InvitationManager: React.FC<{ leagueId: string }> = ({ leagueId }) 
     if (!created) return;
     await navigator.clipboard.writeText(inviteUrl(created.token));
     setCopied(true);
+    toast.success("Invitation link copied to clipboard!");
     setTimeout(() => setCopied(false), 2000);
   };
 
@@ -97,9 +103,12 @@ export const InvitationManager: React.FC<{ leagueId: string }> = ({ leagueId }) 
     try {
       await api.del(`/api/v1/leagues/${leagueId}/invitations/${invitationId}`);
       if (created?.id === invitationId) setCreated(null);
+      toast.info("Invitation link revoked.");
       await loadInvitations();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not revoke the invitation.");
+      const msg = err instanceof ApiError ? err.message : "Could not revoke the invitation.";
+      setError(msg);
+      toast.error(msg);
     }
   };
 
