@@ -15,13 +15,19 @@ import { getRedisClient, IRedisCacheClient } from "../../config/redis.js";
 const FPL_BASE_URL = "https://fantasy.premierleague.com/api";
 
 /**
- * Sensible default cache TTLs (between 5 and 15 minutes) for FPL endpoints.
+ * Cache TTLs for FPL endpoints (issue #139).
+ *
+ * Static reference data (players, teams, gameweek calendar) changes at most a
+ * few times a day, so it is cached for 24 hours to keep load on the upstream
+ * FPL API to a minimum. Live gameweek scores change during matches, so they
+ * are cached for only 60 seconds - long enough to absorb bursts of concurrent
+ * requests without serving meaningfully stale scores.
  */
 export const FPL_CACHE_TTL = {
   DEFAULT_SECONDS: 600, // 10 minutes
-  BOOTSTRAP_STATIC_SECONDS: 900, // 15 minutes (teams, players baseline rarely change midday)
-  FIXTURES_SECONDS: 600, // 10 minutes
-  GAMEWEEK_LIVE_SECONDS: 300, // 5 minutes
+  BOOTSTRAP_STATIC_SECONDS: 24 * 60 * 60, // 24 hours: static player/team/gameweek data
+  FIXTURES_SECONDS: 24 * 60 * 60, // 24 hours: fixtures rarely change once scheduled
+  GAMEWEEK_LIVE_SECONDS: 60, // 60 seconds: live in-match scores
 };
 
 interface CacheEntry<T> {
@@ -137,8 +143,11 @@ export class FplClient {
    * TTL is in seconds (or auto-converted if milliseconds are passed).
    */
   public async get<T>(endpoint: string, ttlSeconds: number = this.defaultTtlSeconds): Promise<T> {
-    const effectiveTtlSeconds =
-      ttlSeconds > 10_000 ? Math.round(ttlSeconds / 1000) : ttlSeconds;
+    // ttlSeconds is always whole seconds (e.g. FPL_CACHE_TTL.*). A previous
+    // heuristic here mis-detected large-but-valid TTLs (like the 24-hour
+    // BOOTSTRAP_STATIC_SECONDS TTL introduced in #139) as milliseconds and
+    // silently divided them by 1000, so it has been removed.
+    const effectiveTtlSeconds = ttlSeconds;
     const cacheKey = this.getCacheKey(endpoint);
 
     // 1. Try Redis cache first
