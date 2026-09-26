@@ -40,7 +40,7 @@ export const BudgetBar: React.FC<BudgetBarProps> = ({
   const violatingClubs = Object.entries(clubCounts).filter(([_, count]) => count > SQUAD_RULES.MAX_PER_TEAM);
 
   return (
-    <div className="w-full bg-pitch-surface border border-pitch-border rounded-xl p-4 sm:p-5 shadow-lg space-y-3">
+    <div className="w-full bg-pitch-surface border border-pitch-border rounded-xl p-4 sm:p-5 shadow-lg space-y-3" data-testid="budget-bar">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         {/* Left: Key Metrics */}
         <div className="flex items-center gap-6 sm:gap-8">
@@ -78,6 +78,7 @@ export const BudgetBar: React.FC<BudgetBarProps> = ({
             </div>
             <div className="flex items-baseline gap-1 mt-0.5">
               <span
+                data-testid="budget-remaining"
                 className={`text-xl sm:text-2xl font-black font-mono ${
                   isOverBudget ? "text-rose-400" : "text-emerald-400"
                 }`}
@@ -98,6 +99,7 @@ export const BudgetBar: React.FC<BudgetBarProps> = ({
               onClick={onAutoPick}
               className="text-xs font-semibold"
               title="Draft a valid, balanced squad within budget"
+              data-testid="auto-pick-button"
             >
               <IconRefresh className="w-3.5 h-3.5 text-emerald-400" />
               <span>Auto-Pick Squad</span>
@@ -125,6 +127,7 @@ export const BudgetBar: React.FC<BudgetBarProps> = ({
               isLoading={isSaving}
               onClick={onSave}
               className="uppercase font-bold tracking-wide text-xs px-4"
+              data-testid="save-squad-button"
             >
               Save Squad
             </Button>
@@ -148,7 +151,7 @@ export const BudgetBar: React.FC<BudgetBarProps> = ({
 
       {/* Warnings / Errors */}
       {isOverBudget && (
-        <div className="p-2 rounded bg-rose-950/40 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
+        <div data-testid="budget-over-warning" className="p-2 rounded bg-rose-950/40 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
           <IconAlertCircle className="w-4 h-4 flex-shrink-0" />
           <span>
             You have exceeded the £100.0m limit by £{Math.abs(remainingM).toFixed(1)}m. Replace or transfer players to balance budget.

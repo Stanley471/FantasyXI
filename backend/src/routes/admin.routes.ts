@@ -6,6 +6,7 @@ import {
   discardFailedPayout,
   listFinancialAuditLog,
 } from "../controllers/payoutAdmin.controller.js";
+import { recalculateStandings } from "../controllers/leagueAdmin.controller.js";
 import { requireAuth, requireRole } from "../middleware/authMiddleware.js";
 import { UserRole } from "../types/index.js";
 
@@ -32,5 +33,9 @@ router.post("/payouts/dead-letter/:id/discard", requireRole(UserRole.ADMIN), dis
 
 // GET /api/v1/admin/audit/financial (ADMIN only: exposes every user's ledger history)
 router.get("/audit/financial", requireRole(UserRole.ADMIN), listFinancialAuditLog);
+
+// POST /api/v1/admin/leagues/recalculate-standings { gameweekId }
+// Bulk-recalculates every CLASSIC league's standings; see leagueAdmin.controller.ts.
+router.post("/leagues/recalculate-standings", recalculateStandings);
 
 export default router;

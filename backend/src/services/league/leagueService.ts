@@ -674,6 +674,85 @@ export class LeagueService {
   }
 
   /**
+   * Recalculates every CLASSIC league member's cumulative points and rank in
+   * a fixed, small number of queries regardless of how many leagues or
+   * members exist on the platform.
+   *
+   * Previously, computing standings for every classic league at the end of a
+   * gameweek meant looping over each league and querying/updating its members
+   * individually — an N+1 access pattern that gets slower, not just linearly
+   * but per-round-trip, as the number of leagues and members grows (the
+   * scenario in issue #140: 10,000+ users across 1,000+ leagues). This version
+   * does the whole platform in four queries total:
+   *   1. One aggregation (`groupBy`) for every squad's cumulative points.
+   *   2. One `findMany` for every active classic-league member.
+   *   3. Ranking happens in memory, grouped by league (no DB round trips).
+   *   4. One bulk `UPDATE ... FROM UNNEST(...)` writes every member's new
+   *      total_points/rank in a single round trip instead of one UPDATE per
+   *      member.
+   */
+  public async recalculateClassicStandings(
+    gameweekId: number
+  ): Promise<{ membersUpdated: number }> {
+    const totals = await this.db.squadGameweekScore.groupBy({
+      by: ["squadId"],
+      where: { gameweekId: { lte: gameweekId } },
+      _sum: { points: true },
+    });
+    const totalBySquad = new Map<string, number>(
+      totals.map((t: any) => [t.squadId, t._sum.points ?? 0])
+    );
+
+    const members = await this.db.leagueMember.findMany({
+      where: {
+        status: MembershipStatus.ACTIVE,
+        league: { scoringType: ScoringType.CLASSIC, status: LeagueStatus.ACTIVE },
+      },
+      select: { id: true, leagueId: true, squadId: true, joinedAt: true },
+    });
+
+    if (members.length === 0) {
+      return { membersUpdated: 0 };
+    }
+
+    const byLeague = new Map<string, typeof members>();
+    for (const member of members) {
+      const list = byLeague.get(member.leagueId) ?? [];
+      list.push(member);
+      byLeague.set(member.leagueId, list);
+    }
+
+    const ids: string[] = [];
+    const totalPoints: number[] = [];
+    const ranks: number[] = [];
+
+    for (const leagueMembers of byLeague.values()) {
+      const sorted = [...leagueMembers].sort((a: any, b: any) => {
+        const diff =
+          (totalBySquad.get(b.squadId) ?? 0) - (totalBySquad.get(a.squadId) ?? 0);
+        return diff !== 0 ? diff : a.joinedAt.getTime() - b.joinedAt.getTime();
+      });
+      sorted.forEach((member: any, idx: number) => {
+        ids.push(member.id);
+        totalPoints.push(totalBySquad.get(member.squadId) ?? 0);
+        ranks.push(idx + 1);
+      });
+    }
+
+    await this.db.$executeRaw`
+      UPDATE league_members AS lm
+      SET total_points = data.total_points, rank = data.rank
+      FROM (
+        SELECT * FROM UNNEST(${ids}::text[], ${totalPoints}::int[], ${ranks}::int[])
+          AS t(id, total_points, rank)
+      ) AS data
+      WHERE lm.id = data.id
+    `;
+
+    return { membersUpdated: ids.length };
+  }
+
+  /**
    * Transitions a league through its lifecycle state machine.
    */
   public async transitionStatus(leagueId: string, targetStatus: LeagueStatus) {
@@ -969,6 +1048,162 @@ export class LeagueService {
         h2hPoints: m.h2hPoints,
       }))
     );
+  }
+
+  /**
+   * Largest single-elimination bracket (a power of two, capped at 8) that fits
+   * within the given number of qualified members. Returns 0 if fewer than 2
+   * members are available, since no bracket can be formed.
+   */
+  public static computeBracketSize(memberCount: number): number {
+    let size = 8;
+    while (size > memberCount) {
+      size = size / 2;
+    }
+    return size >= 2 ? size : 0;
+  }
+
+  /**
+   * Seeds a knockout round from an ordered list of members (best first):
+   * seed 1 plays the lowest seed, seed 2 the second-lowest, and so on. This
+   * keeps the top seeds apart for as long as possible, standard bracket style.
+   */
+  public static seedPlayoffPairings(
+    orderedMemberIds: string[]
+  ): Array<{ homeMemberId: string; awayMemberId: string }> {
+    const n = orderedMemberIds.length;
+    const pairings: Array<{ homeMemberId: string; awayMemberId: string }> = [];
+    for (let i = 0; i < n / 2; i++) {
+      pairings.push({
+        homeMemberId: orderedMemberIds[i],
+        awayMemberId: orderedMemberIds[n - 1 - i],
+      });
+    }
+    return pairings;
+  }
+
+  /**
+   * Generates the first round of an end-of-season H2H playoff bracket from the
+   * current regular-season standings. Qualifies the top 2/4/8 members (whichever
+   * is the largest power of two the league can fill) and schedules their round-1
+   * fixtures on the first of the league's final `log2(bracketSize)` gameweeks —
+   * e.g. a 4-team bracket plays its semi-final on the second-to-last gameweek
+   * and its final on the last.
+   *
+   * Any not-yet-finished regular-season fixture already scheduled for that
+   * gameweek is replaced: once the bracket is set, only the knockout fixtures
+   * should decide who plays whom.
+   */
+  public async generatePlayoffBracket(leagueId: string): Promise<{
+    gameweekId: number;
+    round: number;
+    bracketSize: number;
+    pairings: Array<{ homeMemberId: string; awayMemberId: string }>;
+  }> {
+    const league = await this.db.league.findUnique({ where: { id: leagueId } });
+    if (!league) {
+      throw new LeagueNotFoundError(leagueId);
+    }
+    if (league.scoringType !== ScoringType.HEAD_TO_HEAD) {
+      throw new LeagueValidationError("League does not use head-to-head scoring");
+    }
+
+    const standings = await this.getH2HStandings(leagueId);
+    const bracketSize = LeagueService.computeBracketSize(standings.length);
+    if (bracketSize < 2) {
+      throw new LeagueValidationError(
+        "At least 2 active members are required to generate a playoff bracket"
+      );
+    }
+
+    const rounds = Math.log2(bracketSize);
+    const gameweekId = league.endGameweekId - rounds + 1;
+    const seeds = standings.slice(0, bracketSize).map((s) => s.memberId);
+    const pairings = LeagueService.seedPlayoffPairings(seeds);
+
+    await this.db.$transaction(async (tx: any) => {
+      await tx.leagueFixture.deleteMany({
+        where: { leagueId, gameweekId, isFinished: false },
+      });
+      await tx.leagueFixture.createMany({
+        data: pairings.map((p, slot) => ({
+          leagueId,
+          gameweekId,
+          homeMemberId: p.homeMemberId,
+          awayMemberId: p.awayMemberId,
+          isPlayoff: true,
+          playoffRound: 1,
+          playoffSlot: slot,
+        })),
+      });
+    });
+
+    return { gameweekId, round: 1, bracketSize, pairings };
+  }
+
+  /**
+   * Advances the bracket once every fixture of a completed playoff round has
+   * been settled (via `settleH2HGameweek`). Winners of adjacent slots (0 & 1,
+   * 2 & 3, ...) are paired for the next round on the following gameweek. A
+   * drawn match is won by its home slot, which is always the better original
+   * seed — see `seedPlayoffPairings`. Returns the crowned champion once only
+   * the final's winner remains.
+   */
+  public async advancePlayoffRound(
+    leagueId: string,
+    completedGameweekId: number
+  ): Promise<
+    | { champion: string }
+    | { gameweekId: number; round: number; pairings: Array<{ homeMemberId: string; awayMemberId: string }> }
+  > {
+    const fixtures = await this.db.leagueFixture.findMany({
+      where: { leagueId, gameweekId: completedGameweekId, isPlayoff: true },
+    });
+
+    if (fixtures.length === 0) {
+      throw new LeagueValidationError(
+        `No playoff fixtures found for league ${leagueId} in gameweek ${completedGameweekId}`
+      );
+    }
+    if (fixtures.some((f: any) => !f.isFinished)) {
+      throw new LeagueValidationError(
+        "All playoff fixtures for this gameweek must be settled before advancing the bracket"
+      );
+    }
+
+    const bySlot = [...fixtures].sort(
+      (a: any, b: any) => (a.playoffSlot ?? 0) - (b.playoffSlot ?? 0)
+    );
+    const winners = bySlot.map((f: any) =>
+      (f.homeScore ?? 0) >= (f.awayScore ?? 0) ? f.homeMemberId : f.awayMemberId
+    );
+
+    if (winners.length === 1) {
+      return { champion: winners[0] };
+    }
+
+    const round = (fixtures[0].playoffRound ?? 1) + 1;
+    const gameweekId = completedGameweekId + 1;
+    const pairings = LeagueService.seedPlayoffPairings(winners);
+
+    await this.db.$transaction(async (tx: any) => {
+      await tx.leagueFixture.deleteMany({
+        where: { leagueId, gameweekId, isFinished: false },
+      });
+      await tx.leagueFixture.createMany({
+        data: pairings.map((p, slot) => ({
+          leagueId,
+          gameweekId,
+          homeMemberId: p.homeMemberId,
+          awayMemberId: p.awayMemberId,
+          isPlayoff: true,
+          playoffRound: round,
+          playoffSlot: slot,
+        })),
+      });
+    });
+
+    return { gameweekId, round, pairings };
   }
 
   /**

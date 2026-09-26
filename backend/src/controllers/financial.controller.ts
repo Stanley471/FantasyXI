@@ -173,6 +173,50 @@ export async function verifyPayment(
   }
 }
 
+export async function reconcileDeposit(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user || !req.user.id) {
+      res.status(401).json({
+        success: false,
+        message: "Authentication required",
+      });
+      return;
+    }
+
+    const leagueId = (req.params.leagueId || req.params.id) as string;
+    const result = await financialService.reconcileDeposit(req.user.id, leagueId);
+
+    if (!result.success) {
+      res.status(422).json({
+        success: false,
+        message: result.error || "No confirmed on-chain deposit was found",
+        data: result,
+      });
+      return;
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Deposit reconciled from the Soroban escrow contract. Membership activated!",
+      data: result,
+    });
+  } catch (error) {
+    if (error instanceof FinancialValidationError) {
+      res.status(400).json({ success: false, message: error.message });
+      return;
+    }
+    if (error instanceof FinancialNotFoundError) {
+      res.status(404).json({ success: false, message: error.message });
+      return;
+    }
+    next(error);
+  }
+}
+
 export async function getSettlementPlan(
   req: Request,
   res: Response,
