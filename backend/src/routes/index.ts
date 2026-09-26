@@ -9,6 +9,7 @@ import leagueRoutes from "./league.routes.js";
 import authRoutes from "./auth.routes.js";
 import liveRoutes from "./live.routes.js";
 import adminRoutes from "./admin.routes.js";
+import analyticsRoutes from "./analytics.routes.js";
 import { replicaReads } from "../middleware/readConsistency.js";
 
 /**
@@ -31,5 +32,7 @@ apiV1Router.use("/fixtures", replicaReads, fixtureRoutes);
 apiV1Router.use("/squads", squadRoutes);
 apiV1Router.use("/leagues", replicaReads, leagueRoutes);
 apiV1Router.use("/live", replicaReads, liveRoutes);
+// Historical analytics are aggregates of settled scores, so replica lag is harmless
+apiV1Router.use("/analytics", replicaReads, analyticsRoutes);
 
 export default apiV1Router;

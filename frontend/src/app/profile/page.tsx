@@ -174,6 +174,9 @@ export default function ProfilePage() {
           <div>
             <h2 className="text-sm font-bold uppercase tracking-wider text-slate-200">Gameweek History</h2>
             <p className="text-xs text-slate-400 mt-1">Review past scores, ranks, and the squad selected for each gameweek.</p>
+            <Link href="/analytics" className="mt-2 inline-block text-xs font-semibold text-emerald-400 hover:text-emerald-300">
+              View full performance analytics &rarr;
+            </Link>
           </div>
           {gameweekHistory.length > 0 && (
             <label className="flex items-center gap-2 text-xs text-slate-400">
