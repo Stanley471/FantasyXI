@@ -220,6 +220,31 @@ export interface CreateLeagueInput {
   endGameweekId: number;
   squadId: string; // Creator's initial squad
   scoringType?: ScoringType; // default CLASSIC
+  isPrivate?: boolean; // default false: private leagues are invitation-only
+}
+
+export type LeagueSortField = "newest" | "entryFee" | "size" | "prizePool" | "members";
+
+/** League discovery filters (GET /leagues query string) */
+export interface LeagueSearchFilters {
+  /** Case-insensitive substring match on the league name */
+  q?: string;
+  /** Exact invite code (public leagues, or private ones the viewer already belongs to) */
+  code?: string;
+  status?: LeagueStatus;
+  scoringType?: ScoringType;
+  creatorId?: string;
+  minEntryFee?: number;
+  maxEntryFee?: number;
+  /** League capacity (maxMembers) bounds */
+  minSize?: number;
+  maxSize?: number;
+  /** Only leagues with at least one free spot */
+  hasOpenSlots?: boolean;
+  sortBy?: LeagueSortField;
+  sortOrder?: "asc" | "desc";
+  page?: number;
+  pageSize?: number;
 }
 
 export interface JoinLeagueInput {
@@ -325,6 +350,7 @@ export interface SettlementPlan {
   netPrizePool: number;
   winners: SettlementWinner[];
   canSettle: boolean;
+  proofHash?: string;
   unsettledReason?: string;
 }
 
@@ -346,7 +372,6 @@ export interface ReconciliationReport {
     confirmedAt: Date | null;
   }>;
 }
-
 
 
 

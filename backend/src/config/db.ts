@@ -1,29 +1,72 @@
 import { PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import pg from "pg";
+import {
+  ReplicaRouter,
+  createReadReplicaExtension,
+  loadReadReplicaConfig,
+} from "./readReplicas.js";
 
 // Extend globalThis to hold our Prisma instance
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined;
+  replicaRouter: ReplicaRouter | null | undefined;
 };
+
+function createClient(connectionString: string): PrismaClient {
+  const pool = new pg.Pool({ connectionString });
+  const adapter = new PrismaPg(pool);
+
+  return new PrismaClient({
+    adapter,
+    log:
+      process.env.NODE_ENV === "development"
+        ? ["query", "error", "warn"]
+        : ["error"],
+  });
+}
 
 function getPrismaInstance(): PrismaClient {
   if (!globalForPrisma.prisma) {
     const connectionString =
       process.env.DATABASE_URL ||
       "postgresql://postgres:postgres@localhost:5432/fantasyxi?schema=public";
-    const pool = new pg.Pool({ connectionString });
-    const adapter = new PrismaPg(pool);
+    const primary = createClient(connectionString);
+    const replicaConfig = loadReadReplicaConfig();
 
-    globalForPrisma.prisma = new PrismaClient({
-      adapter,
-      log:
-        process.env.NODE_ENV === "development"
-          ? ["query", "error", "warn"]
-          : ["error"],
-    });
+    if (replicaConfig.replicas.length === 0) {
+      globalForPrisma.prisma = primary;
+      globalForPrisma.replicaRouter = null;
+    } else {
+      // Multi-region read/write splitting (see config/readReplicas.ts)
+      const router = new ReplicaRouter(
+        replicaConfig.replicas.map((r) => ({ region: r.region, client: createClient(r.url) })),
+        {
+          appRegion: replicaConfig.appRegion,
+          maxLagMs: replicaConfig.maxLagMs,
+          healthCheckTimeoutMs: replicaConfig.healthCheckTimeoutMs,
+        }
+      );
+      router.start(replicaConfig.healthCheckIntervalMs);
+      globalForPrisma.replicaRouter = router;
+      globalForPrisma.prisma = primary.$extends(
+        createReadReplicaExtension(router)
+      ) as unknown as PrismaClient;
+      console.log(
+        `[db] Read replicas enabled for region ${replicaConfig.appRegion ?? "(unset)"}: ` +
+          replicaConfig.replicas.map((r) => r.region).join(", ")
+      );
+    }
   }
   return globalForPrisma.prisma;
+}
+
+/**
+ * Status of configured read replicas (empty when replication is disabled).
+ */
+export function getReadReplicaStatus() {
+  getPrismaInstance();
+  return globalForPrisma.replicaRouter?.status() ?? [];
 }
 
 export const prisma = new Proxy({} as PrismaClient, {

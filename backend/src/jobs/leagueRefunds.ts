@@ -10,7 +10,10 @@ import { financialService } from "../services/financial/financialService.js";
  * 2. Dispatches batched on-chain refunds for every cancelled league with paid members
  *    (covers both automatic and creator/admin cancellations).
  * 3. Verifies the escrow holds nothing for fully refunded leagues.
- * Throws when any batch failed so the queue retries; refunds are idempotent.
+ *
+ * Failed batches are isolated in the payout dead-letter queue instead of failing the
+ * job: recoverable ones are retried by the next run, the rest wait for an admin via
+ * /api/v1/admin/payouts/dead-letter. The job only throws on unexpected errors.
  */
 export async function processLeagueRefunds(): Promise<void> {
   const cancelled = await leagueService.cancelUnderfilledLeagues();
@@ -26,23 +29,31 @@ export async function processLeagueRefunds(): Promise<void> {
           paymentStatus: {
             in: [PaymentStatus.REFUND_PENDING, PaymentStatus.PAYMENT_CONFIRMED],
           },
-          stellarAddress: { not: null },
         },
       },
     },
     select: { id: true },
   });
 
-  const failures: string[] = [];
   for (const { id } of leagues) {
     const report = await financialService.processLeagueRefunds(id);
     console.log(
       `[jobs] League ${id}: refunded ${report.refundedMemberIds.length} member(s) in ${report.batches} batch(es), ` +
-        `${report.failedBatches.length} failed, ${report.skippedMemberIds.length} without wallet`
+        `${report.failedBatches.length} failed, ${report.skippedMemberIds.length} without wallet, ` +
+        `${report.isolatedMemberIds.length} isolated in DLQ, ${report.autoRetried.length} auto-retried`
     );
 
-    if (report.failedBatches.length > 0) {
-      failures.push(id);
+    if (report.deadLetteredIds.length > 0) {
+      console.warn(
+        `[jobs] League ${id}: ${report.deadLetteredIds.length} payout(s) dead-lettered: ${report.deadLetteredIds.join(", ")}`
+      );
+    }
+
+    const outstanding =
+      report.deadLetteredIds.length > 0 ||
+      report.isolatedMemberIds.length > 0 ||
+      report.autoRetried.some((r) => !r.success);
+    if (outstanding) {
       continue;
     }
 
@@ -51,9 +62,5 @@ export async function processLeagueRefunds(): Promise<void> {
       `[jobs] League ${id} escrow reconciliation: remaining=${reconciliation.remainingEscrowStroops} stroops, ` +
         `fullyRefunded=${reconciliation.isFullyRefunded}`
     );
-  }
-
-  if (failures.length > 0) {
-    throw new Error(`Refund batches failed for league(s): ${failures.join(", ")}`);
   }
 }

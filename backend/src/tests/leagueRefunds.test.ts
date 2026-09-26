@@ -13,6 +13,7 @@ import {
   TransactionStatus,
   TransactionType,
 } from "../types/index.js";
+import { createInMemoryFailedPayouts } from "./helpers/inMemoryFailedPayouts.js";
 
 const LEAGUE_ID = "3f2a9c1e-7b4d-4e8a-9c2f-1a2b3c4d5e6f";
 
@@ -40,6 +41,7 @@ function createMockDb(memberCount: number, status: LeagueStatus = LeagueStatus.C
         return data;
       },
     },
+    failedPayout: createInMemoryFailedPayouts(),
     $transaction: async (ops: any[]) => Promise.all(ops),
   };
   return db;
@@ -104,6 +106,12 @@ describe("Mass-Refund Reconciliation Service", () => {
       10
     );
     assert.equal(db.transactions.length, 2);
+
+    // The failed batch is isolated in the dead-letter queue, not silently retried
+    assert.equal(report.deadLetteredIds.length, 1);
+    assert.equal(db.failedPayout.rows[0].memberIds.length, 10);
+    assert.equal(db.failedPayout.rows[0].recoverable, false);
+    assert.equal(db.failedPayout.rows[0].errorCode, 10);
   });
 
   it("skips members without a Stellar address", async () => {
@@ -114,6 +122,8 @@ describe("Mass-Refund Reconciliation Service", () => {
     const report = await new FinancialService(db, stellar).processLeagueRefunds(LEAGUE_ID);
     assert.deepEqual(report.skippedMemberIds, ["m1"]);
     assert.equal(report.refundedMemberIds.length, 2);
+    assert.deepEqual(db.failedPayout.rows[0].memberIds, ["m1"]);
+    assert.match(db.failedPayout.rows[0].errorMessage, /MISSING_WALLET/);
   });
 
   it("refuses to refund a league that is not cancelled", async () => {

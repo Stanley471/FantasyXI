@@ -353,6 +353,37 @@ export class SorobanContractClient {
     ]);
   }
 
+  /** Settles with a required 32-byte commitment to the off-chain calculation. */
+  public async settleWithProof(
+    adminSecret: string,
+    adminPublic: string,
+    leagueId: number | bigint,
+    winners: WinnerPayoutParam[],
+    platformTreasury: string,
+    platformFeeStroops: bigint,
+    proofHash: string
+  ): Promise<InvocationResult> {
+    if (!/^[0-9a-f]{64}$/i.test(proofHash)) {
+      return this.failure("Settlement proof must be a 32-byte hexadecimal hash");
+    }
+    const winnersScVal = xdr.ScVal.scvVec(
+      winners.map((w) =>
+        xdr.ScVal.scvMap([
+          new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("amount"), val: SorobanContractClient.i128(w.amount) }),
+          new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("winner"), val: SorobanContractClient.address(w.winner) }),
+        ])
+      )
+    );
+    return this.invoke(adminSecret, this.escrowContractId, "settle_with_proof", [
+      SorobanContractClient.address(adminPublic),
+      SorobanContractClient.u64(leagueId),
+      winnersScVal,
+      SorobanContractClient.address(platformTreasury),
+      SorobanContractClient.i128(platformFeeStroops),
+      nativeToScVal(Buffer.from(proofHash, "hex"), { type: "bytes" }),
+    ]);
+  }
+
   /**
    * Admin refunds deposits for cancelled league.
    */

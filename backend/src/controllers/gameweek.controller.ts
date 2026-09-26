@@ -121,3 +121,47 @@ export async function getGameweekById(
     next(error);
   }
 }
+
+export async function getMyGameweekHistory(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user?.id) {
+      res.status(401).json({ success: false, message: "Authentication required" });
+      return;
+    }
+
+    const scores = await prisma.squadGameweekScore.findMany({
+      where: { squad: { userId: req.user.id } },
+      orderBy: { gameweekId: "asc" },
+      include: {
+        gameweek: true,
+        squad: {
+          include: {
+            players: {
+              orderBy: { positionOrder: "asc" },
+              include: { player: { include: { team: true } } },
+            },
+          },
+        },
+      },
+    });
+
+    res.json({
+      success: true,
+      data: scores.map((score) => ({
+        id: score.id,
+        gameweek: score.gameweek,
+        points: score.points,
+        benchPoints: score.benchPoints,
+        captainPoints: score.captainPoints,
+        transferCost: score.transferCost,
+        squad: score.squad,
+      })),
+    });
+  } catch (error) {
+    next(error);
+  }
+}

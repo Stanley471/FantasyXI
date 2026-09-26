@@ -8,6 +8,8 @@ import {
   CreateLeagueInput,
   LeagueStandingsEntry,
   H2HStandingsEntry,
+  LeagueSearchFilters,
+  LeagueSortField,
 } from "../../types/index.js";
 import { PrizeService } from "./prizeService.js";
 import { ScoringService } from "../scoring/scoringService.js";
@@ -40,6 +42,35 @@ export class LeagueForbiddenError extends Error {
   }
 }
 
+/** Raised for invitation links that are unknown, expired, revoked or already used. */
+export class LeagueInvitationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LeagueInvitationError";
+  }
+}
+
+/** Default and maximum lifetime of a private league invitation link. */
+export const INVITATION_DEFAULT_TTL_HOURS = 72;
+export const INVITATION_MAX_TTL_HOURS = 24 * 30;
+
+export const LEAGUE_SEARCH_MAX_PAGE_SIZE = 50;
+const LEAGUE_SEARCH_DEFAULT_PAGE_SIZE = 20;
+const LEAGUE_SORT_FIELDS: Record<LeagueSortField, string> = {
+  newest: "createdAt",
+  entryFee: "entryFee",
+  size: "maxMembers",
+  prizePool: "prizePool",
+  members: "currentMembers",
+};
+
+export interface LeagueSearchResult<T> {
+  items: T[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
 export class LeagueService {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   constructor(private readonly db: any = prisma) {}
@@ -68,6 +99,10 @@ export class LeagueService {
     const scoringType = input.scoringType ?? ScoringType.CLASSIC;
     if (!Object.values(ScoringType).includes(scoringType)) {
       throw new LeagueValidationError(`Invalid scoring type: ${scoringType}`);
+    }
+
+    if (input.isPrivate !== undefined && typeof input.isPrivate !== "boolean") {
+      throw new LeagueValidationError("isPrivate must be a boolean");
     }
 
     const maxMembers = input.maxMembers ?? 20;
@@ -150,6 +185,7 @@ export class LeagueService {
           prizePool: prizeCalc.prizePool,
           status: LeagueStatus.UPCOMING,
           scoringType,
+          isPrivate: input.isPrivate ?? false,
           startGameweekId: startGw.id,
           endGameweekId: endGw.id,
         },
@@ -185,15 +221,39 @@ export class LeagueService {
 
   /**
    * Joins an upcoming league with a valid fantasy squad.
+   *
+   * Private leagues require a valid invitation token. The invitation is consumed in
+   * the same transaction that creates the membership, so a link can never admit
+   * more than one user, even under concurrent requests.
    */
-  public async joinLeague(leagueId: string, userId: string, squadId: string) {
-    const league = await prisma.league.findUnique({
+  public async joinLeague(
+    leagueId: string,
+    userId: string,
+    squadId: string,
+    options: { invitationToken?: string } = {}
+  ) {
+    const league = await this.db.league.findUnique({
       where: { id: leagueId },
       include: { startGameweek: true },
     });
 
     if (!league) {
       throw new LeagueNotFoundError(leagueId);
+    }
+
+    // 0. Private leagues are invitation-only
+    let invitationId: string | null = null;
+    if (league.isPrivate) {
+      if (!options.invitationToken) {
+        throw new LeagueForbiddenError(
+          "This league is private. A valid invitation link is required to join."
+        );
+      }
+      const invitation = await this.findUsableInvitation(options.invitationToken);
+      if (invitation.leagueId !== league.id) {
+        throw new LeagueInvitationError("This invitation is not valid for this league");
+      }
+      invitationId = invitation.id;
     }
 
     // 1. Must be in UPCOMING state
@@ -218,7 +278,7 @@ export class LeagueService {
     }
 
     // 4. Duplicate membership check
-    const existingMember = await prisma.leagueMember.findUnique({
+    const existingMember = await this.db.leagueMember.findUnique({
       where: {
         leagueId_userId: {
           leagueId,
@@ -231,7 +291,7 @@ export class LeagueService {
     }
 
     // 5. Squad validation
-    const squad = await prisma.squad.findFirst({
+    const squad = await this.db.squad.findFirst({
       where: { id: squadId, userId },
     });
     if (!squad) {
@@ -246,7 +306,24 @@ export class LeagueService {
       Number(league.entryFee)
     );
 
-    return prisma.$transaction(async (tx) => {
+    return this.db.$transaction(async (tx: any) => {
+      if (invitationId) {
+        // Conditional update = atomic single-use check; loses the race if already consumed
+        const now = new Date();
+        const consumed = await tx.leagueInvitation.updateMany({
+          where: {
+            id: invitationId,
+            usedAt: null,
+            revokedAt: null,
+            expiresAt: { gt: now },
+          },
+          data: { usedAt: now, usedById: userId },
+        });
+        if (consumed.count !== 1) {
+          throw new LeagueInvitationError("This invitation link has already been used or has expired");
+        }
+      }
+
       const member = await tx.leagueMember.create({
         data: {
           leagueId,
@@ -271,6 +348,191 @@ export class LeagueService {
 
       return member;
     });
+  }
+
+  // ============================================================
+  // Private league invitations
+  // ============================================================
+
+  /** SHA-256 of a raw invitation token; only the hash is ever persisted. */
+  public static hashInvitationToken(token: string): string {
+    return crypto.createHash("sha256").update(token).digest("hex");
+  }
+
+  /** 256-bit URL-safe random token. */
+  public static generateInvitationToken(): string {
+    return crypto.randomBytes(32).toString("base64url");
+  }
+
+  /**
+   * Creates a single-use invitation link for a private league. Creator only.
+   * The raw token is returned exactly once and cannot be recovered later.
+   */
+  public async createInvitation(
+    leagueId: string,
+    requesterUserId: string,
+    expiresInHours: number = INVITATION_DEFAULT_TTL_HOURS
+  ) {
+    if (
+      !Number.isFinite(expiresInHours) ||
+      expiresInHours < 1 ||
+      expiresInHours > INVITATION_MAX_TTL_HOURS
+    ) {
+      throw new LeagueValidationError(
+        `expiresInHours must be between 1 and ${INVITATION_MAX_TTL_HOURS}`
+      );
+    }
+
+    const league = await this.requireOwnedLeague(leagueId, requesterUserId);
+    if (!league.isPrivate) {
+      throw new LeagueValidationError(
+        "Invitation links are only available for private leagues. Public leagues can be joined directly."
+      );
+    }
+    if (league.status !== LeagueStatus.UPCOMING) {
+      throw new LeagueValidationError(
+        `Cannot invite members to a league in '${league.status}' status`
+      );
+    }
+
+    const token = LeagueService.generateInvitationToken();
+    const invitation = await this.db.leagueInvitation.create({
+      data: {
+        leagueId,
+        tokenHash: LeagueService.hashInvitationToken(token),
+        createdById: requesterUserId,
+        expiresAt: new Date(Date.now() + Math.round(expiresInHours * 3_600_000)),
+      },
+    });
+
+    return {
+      id: invitation.id,
+      leagueId,
+      token,
+      expiresAt: invitation.expiresAt,
+      createdAt: invitation.createdAt,
+    };
+  }
+
+  /**
+   * Lists a private league's invitations (never the tokens). Creator only.
+   */
+  public async listInvitations(leagueId: string, requesterUserId: string) {
+    await this.requireOwnedLeague(leagueId, requesterUserId);
+    const invitations = await this.db.leagueInvitation.findMany({
+      where: { leagueId },
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        expiresAt: true,
+        usedAt: true,
+        revokedAt: true,
+        createdAt: true,
+        usedBy: { select: { id: true, username: true } },
+      },
+    });
+
+    const now = Date.now();
+    return invitations.map((inv: any) => ({
+      ...inv,
+      state: LeagueService.invitationState(inv, now),
+    }));
+  }
+
+  /**
+   * Revokes an unused invitation. Creator only.
+   */
+  public async revokeInvitation(leagueId: string, invitationId: string, requesterUserId: string) {
+    await this.requireOwnedLeague(leagueId, requesterUserId);
+    const revoked = await this.db.leagueInvitation.updateMany({
+      where: { id: invitationId, leagueId, usedAt: null, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    if (revoked.count !== 1) {
+      throw new LeagueInvitationError("Invitation not found, already used or already revoked");
+    }
+  }
+
+  /**
+   * Public preview of the league behind an invitation link, so the invitee can
+   * see what they are joining before picking a squad.
+   */
+  public async previewInvitation(token: string) {
+    const invitation = await this.findUsableInvitation(token);
+    const league = await this.db.league.findUnique({
+      where: { id: invitation.leagueId },
+      select: {
+        id: true,
+        name: true,
+        description: true,
+        entryFee: true,
+        prizePool: true,
+        maxMembers: true,
+        currentMembers: true,
+        status: true,
+        scoringType: true,
+        creator: { select: { id: true, username: true } },
+        startGameweek: { select: { id: true, name: true, deadline: true } },
+        endGameweek: { select: { id: true, name: true } },
+      },
+    });
+    if (!league) {
+      throw new LeagueInvitationError("This invitation link is invalid");
+    }
+    return { league, expiresAt: invitation.expiresAt };
+  }
+
+  /**
+   * Redeems an invitation link: joins its league and consumes the invitation.
+   */
+  public async acceptInvitation(token: string, userId: string, squadId: string) {
+    const invitation = await this.findUsableInvitation(token);
+    return this.joinLeague(invitation.leagueId, userId, squadId, { invitationToken: token });
+  }
+
+  private static invitationState(
+    inv: { usedAt: Date | null; revokedAt: Date | null; expiresAt: Date },
+    now: number = Date.now()
+  ): "ACTIVE" | "USED" | "REVOKED" | "EXPIRED" {
+    if (inv.usedAt) return "USED";
+    if (inv.revokedAt) return "REVOKED";
+    if (new Date(inv.expiresAt).getTime() <= now) return "EXPIRED";
+    return "ACTIVE";
+  }
+
+  private async findUsableInvitation(token: string) {
+    if (typeof token !== "string" || token.length < 16 || token.length > 128) {
+      throw new LeagueInvitationError("This invitation link is invalid");
+    }
+
+    const invitation = await this.db.leagueInvitation.findUnique({
+      where: { tokenHash: LeagueService.hashInvitationToken(token) },
+    });
+    if (!invitation) {
+      throw new LeagueInvitationError("This invitation link is invalid");
+    }
+
+    switch (LeagueService.invitationState(invitation)) {
+      case "USED":
+        throw new LeagueInvitationError("This invitation link has already been used");
+      case "REVOKED":
+        throw new LeagueInvitationError("This invitation link has been revoked");
+      case "EXPIRED":
+        throw new LeagueInvitationError("This invitation link has expired");
+      default:
+        return invitation;
+    }
+  }
+
+  private async requireOwnedLeague(leagueId: string, requesterUserId: string) {
+    const league = await this.db.league.findUnique({ where: { id: leagueId } });
+    if (!league) {
+      throw new LeagueNotFoundError(leagueId);
+    }
+    if (league.creatorId !== requesterUserId) {
+      throw new LeagueForbiddenError("Only the league creator can manage invitations");
+    }
+    return league;
   }
 
   /**
@@ -791,9 +1053,10 @@ export class LeagueService {
 
   /**
    * Retrieves a single league with members, gameweeks, and creator info.
+   * The invite code of a private league is only revealed to its creator.
    */
-  public async getLeagueById(leagueId: string) {
-    const league = await prisma.league.findUnique({
+  public async getLeagueById(leagueId: string, viewerId?: string) {
+    const league = await this.db.league.findUnique({
       where: { id: leagueId },
       include: {
         creator: { select: { id: true, username: true } },
@@ -819,32 +1082,205 @@ export class LeagueService {
     );
 
     return {
-      ...league,
+      ...LeagueService.redactForViewer(league, viewerId),
       prizeDistribution,
     };
   }
 
   /**
-   * Retrieves all public leagues with optional status filtering.
+   * Hides the static invite code of private leagues from everyone but the creator,
+   * so it can never be used to bypass single-use invitations.
    */
-  public async getLeagues(filters?: { status?: LeagueStatus; creatorId?: string }) {
-    const where: any = {};
-    if (filters?.status) {
-      where.status = filters.status;
+  public static redactForViewer<T extends { isPrivate?: boolean; creatorId: string; inviteCode?: string | null }>(
+    league: T,
+    viewerId?: string
+  ): T {
+    if (league.isPrivate && league.creatorId !== viewerId) {
+      return { ...league, inviteCode: null };
     }
-    if (filters?.creatorId) {
-      where.creatorId = filters.creatorId;
+    return league;
+  }
+
+  /**
+   * Parses and validates raw query-string filters for league search.
+   * Throws LeagueValidationError on malformed input.
+   */
+  public static parseSearchFilters(query: Record<string, unknown>): LeagueSearchFilters {
+    const str = (key: string): string | undefined => {
+      const value = query[key];
+      if (value === undefined || value === "") return undefined;
+      if (typeof value !== "string") {
+        throw new LeagueValidationError(`${key} must be a single value`);
+      }
+      return value.trim();
+    };
+    const num = (key: string, { integer = false, min = 0 } = {}): number | undefined => {
+      const raw = str(key);
+      if (raw === undefined) return undefined;
+      const value = Number(raw);
+      if (!Number.isFinite(value) || value < min || (integer && !Number.isInteger(value))) {
+        throw new LeagueValidationError(
+          `${key} must be ${integer ? "an integer" : "a number"} greater than or equal to ${min}`
+        );
+      }
+      return value;
+    };
+    const bool = (key: string): boolean | undefined => {
+      const raw = str(key);
+      if (raw === undefined) return undefined;
+      if (raw !== "true" && raw !== "false") {
+        throw new LeagueValidationError(`${key} must be 'true' or 'false'`);
+      }
+      return raw === "true";
+    };
+
+    const q = str("q");
+    if (q && q.length > 60) {
+      throw new LeagueValidationError("Search query must not exceed 60 characters");
     }
 
-    return prisma.league.findMany({
-      where,
-      include: {
-        creator: { select: { id: true, username: true } },
-        startGameweek: { select: { id: true, name: true, deadline: true } },
-        endGameweek: { select: { id: true, name: true } },
-      },
-      orderBy: { createdAt: "desc" },
+    const code = str("code");
+    if (code && !/^[A-Za-z0-9]{4,12}$/.test(code)) {
+      throw new LeagueValidationError("code must be 4-12 alphanumeric characters");
+    }
+
+    const status = str("status");
+    if (status && !Object.values(LeagueStatus).includes(status as LeagueStatus)) {
+      throw new LeagueValidationError(`Invalid status: ${status}`);
+    }
+    const scoringType = str("scoringType");
+    if (scoringType && !Object.values(ScoringType).includes(scoringType as ScoringType)) {
+      throw new LeagueValidationError(`Invalid scoring type: ${scoringType}`);
+    }
+    const sortBy = str("sortBy");
+    if (sortBy && !(sortBy in LEAGUE_SORT_FIELDS)) {
+      throw new LeagueValidationError(
+        `sortBy must be one of: ${Object.keys(LEAGUE_SORT_FIELDS).join(", ")}`
+      );
+    }
+    const sortOrder = str("sortOrder");
+    if (sortOrder && sortOrder !== "asc" && sortOrder !== "desc") {
+      throw new LeagueValidationError("sortOrder must be 'asc' or 'desc'");
+    }
+
+    const filters: LeagueSearchFilters = {
+      q: q || undefined,
+      code: code?.toUpperCase(),
+      status: status as LeagueStatus | undefined,
+      scoringType: scoringType as ScoringType | undefined,
+      creatorId: str("creatorId"),
+      minEntryFee: num("minEntryFee"),
+      maxEntryFee: num("maxEntryFee"),
+      minSize: num("minSize", { integer: true, min: 2 }),
+      maxSize: num("maxSize", { integer: true, min: 2 }),
+      hasOpenSlots: bool("hasOpenSlots"),
+      sortBy: sortBy as LeagueSortField | undefined,
+      sortOrder: sortOrder as "asc" | "desc" | undefined,
+      page: num("page", { integer: true, min: 1 }),
+      pageSize: num("pageSize", { integer: true, min: 1 }),
+    };
+
+    if (
+      filters.minEntryFee !== undefined &&
+      filters.maxEntryFee !== undefined &&
+      filters.minEntryFee > filters.maxEntryFee
+    ) {
+      throw new LeagueValidationError("minEntryFee cannot be greater than maxEntryFee");
+    }
+    if (filters.minSize !== undefined && filters.maxSize !== undefined && filters.minSize > filters.maxSize) {
+      throw new LeagueValidationError("minSize cannot be greater than maxSize");
+    }
+    if (filters.pageSize !== undefined && filters.pageSize > LEAGUE_SEARCH_MAX_PAGE_SIZE) {
+      throw new LeagueValidationError(`pageSize must not exceed ${LEAGUE_SEARCH_MAX_PAGE_SIZE}`);
+    }
+
+    return filters;
+  }
+
+  /**
+   * Builds the Prisma `where` clause for a league search. Private leagues are only
+   * visible to their creator and members.
+   */
+  public buildSearchWhere(filters: LeagueSearchFilters = {}, viewerId?: string) {
+    const and: Record<string, unknown>[] = [];
+
+    and.push({
+      OR: [
+        { isPrivate: false },
+        ...(viewerId
+          ? [{ creatorId: viewerId }, { members: { some: { userId: viewerId } } }]
+          : []),
+      ],
     });
+
+    if (filters.q) {
+      and.push({ name: { contains: filters.q, mode: "insensitive" } });
+    }
+    if (filters.code) and.push({ inviteCode: filters.code });
+    if (filters.status) and.push({ status: filters.status });
+    if (filters.scoringType) and.push({ scoringType: filters.scoringType });
+    if (filters.creatorId) and.push({ creatorId: filters.creatorId });
+
+    if (filters.minEntryFee !== undefined || filters.maxEntryFee !== undefined) {
+      and.push({
+        entryFee: {
+          ...(filters.minEntryFee !== undefined ? { gte: filters.minEntryFee } : {}),
+          ...(filters.maxEntryFee !== undefined ? { lte: filters.maxEntryFee } : {}),
+        },
+      });
+    }
+    if (filters.minSize !== undefined || filters.maxSize !== undefined) {
+      and.push({
+        maxMembers: {
+          ...(filters.minSize !== undefined ? { gte: filters.minSize } : {}),
+          ...(filters.maxSize !== undefined ? { lte: filters.maxSize } : {}),
+        },
+      });
+    }
+    if (filters.hasOpenSlots) {
+      // Column-to-column comparison: currentMembers < maxMembers
+      and.push({ currentMembers: { lt: this.db.league.fields.maxMembers } });
+    }
+
+    return { AND: and };
+  }
+
+  /**
+   * Searches leagues by name, entry fee, size and more, with pagination.
+   * Private leagues only appear for their creator and members.
+   */
+  public async getLeagues(
+    filters: LeagueSearchFilters = {},
+    viewerId?: string
+  ): Promise<LeagueSearchResult<any>> {
+    const page = filters.page ?? 1;
+    const pageSize = Math.min(filters.pageSize ?? LEAGUE_SEARCH_DEFAULT_PAGE_SIZE, LEAGUE_SEARCH_MAX_PAGE_SIZE);
+    const sortField = LEAGUE_SORT_FIELDS[filters.sortBy ?? "newest"];
+    const sortOrder = filters.sortOrder ?? "desc";
+    const where = this.buildSearchWhere(filters, viewerId);
+
+    const [items, total] = await Promise.all([
+      this.db.league.findMany({
+        where,
+        include: {
+          creator: { select: { id: true, username: true } },
+          startGameweek: { select: { id: true, name: true, deadline: true } },
+          endGameweek: { select: { id: true, name: true } },
+        },
+        // Secondary key keeps pagination stable when the primary sort ties
+        orderBy: [{ [sortField]: sortOrder }, { id: "asc" }],
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      this.db.league.count({ where }),
+    ]);
+
+    return {
+      items: items.map((league: any) => LeagueService.redactForViewer(league, viewerId)),
+      total,
+      page,
+      pageSize,
+    };
   }
 }
 

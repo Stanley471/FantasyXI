@@ -127,6 +127,16 @@ export interface Gameweek {
   season: string;
 }
 
+export interface GameweekHistoryEntry {
+  id: number;
+  points: number;
+  benchPoints: number;
+  captainPoints: number;
+  transferCost: number;
+  gameweek: Gameweek;
+  squad: Squad;
+}
+
 export interface PlayerGameweekStats {
   id: number;
   playerId: number;
@@ -169,7 +179,10 @@ export interface League {
   name: string;
   description: string | null;
   creatorId: string;
-  inviteCode: string;
+  /** Hidden (null) for private leagues unless the viewer is the creator */
+  inviteCode: string | null;
+  /** Private leagues are invitation-only and hidden from public search */
+  isPrivate: boolean;
   maxMembers: number;
   minMembers: number;
   currentMembers: number;
@@ -181,6 +194,48 @@ export interface League {
   endGameweekId: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export type LeagueSortField = "newest" | "entryFee" | "size" | "prizePool" | "members";
+
+export interface LeagueSearchMeta {
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+export type LeagueInvitationState = "ACTIVE" | "USED" | "REVOKED" | "EXPIRED";
+
+export interface LeagueInvitation {
+  id: string;
+  expiresAt: string;
+  usedAt: string | null;
+  revokedAt: string | null;
+  createdAt: string;
+  usedBy: { id: string; username: string } | null;
+  state: LeagueInvitationState;
+}
+
+/** Returned once when an invitation is created; the token is never shown again */
+export interface CreatedLeagueInvitation {
+  id: string;
+  leagueId: string;
+  token: string;
+  expiresAt: string;
+  createdAt: string;
+}
+
+export interface LeagueInvitationPreview {
+  league: Pick<
+    League,
+    "id" | "name" | "description" | "entryFee" | "prizePool" | "maxMembers" | "currentMembers" | "status" | "scoringType"
+  > & {
+    creator: { id: string; username: string };
+    startGameweek: { id: number; name: string; deadline: string };
+    endGameweek: { id: number; name: string };
+  };
+  expiresAt: string;
 }
 
 export interface LeagueMember {
@@ -413,5 +468,33 @@ export interface GameweekTimeline {
     totalBonus: number;
   };
   generatedAt: string;
+}
+
+// ============================================================
+// Toast Notification Types
+// ============================================================
+
+export type ToastType = "success" | "error" | "info" | "warning";
+
+export interface ToastAction {
+  label: string;
+  onClick: () => void;
+}
+
+export interface ToastOptions {
+  id?: string;
+  title?: string;
+  duration?: number;
+  action?: ToastAction;
+}
+
+export interface ToastItem {
+  id: string;
+  type: ToastType;
+  message: string;
+  title?: string;
+  duration: number;
+  action?: ToastAction;
+  createdAt: number;
 }
 

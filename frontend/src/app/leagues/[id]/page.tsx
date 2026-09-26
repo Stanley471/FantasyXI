@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, use } from "react";
+import React, { useState, useEffect, useCallback, use } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
@@ -15,20 +15,21 @@ import {
 import { StandingsTable } from "@/components/leagues/StandingsTable";
 import { PrizeCalculator } from "@/components/leagues/PrizeCalculator";
 import { PaymentModal } from "@/components/leagues/PaymentModal";
+import { InvitationManager } from "@/components/leagues/InvitationManager";
+import { getOnChainLeague, OnChainLeagueState } from "@/lib/stellar/sorobanAudit";
 import { LiveMatchdayBar } from "@/components/live/LiveMatchdayBar";
 import { LiveSquadModal } from "@/components/live/LiveSquadModal";
 import { useLiveLeague } from "@/components/live/useLiveLeague";
 import { LeagueStatusBadge, Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { useToast } from "@/context/ToastContext";
 import {
   IconTrophy,
-  IconUsers,
   IconCopy,
   IconCheck,
   IconAlertCircle,
   IconChevronLeft,
   IconShield,
-  IconPlus,
 } from "@/components/ui/Icons";
 
 export default function LeagueDetailPage({
@@ -41,6 +42,7 @@ export default function LeagueDetailPage({
 
   const router = useRouter();
   const { user, isAuthenticated } = useAuth();
+  const { toast } = useToast();
 
   const [league, setLeague] = useState<League | null>(null);
   const [standings, setStandings] = useState<LeagueStandingsEntry[]>([]);
@@ -53,6 +55,21 @@ export default function LeagueDetailPage({
   const [copiedCode, setCopiedCode] = useState<boolean>(false);
   const [showPaymentModal, setShowPaymentModal] = useState<boolean>(false);
   const [liveSquadUserId, setLiveSquadUserId] = useState<string | null>(null);
+  const [onChainLeague, setOnChainLeague] = useState<OnChainLeagueState | null>(null);
+  const [auditError, setAuditError] = useState<string | null>(null);
+  const [depositEvidence, setDepositEvidence] = useState<{
+    txHash: string;
+    ledgerSeq?: number;
+  } | null>(null);
+
+  const escrowContractId =
+    process.env.NEXT_PUBLIC_STELLAR_ESCROW_CONTRACT_ID ||
+    "CB4KIK42P32SZHKG4JBDCJUV4A4KGCDN6RHOOTIFSBGZHS2IF653VOEA";
+  const usdcAssetContract =
+    process.env.NEXT_PUBLIC_STELLAR_USDC_TOKEN_CONTRACT_ID ||
+    process.env.NEXT_PUBLIC_STELLAR_USDC_ISSUER ||
+    "";
+  const stellarExpertBase = "https://stellar.expert/explorer/testnet";
 
   // Live matchday feed (SSE) while the competition is running
   const { snapshot, rankChanges, freshEventKeys, connection } = useLiveLeague(
@@ -61,7 +78,7 @@ export default function LeagueDetailPage({
   );
 
   // Load league data, standings, and user squads
-  const loadLeagueData = async () => {
+  const loadLeagueData = useCallback(async () => {
     try {
       // 1. Fetch league details
       const lgRes = await api.get<{ success: boolean; data: League }>(
@@ -100,16 +117,83 @@ export default function LeagueDetailPage({
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [leagueId, isAuthenticated]);
 
   useEffect(() => {
-    loadLeagueData();
+    let cancelled = false;
+
+    async function init() {
+      try {
+        const lgRes = await api.get<{ success: boolean; data: League }>(
+          `/api/v1/leagues/${leagueId}`
+        );
+        if (!cancelled && lgRes?.data) {
+          setLeague(lgRes.data);
+        }
+
+        const stdRes = await api.get<{
+          success: boolean;
+          data: LeagueStandingsEntry[] | { standings: LeagueStandingsEntry[] };
+        }>(`/api/v1/leagues/${leagueId}/standings`);
+        if (!cancelled && stdRes?.data) {
+          setStandings(Array.isArray(stdRes.data) ? stdRes.data : stdRes.data.standings);
+        }
+
+        if (isAuthenticated) {
+          const squadRes = await api.get<{ success: boolean; data: Squad[] }>(
+            "/api/v1/squads/me"
+          );
+          if (!cancelled && squadRes?.data && squadRes.data.length > 0) {
+            setUserSquads(squadRes.data);
+            setSelectedSquadId(squadRes.data[0].id);
+          }
+        }
+      } catch (err: unknown) {
+        if (!cancelled) {
+          if (err instanceof ApiError) {
+            setErrorMessage(err.message || "Failed to load league details.");
+          } else {
+            setErrorMessage("Could not load competition data.");
+          }
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
+      }
+    }
+
+    init();
+    return () => {
+      cancelled = true;
+    };
   }, [leagueId, isAuthenticated]);
+
+  useEffect(() => {
+    if (!league || league.entryFee <= 0) return;
+
+    let cancelled = false;
+    getOnChainLeague(leagueId, { contractId: escrowContractId })
+      .then((state) => {
+        if (!cancelled) setOnChainLeague(state);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setOnChainLeague(null);
+          setAuditError(error instanceof Error ? error.message : "RPC unavailable");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [league, leagueId, escrowContractId]);
 
   const copyInviteCode = () => {
     if (league?.inviteCode) {
       navigator.clipboard.writeText(league.inviteCode);
       setCopiedCode(true);
+      toast.success("League invite code copied to clipboard!");
       setTimeout(() => setCopiedCode(false), 2000);
     }
   };
@@ -122,7 +206,9 @@ export default function LeagueDetailPage({
     }
 
     if (!selectedSquadId) {
-      setErrorMessage("Please select a squad to enter this league.");
+      const msg = "Please select a squad to enter this league.";
+      setErrorMessage(msg);
+      toast.warning(msg);
       return;
     }
 
@@ -134,6 +220,8 @@ export default function LeagueDetailPage({
         squadId: selectedSquadId,
       });
 
+      toast.success(`Successfully joined ${league?.name || "league"}!`);
+
       // Reload standings
       await loadLeagueData();
 
@@ -142,13 +230,14 @@ export default function LeagueDetailPage({
         setShowPaymentModal(true);
       }
     } catch (err: unknown) {
-      if (err instanceof ApiError) {
-        setErrorMessage(err.message || "Failed to join league.");
-      } else if (err instanceof Error) {
-        setErrorMessage(err.message);
-      } else {
-        setErrorMessage("An unexpected error occurred.");
-      }
+      const msg =
+        err instanceof ApiError
+          ? err.message || "Failed to join league."
+          : err instanceof Error
+            ? err.message
+            : "An unexpected error occurred.";
+      setErrorMessage(msg);
+      toast.error(msg);
     } finally {
       setIsJoining(false);
     }
@@ -184,6 +273,7 @@ export default function LeagueDetailPage({
   const myEntry = user ? standings.find((s) => s.userId === user.id) : null;
   const isMember = !!myEntry;
   const hasPaid = myEntry?.membershipStatus === MembershipStatus.ACTIVE || league?.entryFee === 0;
+  const isCreator = !!user && league?.creatorId === user.id;
 
   if (isLoading) {
     return (
@@ -232,6 +322,12 @@ export default function LeagueDetailPage({
           <div>
             <div className="flex items-center gap-2 mb-1.5">
               <LeagueStatusBadge status={league.status} />
+              {league.isPrivate && (
+                <Badge variant="neutral" className="gap-1">
+                  <IconShield className="w-3 h-3" />
+                  <span>Private</span>
+                </Badge>
+              )}
               <span className="text-xs font-mono text-slate-400">
                 GW {league.startGameweekId} &rarr; GW {league.endGameweekId}
               </span>
@@ -244,25 +340,27 @@ export default function LeagueDetailPage({
             </p>
           </div>
 
-          {/* Invite Code Widget */}
-          <div className="flex items-center gap-2 p-2.5 rounded-lg bg-slate-950/80 border border-slate-800 self-start md:self-auto">
-            <div>
-              <div className="text-[10px] uppercase font-semibold text-slate-500">Invite Code</div>
-              <div className="font-mono font-bold text-white tracking-widest text-sm">
-                {league.inviteCode}
+          {/* Invite Code Widget (private league codes are only returned to the creator) */}
+          {league.inviteCode && (
+            <div className="flex items-center gap-2 p-2.5 rounded-lg bg-slate-950/80 border border-slate-800 self-start md:self-auto">
+              <div>
+                <div className="text-[10px] uppercase font-semibold text-slate-500">Invite Code</div>
+                <div className="font-mono font-bold text-white tracking-widest text-sm">
+                  {league.inviteCode}
+                </div>
               </div>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={copyInviteCode}
+                className="text-xs"
+                title="Copy Invite Code"
+              >
+                {copiedCode ? <IconCheck className="w-3.5 h-3.5 text-emerald-400" /> : <IconCopy className="w-3.5 h-3.5" />}
+              </Button>
             </div>
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              onClick={copyInviteCode}
-              className="text-xs"
-              title="Copy Invite Code"
-            >
-              {copiedCode ? <IconCheck className="w-3.5 h-3.5 text-emerald-400" /> : <IconCopy className="w-3.5 h-3.5" />}
-            </Button>
-          </div>
+          )}
         </div>
 
         {/* 4 Stats Grid */}
@@ -319,6 +417,10 @@ export default function LeagueDetailPage({
                   </Badge>
                 )}
               </div>
+            ) : league.isPrivate ? (
+              <span className="text-xs text-slate-400">
+                This is a private league. Ask the creator for an invitation link to join.
+              </span>
             ) : (
               <div className="flex items-center gap-3">
                 <span className="text-xs font-semibold text-slate-300">Enter with Squad:</span>
@@ -360,7 +462,7 @@ export default function LeagueDetailPage({
               >
                 Pay {league.entryFee} USDC Entry Fee
               </Button>
-            ) : !isMember ? (
+            ) : !isMember && !league.isPrivate ? (
               <Button
                 type="button"
                 variant="primary"
@@ -430,7 +532,60 @@ export default function LeagueDetailPage({
 
         {/* Right 1 Col: Prize Payout Calculator & Rules */}
         <div className="space-y-6">
+          {league.isPrivate && isCreator && league.status === LeagueStatus.UPCOMING && (
+            <InvitationManager leagueId={league.id} />
+          )}
+
           <PrizeCalculator entryFee={league.entryFee} participants={league.currentMembers || league.maxMembers} />
+
+          {league.entryFee > 0 && (
+            <div className="bg-pitch-surface border border-pitch-border rounded-xl p-5 shadow-md space-y-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="font-bold text-white uppercase tracking-wider text-[11px] flex items-center gap-2">
+                    <IconShield className="w-4 h-4 text-emerald-400" />
+                    On-chain escrow audit
+                  </h3>
+                  <p className="text-[11px] text-slate-500 mt-1">Soroban RPC · get_league</p>
+                </div>
+                <span className={`text-[10px] font-bold uppercase px-2 py-1 rounded border ${
+                  onChainLeague &&
+                  onChainLeague.totalDeposited >= league.entryFee * league.currentMembers &&
+                  onChainLeague.participantCount >= league.currentMembers
+                    ? "text-emerald-300 bg-emerald-500/10 border-emerald-500/30"
+                    : "text-amber-300 bg-amber-500/10 border-amber-500/30"
+                }`}>
+                  {onChainLeague ? `${Math.min(100, Math.round((onChainLeague.totalDeposited / Math.max(league.entryFee * league.currentMembers, 1)) * 100))}% solvent` : "Checking"}
+                </span>
+              </div>
+
+              {onChainLeague ? (
+                <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+                  <div className="rounded-lg bg-slate-950/60 border border-slate-800 p-2.5">
+                    <div className="text-[10px] text-slate-500 uppercase font-sans">On-chain deposits</div>
+                    <div className="text-white font-bold mt-1">{onChainLeague.totalDeposited.toFixed(2)} USDC</div>
+                  </div>
+                  <div className="rounded-lg bg-slate-950/60 border border-slate-800 p-2.5">
+                    <div className="text-[10px] text-slate-500 uppercase font-sans">Participants</div>
+                    <div className="text-white font-bold mt-1">{onChainLeague.participantCount} / {league.currentMembers}</div>
+                  </div>
+                  <div className="col-span-2 flex items-center justify-between text-[11px] text-slate-400">
+                    <span>Contract status</span>
+                    <span className="text-emerald-400 font-semibold uppercase">{onChainLeague.status}</span>
+                  </div>
+                </div>
+              ) : (
+                <p className="text-xs text-slate-500">{auditError || "Reading escrow state..."}</p>
+              )}
+
+              <div className="flex flex-wrap gap-x-3 gap-y-2 text-[11px] font-semibold">
+                <a href={`${stellarExpertBase}/contract/${escrowContractId}`} target="_blank" rel="noreferrer" className="text-emerald-400 hover:text-emerald-300 underline">Escrow contract</a>
+                {usdcAssetContract && <a href={`${stellarExpertBase}/contract/${usdcAssetContract}`} target="_blank" rel="noreferrer" className="text-emerald-400 hover:text-emerald-300 underline">USDC asset</a>}
+                {depositEvidence && <a href={`${stellarExpertBase}/tx/${depositEvidence.txHash}`} target="_blank" rel="noreferrer" className="text-emerald-400 hover:text-emerald-300 underline">Your deposit tx</a>}
+                {depositEvidence?.ledgerSeq && <a href={`${stellarExpertBase}/ledger/${depositEvidence.ledgerSeq}`} target="_blank" rel="noreferrer" className="text-emerald-400 hover:text-emerald-300 underline">Ledger #{depositEvidence.ledgerSeq}</a>}
+              </div>
+            </div>
+          )}
 
           <div className="bg-pitch-surface border border-pitch-border rounded-xl p-5 shadow-md space-y-3 text-xs text-slate-400">
             <h3 className="font-bold text-white uppercase tracking-wider text-[11px] flex items-center gap-2">
@@ -461,7 +616,8 @@ export default function LeagueDetailPage({
           leagueName={league.name}
           squadId={myEntry.squadId}
           entryFee={league.entryFee}
-          onPaymentSuccess={() => {
+          onPaymentSuccess={(deposit) => {
+            setDepositEvidence(deposit);
             loadLeagueData();
           }}
         />

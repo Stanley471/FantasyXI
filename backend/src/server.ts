@@ -4,10 +4,20 @@ import dotenv from "dotenv";
 import apiV1Router from "./routes/index.js";
 import { startJobQueue, stopJobQueue, getQueueHealth } from "./queues/jobQueue.js";
 import { apiRateLimiter } from "./middleware/rateLimiter.js";
+import { ApolloServer } from "@apollo/server";
+import { expressMiddleware } from "@as-integrations/express5";
+import DataLoader from "dataloader";
+import { prisma, getReadReplicaStatus } from "./config/db.js";
+import { closeRedisClient } from "./config/redis.js";
+import { preferReplicaReads } from "./middleware/readConsistency.js";
+import { financialAuditLog } from "./services/audit/financialAuditLog.js";
+import { resolvers } from "./graphql/resolvers.js";
+import { typeDefs } from "./graphql/schema.js";
 
 dotenv.config();
 
 const app = express();
+const apolloServer = new ApolloServer({ typeDefs, resolvers });
 
 // Trust reverse proxies (Cloudflare, Nginx, ALB) for accurate client IP rate limiting
 app.set("trust proxy", 1);
@@ -58,6 +68,19 @@ app.get("/api/health/queues", async (_req: Request, res: Response, next: NextFun
   }
 });
 
+app.get("/api/health/replicas", (_req: Request, res: Response) => {
+  const replicas = getReadReplicaStatus();
+  res.json({
+    success: true,
+    data: {
+      enabled: replicas.length > 0,
+      appRegion: process.env.APP_REGION ?? null,
+      replicas,
+    },
+    timestamp: new Date().toISOString(),
+  });
+});
+
 // API v1 Routes
 app.use("/api/v1", apiV1Router);
 app.use("/api", apiV1Router);
@@ -95,7 +118,38 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
 
 const PORT = process.env.PORT || 5000;
 
-app.listen(PORT, () => {
+async function startServer(): Promise<void> {
+  await apolloServer.start();
+  app.use(
+    "/graphql",
+    // The schema is query-only, so GraphQL reads may be served by a replica
+    preferReplicaReads,
+    express.json(),
+    expressMiddleware(apolloServer, {
+      context: async () => ({
+        loaders: {
+          users: new DataLoader(async (ids) => {
+            const records = await prisma.user.findMany({
+              where: { id: { in: [...ids].map(String) } },
+              include: { wallet: true, squads: true, createdLeagues: true },
+            });
+            const byId = new Map(records.map((record) => [record.id, record]));
+            return ids.map((id) => byId.get(String(id)) ?? null);
+          }),
+          players: new DataLoader(async (ids) => {
+            const records = await prisma.player.findMany({
+              where: { id: { in: [...ids].map(Number) } },
+              include: { team: true },
+            });
+            const byId = new Map(records.map((record) => [record.id, record]));
+            return ids.map((id) => byId.get(Number(id)) ?? null);
+          }),
+        },
+      }),
+    }),
+  );
+
+  app.listen(PORT, () => {
   console.log(`
   ⚽ FantasyXI API Server
   ────────────────────────
@@ -111,8 +165,18 @@ app.listen(PORT, () => {
       console.error("[jobs] Failed to start job queue:", error)
     );
   }
+  });
+}
+
+startServer().catch((error) => {
+  console.error("Failed to start FantasyXI API:", error);
+  process.exitCode = 1;
 });
 
 process.on("SIGTERM", () => {
-  stopJobQueue().finally(() => process.exit(0));
+  // Persist buffered financial audit entries before exiting
+  stopJobQueue()
+    .finally(() => financialAuditLog.close())
+    .finally(() => closeRedisClient())
+    .finally(() => process.exit(0));
 });

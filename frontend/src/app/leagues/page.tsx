@@ -5,80 +5,200 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { api, ApiError } from "@/lib/api";
-import { League, Squad, LeagueStatus } from "@/types";
+import { League, Squad, LeagueStatus, LeagueSearchMeta, LeagueSortField } from "@/types";
 import { Badge, LeagueStatusBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { EmptyState } from "@/components/ui/EmptyState";
 import {
   IconTrophy,
   IconPlus,
-  IconUsers,
   IconShield,
-  IconCalendar,
-  IconCheck,
   IconAlertCircle,
   IconSearch,
+  IconChevronLeft,
+  IconChevronRight,
 } from "@/components/ui/Icons";
+
+const PAGE_SIZE = 12;
+
+interface LeagueFilters {
+  minEntryFee: string;
+  maxEntryFee: string;
+  minSize: string;
+  maxSize: string;
+  status: LeagueStatus | "";
+  hasOpenSlots: boolean;
+  sortBy: LeagueSortField;
+}
+
+const DEFAULT_FILTERS: LeagueFilters = {
+  minEntryFee: "",
+  maxEntryFee: "",
+  minSize: "",
+  maxSize: "",
+  status: "",
+  hasOpenSlots: false,
+  sortBy: "newest",
+};
+
+const SORT_OPTIONS: Array<{ value: LeagueSortField; label: string }> = [
+  { value: "newest", label: "Newest" },
+  { value: "entryFee", label: "Entry fee" },
+  { value: "prizePool", label: "Prize pool" },
+  { value: "size", label: "League size" },
+  { value: "members", label: "Members joined" },
+];
+
+const STATUS_OPTIONS: Array<{ value: LeagueStatus | ""; label: string }> = [
+  { value: "", label: "All Statuses" },
+  { value: LeagueStatus.UPCOMING, label: "Open / Upcoming" },
+  { value: LeagueStatus.ACTIVE, label: "In Progress" },
+  { value: LeagueStatus.COMPLETED, label: "Completed" },
+  { value: LeagueStatus.CANCELLED, label: "Cancelled" },
+];
+
+/**
+ * Extracts an invitation token from a pasted invite link or raw token.
+ * Returns null for short invite codes.
+ */
+function parseInvitationToken(input: string): string | null {
+  const trimmed = input.trim();
+  const fromLink = trimmed.match(/\/leagues\/invite\/([A-Za-z0-9_-]+)/);
+  if (fromLink) return fromLink[1];
+  return /^[A-Za-z0-9_-]{20,}$/.test(trimmed) ? trimmed : null;
+}
 
 export default function LeaguesPage() {
   const router = useRouter();
   const { user, isAuthenticated } = useAuth();
 
   const [leagues, setLeagues] = useState<League[]>([]);
+  const [meta, setMeta] = useState<LeagueSearchMeta | null>(null);
   const [userSquads, setUserSquads] = useState<Squad[]>([]);
   const [activeTab, setActiveTab] = useState<"all" | "my">("all");
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [filters, setFilters] = useState<LeagueFilters>(DEFAULT_FILTERS);
+  const [showFilters, setShowFilters] = useState(false);
+  const [page, setPage] = useState(1);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  // Join private league state
+  // Join with code / invite link state
   const [joinCode, setJoinCode] = useState("");
   const [selectedSquadId, setSelectedSquadId] = useState<string>("");
   const [isJoining, setIsJoining] = useState(false);
   const [joinError, setJoinError] = useState<string | null>(null);
   const [showJoinModal, setShowJoinModal] = useState(false);
 
-  // Fetch leagues and user squads
+  // Debounce the name search so typing doesn't fire a request per keystroke.
+  // Every search, filter or tab change starts again from the first page.
   useEffect(() => {
-    async function loadData() {
-      setIsLoading(true);
-      try {
-        // Fetch all leagues
-        const res = await api.get<{ success: boolean; data: League[] }>("/api/v1/leagues");
-        if (res?.data) {
-          setLeagues(res.data);
-        }
+    const timer = setTimeout(() => {
+      setDebouncedSearch(search.trim());
+      setPage(1);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [search]);
 
-        // Fetch user squads if authenticated
-        if (isAuthenticated) {
-          const squadRes = await api.get<{ success: boolean; data: Squad[] }>("/api/v1/squads/me");
-          if (squadRes?.data) {
-            setUserSquads(squadRes.data);
-            if (squadRes.data.length > 0) {
-              setSelectedSquadId(squadRes.data[0].id);
-            }
-          }
+  // Fetch leagues matching the current search and filters
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadLeagues() {
+      setIsLoading(true);
+      setLoadError(null);
+
+      const params = new URLSearchParams({
+        page: String(page),
+        pageSize: String(PAGE_SIZE),
+        sortBy: filters.sortBy,
+        sortOrder: filters.sortBy === "entryFee" ? "asc" : "desc",
+      });
+      if (debouncedSearch) params.set("q", debouncedSearch);
+      if (filters.minEntryFee) params.set("minEntryFee", filters.minEntryFee);
+      if (filters.maxEntryFee) params.set("maxEntryFee", filters.maxEntryFee);
+      if (filters.minSize) params.set("minSize", filters.minSize);
+      if (filters.maxSize) params.set("maxSize", filters.maxSize);
+      if (filters.status) params.set("status", filters.status);
+      if (filters.hasOpenSlots) params.set("hasOpenSlots", "true");
+      if (activeTab === "my" && user?.id) params.set("creatorId", user.id);
+
+      try {
+        const res = await api.get<{ success: boolean; data: League[]; meta: LeagueSearchMeta }>(
+          `/api/v1/leagues?${params.toString()}`
+        );
+        if (!cancelled) {
+          setLeagues(res?.data ?? []);
+          setMeta(res?.meta ?? null);
         }
       } catch (err) {
-        console.error("Failed to load leagues:", err);
+        if (!cancelled) {
+          setLeagues([]);
+          setMeta(null);
+          setLoadError(err instanceof ApiError ? err.message : "Failed to load leagues.");
+        }
       } finally {
-        setIsLoading(false);
+        if (!cancelled) setIsLoading(false);
       }
     }
 
-    loadData();
+    loadLeagues();
+    return () => {
+      cancelled = true;
+    };
+  }, [debouncedSearch, filters, activeTab, page, user?.id]);
+
+  // Fetch user squads if authenticated
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    api
+      .get<{ success: boolean; data: Squad[] }>("/api/v1/squads/me")
+      .then((squadRes) => {
+        if (squadRes?.data) {
+          setUserSquads(squadRes.data);
+          if (squadRes.data.length > 0) {
+            setSelectedSquadId(squadRes.data[0].id);
+          }
+        }
+      })
+      .catch((err) => console.error("Failed to load squads:", err));
   }, [isAuthenticated]);
 
-  // Handle joining with code
+  const updateFilter = <K extends keyof LeagueFilters>(key: K, value: LeagueFilters[K]) => {
+    setFilters((current) => ({ ...current, [key]: value }));
+    setPage(1);
+  };
+
+  const switchTab = (tab: "all" | "my") => {
+    setActiveTab(tab);
+    setPage(1);
+  };
+
+  const activeFilterCount =
+    [filters.minEntryFee, filters.maxEntryFee, filters.minSize, filters.maxSize, filters.status].filter(Boolean)
+      .length + (filters.hasOpenSlots ? 1 : 0);
+
+  // Handle joining with an invite link or a public league code
   const handleJoinWithCode = async (e: React.FormEvent) => {
     e.preventDefault();
     setJoinError(null);
 
-    if (!isAuthenticated) {
-      router.push(`/login?returnTo=/leagues`);
+    if (!joinCode.trim()) {
+      setJoinError("Please enter an invite code or paste an invitation link.");
       return;
     }
 
-    if (!joinCode.trim()) {
-      setJoinError("Please enter an invite code.");
+    // Private league invitation links are redeemed on their own page
+    const token = parseInvitationToken(joinCode);
+    if (token) {
+      setShowJoinModal(false);
+      router.push(`/leagues/invite/${encodeURIComponent(token)}`);
+      return;
+    }
+
+    if (!isAuthenticated) {
+      router.push(`/login?returnTo=/leagues`);
       return;
     }
 
@@ -90,14 +210,14 @@ export default function LeaguesPage() {
     setIsJoining(true);
 
     try {
-      // Find league with this invite code
-      const target = leagues.find(
-        (l) => l.inviteCode.toUpperCase() === joinCode.trim().toUpperCase()
+      const code = joinCode.trim().toUpperCase();
+      const lookup = await api.get<{ success: boolean; data: League[] }>(
+        `/api/v1/leagues?code=${encodeURIComponent(code)}&pageSize=1`
       );
+      const target = lookup?.data?.[0];
 
       if (!target) {
-        setJoinError("Invalid or expired invite code.");
-        setIsJoining(false);
+        setJoinError("Invalid invite code. Private leagues require an invitation link.");
         return;
       }
 
@@ -118,17 +238,9 @@ export default function LeaguesPage() {
     }
   };
 
-  // Filter leagues
-  const filteredLeagues = leagues.filter((lg) => {
-    if (search.trim() && !lg.name.toLowerCase().includes(search.toLowerCase())) {
-      return false;
-    }
-    if (activeTab === "my") {
-      // In a real database, this matches leagues where user is creator or member
-      return lg.creatorId === user?.id;
-    }
-    return true;
-  });
+  const inputClass =
+    "w-full px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-white text-xs focus:outline-none focus:border-emerald-500";
+  const labelClass = "block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1";
 
   return (
     <div className="space-y-6 pb-12">
@@ -178,20 +290,20 @@ export default function LeaguesPage() {
         <div className="flex items-center gap-2 border-b border-pitch-border pb-1">
           <button
             type="button"
-            onClick={() => setActiveTab("all")}
+            onClick={() => switchTab("all")}
             className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 ${
               activeTab === "all"
                 ? "border-emerald-500 text-emerald-400"
                 : "border-transparent text-slate-400 hover:text-slate-200"
             }`}
           >
-            Explore Public Leagues ({leagues.length})
+            Explore Public Leagues{activeTab === "all" && meta ? ` (${meta.total})` : ""}
           </button>
 
           {isAuthenticated && (
             <button
               type="button"
-              onClick={() => setActiveTab("my")}
+              onClick={() => switchTab("my")}
               className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors border-b-2 ${
                 activeTab === "my"
                   ? "border-emerald-500 text-emerald-400"
@@ -203,18 +315,151 @@ export default function LeaguesPage() {
           )}
         </div>
 
-        {/* Search */}
-        <div className="relative w-full sm:w-64">
-          <IconSearch className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search leagues..."
-            className="w-full pl-9 pr-3 py-1.5 bg-pitch-surface border border-pitch-border rounded-lg text-slate-200 placeholder-slate-500 text-xs focus:outline-none focus:border-emerald-500"
-          />
+        {/* Search & Quick Status Filter */}
+        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+          <div className="relative flex-1 sm:w-64">
+            <IconSearch className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+            <input
+              type="text"
+              value={search}
+              maxLength={60}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search leagues by name..."
+              aria-label="Search leagues by name"
+              className="w-full pl-9 pr-3 py-1.5 bg-pitch-surface border border-pitch-border rounded-lg text-slate-200 placeholder-slate-500 text-xs focus:outline-none focus:border-emerald-500"
+            />
+          </div>
+
+          <select
+            value={filters.status}
+            onChange={(e) => updateFilter("status", e.target.value as LeagueStatus | "")}
+            aria-label="Filter leagues by status"
+            className="px-2.5 py-1.5 bg-pitch-surface border border-pitch-border rounded-lg text-slate-200 text-xs focus:outline-none focus:border-emerald-500"
+          >
+            {STATUS_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            onClick={() => setShowFilters((open) => !open)}
+            aria-expanded={showFilters}
+            className="text-xs uppercase font-bold whitespace-nowrap"
+          >
+            Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
+          </Button>
         </div>
       </div>
+
+      {/* Advanced filters */}
+      {showFilters && (
+        <div className="bg-pitch-surface border border-pitch-border rounded-xl p-4 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3 items-end">
+          <div>
+            <label className={labelClass}>Min fee (USDC)</label>
+            <input
+              type="number"
+              min={0}
+              value={filters.minEntryFee}
+              onChange={(e) => updateFilter("minEntryFee", e.target.value)}
+              className={inputClass}
+            />
+          </div>
+          <div>
+            <label className={labelClass}>Max fee (USDC)</label>
+            <input
+              type="number"
+              min={0}
+              value={filters.maxEntryFee}
+              onChange={(e) => updateFilter("maxEntryFee", e.target.value)}
+              className={inputClass}
+            />
+          </div>
+          <div>
+            <label className={labelClass}>Min size</label>
+            <input
+              type="number"
+              min={2}
+              max={100}
+              value={filters.minSize}
+              onChange={(e) => updateFilter("minSize", e.target.value)}
+              className={inputClass}
+            />
+          </div>
+          <div>
+            <label className={labelClass}>Max size</label>
+            <input
+              type="number"
+              min={2}
+              max={100}
+              value={filters.maxSize}
+              onChange={(e) => updateFilter("maxSize", e.target.value)}
+              className={inputClass}
+            />
+          </div>
+          <div>
+            <label className={labelClass}>Status</label>
+            <select
+              value={filters.status}
+              onChange={(e) => updateFilter("status", e.target.value as LeagueStatus | "")}
+              className={inputClass}
+              aria-label="Filter leagues by status"
+            >
+              {STATUS_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className={labelClass}>Sort by</label>
+            <select
+              value={filters.sortBy}
+              onChange={(e) => updateFilter("sortBy", e.target.value as LeagueSortField)}
+              className={inputClass}
+            >
+              {SORT_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex flex-col gap-2">
+            <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={filters.hasOpenSlots}
+                onChange={(e) => updateFilter("hasOpenSlots", e.target.checked)}
+                className="accent-emerald-500"
+              />
+              Open spots only
+            </label>
+            <button
+              type="button"
+              onClick={() => {
+                setFilters(DEFAULT_FILTERS);
+                setPage(1);
+              }}
+              className="text-[11px] text-left font-semibold text-slate-400 hover:text-emerald-400"
+            >
+              Reset filters
+            </button>
+          </div>
+        </div>
+      )}
+
+      {loadError && (
+        <div className="p-3 rounded-lg bg-rose-950/40 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
+          <IconAlertCircle className="w-4 h-4 flex-shrink-0 text-rose-400" />
+          <span>{loadError}</span>
+        </div>
+      )}
 
       {/* Leagues Grid */}
       {isLoading ? (
@@ -222,9 +467,9 @@ export default function LeaguesPage() {
           <div className="inline-block w-8 h-8 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin mb-3" />
           <p className="text-xs">Loading fantasy leagues...</p>
         </div>
-      ) : filteredLeagues.length > 0 ? (
+      ) : leagues.length > 0 ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-          {filteredLeagues.map((lg) => (
+          {leagues.map((lg) => (
             <div
               key={lg.id}
               className="bg-pitch-surface border border-pitch-border rounded-xl p-5 shadow-md flex flex-col justify-between hover:border-slate-700 transition-colors group"
@@ -239,7 +484,15 @@ export default function LeaguesPage() {
                       {lg.description || "Official FantasyXI competition."}
                     </p>
                   </div>
-                  <LeagueStatusBadge status={lg.status} />
+                  <div className="flex flex-col items-end gap-1">
+                    <LeagueStatusBadge status={lg.status} />
+                    {lg.isPrivate && (
+                      <Badge variant="neutral" className="gap-1">
+                        <IconShield className="w-3 h-3" />
+                        <span>Private</span>
+                      </Badge>
+                    )}
+                  </div>
                 </div>
 
                 {/* Metrics */}
@@ -247,7 +500,7 @@ export default function LeaguesPage() {
                   <div>
                     <span className="text-[10px] text-slate-500 uppercase font-sans">Entry Fee</span>
                     <div className="font-bold text-slate-200 mt-0.5">
-                      {lg.entryFee > 0 ? `${lg.entryFee} USDC` : "Free"}
+                      {Number(lg.entryFee) > 0 ? `${lg.entryFee} USDC` : "Free"}
                     </div>
                   </div>
 
@@ -277,7 +530,7 @@ export default function LeaguesPage() {
               {/* Action */}
               <div className="pt-2 border-t border-slate-800/60 flex items-center justify-between">
                 <span className="text-[10px] text-slate-500 uppercase font-mono">
-                  Code: {lg.inviteCode}
+                  {lg.inviteCode ? `Code: ${lg.inviteCode}` : "Invite only"}
                 </span>
 
                 <Link href={`/leagues/${lg.id}`}>
@@ -290,21 +543,53 @@ export default function LeaguesPage() {
           ))}
         </div>
       ) : (
-        <div className="py-20 text-center bg-pitch-surface border border-dashed border-pitch-border rounded-xl p-8">
-          <div className="w-12 h-12 rounded-2xl bg-amber-500/10 text-amber-400 flex items-center justify-center mx-auto mb-3">
-            <IconTrophy className="w-6 h-6" />
-          </div>
-          <h3 className="text-base font-bold text-white mb-1">No Leagues Found</h3>
-          <p className="text-xs text-slate-400 max-w-sm mx-auto mb-5">
-            {activeTab === "my"
-              ? "You haven't entered or created any leagues yet. Explore public leagues or create your own!"
-              : "No public leagues match your search. Create the first league now!"}
-          </p>
-          <Link href="/leagues/create">
-            <Button variant="primary" size="md" className="uppercase font-bold tracking-wide text-xs">
-              Create New League
-            </Button>
-          </Link>
+        <EmptyState
+          icon={<IconTrophy className="w-6 h-6 text-amber-400" />}
+          title="No Leagues Found"
+          description={
+            debouncedSearch || filters.status
+              ? `No leagues match your search query or status filter criteria.`
+              : activeTab === "my"
+              ? "You haven't created any leagues yet. Explore public leagues or create your own!"
+              : "No public leagues match your search and filters. Create the first league now!"
+          }
+          action={
+            <Link href="/leagues/create">
+              <Button variant="primary" size="md" className="uppercase font-bold tracking-wide text-xs">
+                Create New League
+              </Button>
+            </Link>
+          }
+          className="py-16 bg-pitch-surface border-pitch-border"
+        />
+      )}
+
+      {/* Pagination */}
+      {meta && meta.totalPages > 1 && (
+        <div className="flex items-center justify-center gap-3 text-xs text-slate-400">
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            disabled={page <= 1 || isLoading}
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            aria-label="Previous page"
+          >
+            <IconChevronLeft className="w-3.5 h-3.5" />
+          </Button>
+          <span className="font-mono">
+            Page {meta.page} of {meta.totalPages}
+          </span>
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            disabled={page >= meta.totalPages || isLoading}
+            onClick={() => setPage((p) => p + 1)}
+            aria-label="Next page"
+          >
+            <IconChevronRight className="w-3.5 h-3.5" />
+          </Button>
         </div>
       )}
 
@@ -313,10 +598,10 @@ export default function LeaguesPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fadeIn">
           <div className="relative w-full max-w-md bg-pitch-surface border border-pitch-border rounded-2xl p-6 shadow-2xl space-y-4">
             <h3 className="text-lg font-bold text-white uppercase tracking-tight">
-              Join Private League
+              Join a League
             </h3>
             <p className="text-xs text-slate-400">
-              Enter the 6-character invite code provided by the league creator.
+              Paste the invitation link for a private league, or enter the invite code of a public league.
             </p>
 
             {joinError && (
@@ -329,16 +614,16 @@ export default function LeaguesPage() {
             <form onSubmit={handleJoinWithCode} className="space-y-4">
               <div>
                 <label className="block text-[11px] font-semibold text-slate-300 uppercase tracking-wider mb-1">
-                  Invite Code <span className="text-red-400">*</span>
+                  Invite Code or Link <span className="text-red-400">*</span>
                 </label>
                 <input
                   type="text"
                   required
-                  maxLength={10}
+                  maxLength={300}
                   value={joinCode}
-                  onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
-                  placeholder="e.g. A1B2C3"
-                  className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-700 rounded-lg text-white font-mono text-center text-base tracking-widest uppercase focus:outline-none focus:border-emerald-500"
+                  onChange={(e) => setJoinCode(e.target.value)}
+                  placeholder="e.g. A1B2C3 or https://.../leagues/invite/..."
+                  className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-700 rounded-lg text-white font-mono text-center text-sm focus:outline-none focus:border-emerald-500"
                 />
               </div>
 
@@ -383,7 +668,7 @@ export default function LeaguesPage() {
                   type="submit"
                   variant="primary"
                   size="md"
-                  disabled={isJoining || userSquads.length === 0}
+                  disabled={isJoining}
                   isLoading={isJoining}
                   className="w-1/2 justify-center uppercase font-bold tracking-wide text-xs"
                 >

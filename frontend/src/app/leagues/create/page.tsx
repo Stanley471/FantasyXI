@@ -27,6 +27,7 @@ export default function CreateLeaguePage() {
   const [maxMembers, setMaxMembers] = useState<number>(10);
   const [startGameweekId, setStartGameweekId] = useState<number>(1);
   const [endGameweekId, setEndGameweekId] = useState<number>(5);
+  const [isPrivate, setIsPrivate] = useState(false);
 
   const [isLoadingGw, setIsLoadingGw] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -92,6 +93,7 @@ export default function CreateLeaguePage() {
         startGameweekId: Number(startGameweekId),
         endGameweekId: Number(endGameweekId),
         scoringType: ScoringType.CLASSIC,
+        isPrivate,
       });
 
       if (res?.data?.id) {
@@ -268,6 +270,24 @@ export default function CreateLeaguePage() {
               </select>
             </div>
           </div>
+
+          {/* Visibility */}
+          <label className="flex items-start gap-3 p-3 rounded-lg bg-slate-950/60 border border-slate-800 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={isPrivate}
+              onChange={(e) => setIsPrivate(e.target.checked)}
+              className="mt-0.5 accent-emerald-500"
+            />
+            <span>
+              <span className="block text-xs font-semibold uppercase tracking-wider text-slate-300">
+                Private League
+              </span>
+              <span className="block text-[11px] text-slate-500 mt-0.5">
+                Hidden from public search. Managers can only join with a single-use invitation link you generate.
+              </span>
+            </span>
+          </label>
 
           <div className="pt-3">
             <Button

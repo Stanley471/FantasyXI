@@ -34,6 +34,8 @@ pub enum EscrowError {
     NotPaused = 16,
     TimelockNotElapsed = 17,
     NoDeposit = 18,
+    InvalidProof = 14,
+    InvalidMultisig = 15,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -64,17 +66,28 @@ pub struct WinnerPayout {
     pub amount: i128,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct AdminConfig {
+    pub signers: Vec<Address>,
+    pub threshold: u32,
+}
+
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
     Admin,
     IsPaused,
     PausedAt,
+    AdminConfig,
     League(u64),
     Deposit(u64, Address),
     ClaimablePrize(u64, Address),
 }
 
+/// # Issue #83: Soroban Escrow Smart Contract for Fantasy Leagues
+/// Provides non-custodial holding of USDC entry fee deposits for competition partitions.
+/// Ensures trustless settlement, prize claim storage, and refund mechanisms.
 #[contract]
 pub struct FantasyXIEscrow;
 
@@ -109,6 +122,43 @@ impl FantasyXIEscrow {
 
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::IsPaused, &false);
+        let mut signers = Vec::new(&env);
+        signers.push_back(admin.clone());
+        env.storage().instance().set(
+            &DataKey::AdminConfig,
+            &AdminConfig {
+                signers,
+                threshold: 1,
+            },
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        Ok(())
+    }
+
+    /// Initializes the contract with an M-of-N signer set. Each signer must
+    /// authorize the transaction so the deployed configuration is explicit.
+    pub fn initialize_multisig(
+        env: Env,
+        signers: Vec<Address>,
+        threshold: u32,
+    ) -> Result<(), EscrowError> {
+        if env.storage().instance().has(&DataKey::Admin) {
+            return Err(EscrowError::AlreadyInitialized);
+        }
+        if threshold == 0 || threshold > signers.len() || signers.len() > 32 {
+            return Err(EscrowError::InvalidMultisig);
+        }
+        for signer in signers.iter() {
+            signer.require_auth();
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::Admin, &signers.get(0).unwrap());
+        env.storage()
+            .instance()
+            .set(&DataKey::AdminConfig, &AdminConfig { signers, threshold });
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
@@ -283,14 +333,85 @@ impl FantasyXIEscrow {
             return Err(EscrowError::ContractPaused);
         }
         Self::settle_with_affiliate(
+        let mut approvals = Vec::new(&env);
+        approvals.push_back(admin);
+        Self::settle_internal(
             env,
-            admin,
+            approvals,
             league_id,
             winners,
             platform_treasury,
             platform_fee,
             None,
             0,
+            None,
+        )
+    }
+
+    pub fn settle_with_proof(
+        env: Env,
+        admin: Address,
+        league_id: u64,
+        winners: Vec<WinnerPayout>,
+        platform_treasury: Address,
+        platform_fee: i128,
+        proof: BytesN<32>,
+    ) -> Result<(), EscrowError> {
+        let mut approvals = Vec::new(&env);
+        approvals.push_back(admin);
+        Self::settle_internal(
+            env,
+            approvals,
+            league_id,
+            winners,
+            platform_treasury,
+            platform_fee,
+            None,
+            0,
+            Some(proof),
+        )
+    }
+
+    pub fn settle_with_multisig(
+        env: Env,
+        approvals: Vec<Address>,
+        league_id: u64,
+        winners: Vec<WinnerPayout>,
+        platform_treasury: Address,
+        platform_fee: i128,
+    ) -> Result<(), EscrowError> {
+        Self::settle_internal(
+            env,
+            approvals,
+            league_id,
+            winners,
+            platform_treasury,
+            platform_fee,
+            None,
+            0,
+            None,
+        )
+    }
+
+    pub fn settle_with_multisig_and_proof(
+        env: Env,
+        approvals: Vec<Address>,
+        league_id: u64,
+        winners: Vec<WinnerPayout>,
+        platform_treasury: Address,
+        platform_fee: i128,
+        proof: BytesN<32>,
+    ) -> Result<(), EscrowError> {
+        Self::settle_internal(
+            env,
+            approvals,
+            league_id,
+            winners,
+            platform_treasury,
+            platform_fee,
+            None,
+            0,
+            Some(proof),
         )
     }
 
@@ -305,16 +426,38 @@ impl FantasyXIEscrow {
         affiliate_address: Option<Address>,
         affiliate_cut: i128,
     ) -> Result<(), EscrowError> {
-        admin.require_auth();
+        let mut approvals = Vec::new(&env);
+        approvals.push_back(admin);
+        Self::settle_internal(
+            env,
+            approvals,
+            league_id,
+            winners,
+            platform_treasury,
+            platform_fee,
+            affiliate_address,
+            affiliate_cut,
+            None,
+        )
+    }
 
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(EscrowError::NotInitialized)?;
+    fn settle_internal(
+        env: Env,
+        approvals: Vec<Address>,
+        league_id: u64,
+        winners: Vec<WinnerPayout>,
+        platform_treasury: Address,
+        platform_fee: i128,
+        affiliate_address: Option<Address>,
+        affiliate_cut: i128,
+        proof: Option<BytesN<32>>,
+    ) -> Result<(), EscrowError> {
+        Self::authorize_signers(&env, &approvals)?;
 
-        if admin != stored_admin {
-            return Err(EscrowError::NotAuthorized);
+        if let Some(ref proof_value) = proof {
+            if proof_value.to_array().iter().all(|byte| *byte == 0) {
+                return Err(EscrowError::InvalidProof);
+            }
         }
 
         let league_key = DataKey::League(league_id);
@@ -414,11 +557,7 @@ impl FantasyXIEscrow {
 
         if let Some(affiliate) = affiliate_address {
             if affiliate_cut > 0 {
-                token_client.transfer(
-                    &env.current_contract_address(),
-                    &affiliate,
-                    &affiliate_cut,
-                );
+                token_client.transfer(&env.current_contract_address(), &affiliate, &affiliate_cut);
                 env.events().publish(
                     (symbol_short!("affiliate"), league_id),
                     (affiliate, affiliate_cut),
@@ -457,6 +596,36 @@ impl FantasyXIEscrow {
             (total_payout, platform_fee),
         );
 
+        if let Some(proof_value) = proof {
+            env.events()
+                .publish((symbol_short!("proof"), league_id), proof_value);
+        }
+
+        Ok(())
+    }
+
+    fn authorize_signers(env: &Env, approvals: &Vec<Address>) -> Result<(), EscrowError> {
+        let config: AdminConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminConfig)
+            .ok_or(EscrowError::NotInitialized)?;
+        if approvals.len() < config.threshold || approvals.len() > config.signers.len() {
+            return Err(EscrowError::InvalidMultisig);
+        }
+        for (index, signer) in approvals.iter().enumerate() {
+            if approvals
+                .iter()
+                .take(index)
+                .any(|previous| previous == signer)
+            {
+                return Err(EscrowError::InvalidMultisig);
+            }
+            if !config.signers.iter().any(|configured| configured == signer) {
+                return Err(EscrowError::NotAuthorized);
+            }
+            signer.require_auth();
+        }
         Ok(())
     }
 
@@ -636,6 +805,22 @@ impl FantasyXIEscrow {
             );
         }
         result.unwrap_or(0)
+    }
+
+    /// Returns the total aggregated prize pool balance (in atomic units/USDC) for a specific league.
+    /// Handles non-existent leagues gracefully by returning 0.
+    pub fn get_prize_pool(env: Env, league_id: u64) -> i128 {
+        let key = DataKey::League(league_id);
+        if let Some(league) = env.storage().persistent().get::<_, LeagueState>(&key) {
+            env.storage().persistent().extend_ttl(
+                &key,
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+            league.total_deposited
+        } else {
+            0
+        }
     }
 
     /// Winner claims their prize for a settled league.
@@ -963,6 +1148,49 @@ mod test {
     }
 
     #[test]
+    fn test_multisig_settlement_requires_threshold_and_emits_proof_path() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let signer_one = Address::generate(&env);
+        let signer_two = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token_contract = env.register_stellar_asset_contract_v2(token_admin);
+        let contract_id = env.register(FantasyXIEscrow, ());
+        let client = FantasyXIEscrowClient::new(&env, &contract_id);
+        let signers = vec![&env, signer_one.clone(), signer_two.clone()];
+        client.initialize_multisig(&signers, &2);
+
+        let participant = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let token_admin_client = token::StellarAssetClient::new(&env, &token_contract.address());
+        token_admin_client.mint(&participant, &50_000_000);
+        client.create_league(&signer_one, &901, &50_000_000, &token_contract.address());
+        client.deposit(&participant, &901);
+
+        let winners = vec![
+            &env,
+            WinnerPayout {
+                winner: participant.clone(),
+                amount: 47_500_000,
+            },
+        ];
+        let proof = BytesN::from_array(&env, &[1; 32]);
+
+        let one_signature = vec![&env, signer_one.clone()];
+        assert_eq!(
+            client.try_settle_with_multisig(&one_signature, &901, &winners, &treasury, &2_500_000),
+            Err(Ok(EscrowError::InvalidMultisig))
+        );
+        client.settle_with_multisig_and_proof(
+            &signers, &901, &winners, &treasury, &2_500_000, &proof,
+        );
+        assert_eq!(
+            client.get_league(&901).unwrap().status,
+            LeagueStatus::Settled
+        );
+    }
+
+    #[test]
     fn test_zero_fee_league() {
         let (env, admin, token_addr, client) = setup_test();
         let creator = Address::generate(&env);
@@ -1198,8 +1426,14 @@ mod test {
 
         let winners = vec![
             &env,
-            WinnerPayout { winner: u1.clone(), amount: 66_500_000 },
-            WinnerPayout { winner: u2.clone(), amount: 28_500_000 },
+            WinnerPayout {
+                winner: u1.clone(),
+                amount: 66_500_000,
+            },
+            WinnerPayout {
+                winner: u2.clone(),
+                amount: 28_500_000,
+            },
         ];
 
         client.settle_with_affiliate(
@@ -1291,5 +1525,30 @@ mod test {
         let league = client.get_league(&811).unwrap();
         assert_eq!(league.participant_count, 0);
     }
-}
 
+    #[test]
+    fn test_get_prize_pool() {
+        let (env, creator, token, client) = setup_test();
+        let user1 = Address::generate(&env);
+        let user2 = Address::generate(&env);
+
+        let token_admin_client = token::StellarAssetClient::new(&env, &token);
+        token_admin_client.mint(&user1, &100_000_000);
+        token_admin_client.mint(&user2, &100_000_000);
+
+        // 1. Querying non-existent league returns 0 gracefully
+        assert_eq!(client.get_prize_pool(&99999), 0);
+
+        // 2. Newly created league starts with 0 prize pool
+        client.create_league(&creator, &900, &50_000_000, &token);
+        assert_eq!(client.get_prize_pool(&900), 0);
+
+        // 3. First deposit updates total prize pool to 50_000_000 (5 USDC)
+        client.deposit(&user1, &900);
+        assert_eq!(client.get_prize_pool(&900), 50_000_000);
+
+        // 4. Second deposit aggregates to 100_000_000 (10 USDC)
+        client.deposit(&user2, &900);
+        assert_eq!(client.get_prize_pool(&900), 100_000_000);
+    }
+}

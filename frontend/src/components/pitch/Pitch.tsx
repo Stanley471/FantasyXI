@@ -1,6 +1,6 @@
 "use client";
 
-import React from "react";
+import React, { useMemo } from "react";
 import { Position, SquadPlayer, Player } from "@/types";
 import { PlayerCard } from "./PlayerCard";
 import { detectFormation } from "@/lib/formation";
@@ -8,8 +8,12 @@ import { detectFormation } from "@/lib/formation";
 import { useTeamStore } from "@/store/teamStore";
 
 export const Pitch: React.FC = () => {
-  const starters = useTeamStore((state) => 
-    state.players.filter((p) => p.isStarter).sort((a, b) => a.positionOrder - b.positionOrder)
+  // Select the stable players array and derive from it: a selector returning a
+  // new array on every call makes zustand re-render forever
+  const players = useTeamStore((state) => state.players);
+  const starters = useMemo(
+    () => players.filter((p) => p.isStarter).sort((a, b) => a.positionOrder - b.positionOrder),
+    [players]
   );
   
   // Group starters by position

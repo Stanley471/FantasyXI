@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/context/AuthContext";
 import { api } from "@/lib/api";
-import { Squad, League } from "@/types";
+import { Squad, League, GameweekHistoryEntry } from "@/types";
 import { Button } from "@/components/ui/Button";
 import {
   IconUser,
@@ -23,6 +23,8 @@ export default function ProfilePage() {
 
   const [squad, setSquad] = useState<Squad | null>(null);
   const [leaguesCount, setLeaguesCount] = useState<number>(0);
+  const [gameweekHistory, setGameweekHistory] = useState<GameweekHistoryEntry[]>([]);
+  const [selectedHistoryId, setSelectedHistoryId] = useState<number | null>(null);
   const [isLoadingStats, setIsLoadingStats] = useState<boolean>(true);
 
   // Require auth
@@ -49,6 +51,15 @@ export default function ProfilePage() {
         if (lgRes?.data) {
           setLeaguesCount(lgRes.data.length);
         }
+
+        const historyRes = await api.get<{
+          success: boolean;
+          data: GameweekHistoryEntry[];
+        }>("/api/v1/gameweeks/history/me");
+        if (historyRes?.data) {
+          setGameweekHistory(historyRes.data);
+          setSelectedHistoryId((current) => current ?? historyRes.data[0]?.id ?? null);
+        }
       } catch (err) {
         console.error("Failed to load profile stats:", err);
       } finally {
@@ -66,12 +77,15 @@ export default function ProfilePage() {
     router.push("/login");
   };
 
+  const selectedHistory = gameweekHistory.find((entry) => entry.id === selectedHistoryId);
+
   if (authLoading || (!isAuthenticated && !user)) {
     return (
       <div className="py-24 text-center text-slate-400">
         <div className="inline-block w-8 h-8 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin mb-3" />
         <p className="text-xs">Loading manager telemetry...</p>
       </div>
+
     );
   }
 
@@ -154,6 +168,59 @@ export default function ProfilePage() {
         </div>
       </div>
 
+      {/* Gameweek History */}
+      <section className="bg-pitch-surface border border-pitch-border rounded-xl p-6 shadow-md space-y-5">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-bold uppercase tracking-wider text-slate-200">Gameweek History</h2>
+            <p className="text-xs text-slate-400 mt-1">Review past scores, ranks, and the squad selected for each gameweek.</p>
+          </div>
+          {gameweekHistory.length > 0 && (
+            <label className="flex items-center gap-2 text-xs text-slate-400">
+              <span>Gameweek</span>
+              <select
+                value={selectedHistoryId ?? ""}
+                onChange={(event) => setSelectedHistoryId(Number(event.target.value))}
+                className="rounded-lg border border-pitch-border bg-slate-900 px-3 py-2 text-sm text-white outline-none focus:border-emerald-400"
+              >
+                {gameweekHistory.map((entry) => <option key={entry.id} value={entry.id}>{entry.gameweek.name}</option>)}
+              </select>
+            </label>
+          )}
+        </div>
+        {isLoadingStats ? (
+          <p className="text-sm text-slate-500">Loading gameweek history...</p>
+        ) : !selectedHistory ? (
+          <p className="rounded-lg border border-dashed border-pitch-border p-6 text-center text-sm text-slate-500">No completed gameweek scores yet.</p>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <HistoryStat label="Score" value={`${selectedHistory.points} pts`} />
+              <HistoryStat label="Bench" value={`${selectedHistory.benchPoints} pts`} />
+              <HistoryStat label="Captain" value={`${selectedHistory.captainPoints} pts`} />
+              <HistoryStat label="Transfer cost" value={`${selectedHistory.transferCost} pts`} />
+            </div>
+            <div>
+              <h3 className="mb-2 text-xs font-bold uppercase tracking-wider text-slate-400">Lineup for {selectedHistory.gameweek.name}</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {selectedHistory.squad.players?.map((selection) => (
+                  <div key={selection.id} className="flex items-center justify-between rounded-lg border border-pitch-border bg-slate-950/50 px-3 py-2">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-semibold text-slate-200">{selection.player?.displayName ?? "Unknown player"}</p>
+                      <p className="text-[10px] uppercase tracking-wider text-slate-500">{selection.player?.position ?? "—"} · {selection.isStarter ? "Starter" : "Bench"}</p>
+                    </div>
+                    <div className="flex gap-1 text-[10px] font-bold text-emerald-400">
+                      {selection.isCaptain && <span>C</span>}
+                      {selection.isViceCaptain && <span>VC</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
+      </section>
+
       {/* Account & Security Information */}
       <div className="bg-pitch-surface border border-pitch-border rounded-xl p-6 shadow-md space-y-4">
         <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-300 mb-2">
@@ -209,6 +276,15 @@ export default function ProfilePage() {
           </Button>
         </Link>
       </div>
+    </div>
+  );
+}
+
+function HistoryStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-pitch-border bg-slate-950/50 p-3">
+      <p className="text-[10px] uppercase tracking-wider text-slate-500">{label}</p>
+      <p className="mt-1 font-mono text-lg font-black text-white">{value}</p>
     </div>
   );
 }

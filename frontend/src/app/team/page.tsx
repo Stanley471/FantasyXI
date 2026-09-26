@@ -1,9 +1,11 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { api, ApiError } from "@/lib/api";
+import { isOfflineError, loadSquadSnapshot, saveSquadSnapshot } from "@/lib/offlineStore";
+import { useOnlineStatus } from "@/lib/useOnlineStatus";
 import { Squad, Player, Position, SQUAD_RULES } from "@/types";
 import { Pitch } from "@/components/pitch/Pitch";
 import { Bench } from "@/components/pitch/Bench";
@@ -19,6 +21,7 @@ import {
 } from "@/components/ui/Icons";
 import { Button } from "@/components/ui/Button";
 import { PositionBadge } from "@/components/ui/Badge";
+import { useToast } from "@/context/ToastContext";
 import {
   DndContext,
   MouseSensor,
@@ -36,6 +39,7 @@ import { PlayerCard } from "@/components/pitch/PlayerCard";
 export default function TeamPage() {
   const router = useRouter();
   const { user, isAuthenticated, isLoading: authLoading } = useAuth();
+  const { toast } = useToast();
 
   const { 
     squadId, setSquadId, 
@@ -50,6 +54,11 @@ export default function TeamPage() {
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [saveSuccessMsg, setSaveSuccessMsg] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const isOnline = useOnlineStatus();
+  // When set, the pitch shows the squad saved on this device at that time
+  const [offlineSnapshotAt, setOfflineSnapshotAt] = useState<string | null>(null);
+  const showingSnapshot = useRef(false);
+  const userId = user?.id;
 
   // Load existing squad
   useEffect(() => {
@@ -57,43 +66,75 @@ export default function TeamPage() {
       router.replace("/login?returnTo=/team");
       return;
     }
+    if (!isAuthenticated || !userId) return;
+
+    let cancelled = false;
+
+    const applySquads = (squads: Squad[]) => {
+      if (squads.length === 0) return;
+      const s = squads[0];
+      setSquadId(s.id);
+      setSquadName(s.name);
+
+      if (s.players && s.players.length > 0) {
+        const mapped: LocalSquadPlayer[] = s.players
+          .filter((sp) => sp.player)
+          .map((sp) => ({
+            id: sp.id,
+            playerId: sp.playerId,
+            player: sp.player!,
+            isStarter: sp.isStarter,
+            isCaptain: sp.isCaptain,
+            isViceCaptain: sp.isViceCaptain,
+            positionOrder: sp.positionOrder,
+          }));
+        setPlayers(mapped);
+      }
+    };
 
     async function loadSquad() {
-      if (!isAuthenticated) return;
       setIsLoading(true);
       try {
         const res = await api.get<{ success: boolean; data: Squad[] }>("/api/v1/squads/me");
-        if (res?.data && res.data.length > 0) {
-          const s = res.data[0];
-          setSquadId(s.id);
-          setSquadName(s.name);
-
-          if (s.players && s.players.length > 0) {
-            const mapped: LocalSquadPlayer[] = s.players
-              .filter((sp) => sp.player)
-              .map((sp) => ({
-                id: sp.id,
-                playerId: sp.playerId,
-                player: sp.player!,
-                isStarter: sp.isStarter,
-                isCaptain: sp.isCaptain,
-                isViceCaptain: sp.isViceCaptain,
-                positionOrder: sp.positionOrder,
-              }));
-            setPlayers(mapped);
-          }
+        if (cancelled) return;
+        if (res?.data) {
+          saveSquadSnapshot(userId!, res.data);
+          applySquads(res.data);
         }
+        showingSnapshot.current = false;
+        setOfflineSnapshotAt(null);
       } catch (err) {
-        console.error("Failed to load user squad:", err);
+        if (cancelled) return;
+        const snapshot = isOfflineError(err) ? loadSquadSnapshot(userId!) : null;
+        if (snapshot) {
+          applySquads(snapshot.squads);
+          showingSnapshot.current = true;
+          setOfflineSnapshotAt(snapshot.savedAt);
+        } else if (isOfflineError(err)) {
+          setErrorMessage("You are offline and this device has no saved copy of your squad yet.");
+        } else {
+          console.error("Failed to load user squad:", err);
+        }
       } finally {
-        setIsLoading(false);
+        if (!cancelled) setIsLoading(false);
       }
     }
 
-    if (isAuthenticated) {
-      loadSquad();
-    }
-  }, [isAuthenticated, authLoading, router]);
+    loadSquad();
+
+    // Swap the saved copy for live data as soon as the connection returns
+    const handleOnline = () => {
+      if (showingSnapshot.current) {
+        setErrorMessage(null);
+        loadSquad();
+      }
+    };
+    window.addEventListener("online", handleOnline);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("online", handleOnline);
+    };
+  }, [isAuthenticated, authLoading, router, userId, setSquadId, setSquadName, setPlayers]);
 
   // Derived state
   const starters = players
@@ -173,9 +214,12 @@ export default function TeamPage() {
         data: { players: Player[] } | Player[];
       }>("/api/v1/players?limit=100&sortBy=totalPoints&sortOrder=desc");
 
-      const pool: Player[] = Array.isArray(res?.data)
-        ? res.data
-        : (res?.data as any)?.players || [];
+      const data = res?.data;
+      const pool: Player[] = Array.isArray(data)
+        ? data
+        : data && typeof data === "object" && "players" in data && Array.isArray((data as { players: Player[] }).players)
+          ? (data as { players: Player[] }).players
+          : [];
 
       if (pool.length < 15) {
         setErrorMessage("Not enough players in database to auto-draft a squad.");
@@ -294,10 +338,13 @@ export default function TeamPage() {
 
         setPlayers(newPlayers);
         setSelectedPlayerId(null);
+        toast.info("Auto-drafted a balanced squad! Review tactics before saving.");
       }
     } catch (err) {
       console.error("Auto-pick error:", err);
-      setErrorMessage("Failed to auto-generate squad. Please try picking manually.");
+      const msg = "Failed to auto-generate squad. Please try picking manually.";
+      setErrorMessage(msg);
+      toast.error(msg);
     } finally {
       setIsLoading(false);
     }
@@ -350,6 +397,10 @@ export default function TeamPage() {
   // Save changes to backend
   const handleSaveSquad = async () => {
     if (!canSave) return;
+    if (!isOnline) {
+      setErrorMessage("You are offline. Reconnect to save your squad or make transfers.");
+      return;
+    }
     setIsSaving(true);
     setErrorMessage(null);
     setSaveSuccessMsg(null);
@@ -369,7 +420,9 @@ export default function TeamPage() {
       if (squadId) {
         // Update existing squad
         await api.put(`/api/v1/squads/${squadId}`, payload);
-        setSaveSuccessMsg("Squad lineup and tactics updated successfully!");
+        const msg = "Squad lineup and tactics updated successfully!";
+        setSaveSuccessMsg(msg);
+        toast.success(msg);
       } else {
         // Create new squad
         const createPayload = {
@@ -383,16 +436,19 @@ export default function TeamPage() {
         if (res?.data?.id) {
           setSquadId(res.data.id);
         }
-        setSaveSuccessMsg("Squad created and registered in FantasyXI!");
+        const msg = "Squad created and registered in FantasyXI!";
+        setSaveSuccessMsg(msg);
+        toast.success(msg);
       }
     } catch (err: unknown) {
-      if (err instanceof ApiError) {
-        setErrorMessage(err.message || "Failed to save squad.");
-      } else if (err instanceof Error) {
-        setErrorMessage(err.message);
-      } else {
-        setErrorMessage("An unexpected error occurred while saving squad.");
-      }
+      const msg =
+        err instanceof ApiError
+          ? err.message || "Failed to save squad."
+          : err instanceof Error
+            ? err.message
+            : "An unexpected error occurred while saving squad.";
+      setErrorMessage(msg);
+      toast.error(msg);
     } finally {
       setIsSaving(false);
     }
@@ -437,10 +493,26 @@ export default function TeamPage() {
           <div className="flex items-center gap-2 text-xs font-mono">
             <span className="text-slate-400 uppercase tracking-wider text-[11px]">Formation</span>
             <span className="text-emerald-400 font-bold text-sm">
-              {detectFormation(starters as any)}
+              {detectFormation(starters)}
             </span>
           </div>
         </div>
+
+        {/* Offline mode: read-only view of the squad saved on this device */}
+        {(offlineSnapshotAt || !isOnline) && (
+          <div
+            role="status"
+            className="p-3.5 rounded-lg bg-amber-950/40 border border-amber-500/40 flex items-center gap-3 text-amber-200 text-xs"
+          >
+            <IconAlertCircle className="w-4 h-4 text-amber-400 flex-shrink-0" />
+            <span className="font-semibold">
+              {offlineSnapshotAt
+                ? `Offline mode: showing your squad as saved on this device ${new Date(offlineSnapshotAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}.`
+                : "You are offline."}{" "}
+              Saving and transfers need a connection.
+            </span>
+          </div>
+        )}
 
         {/* Notifications */}
         {saveSuccessMsg && (
@@ -466,7 +538,7 @@ export default function TeamPage() {
           }}
           isSaving={isSaving}
           onSave={handleSaveSquad}
-          canSave={canSave}
+          canSave={canSave && isOnline}
         />
 
         {/* Validation Errors Pill if invalid */}

@@ -1,24 +1,15 @@
 /**
- * Frontend Soroban Escrow Deposit Helper
+ * Frontend Soroban Escrow Deposit Helper (Issue #85)
  *
- * Implements the canonical client-side Soroban deposit workflow:
- * 1. Freighter wallet detection & connection
+ * Implements the canonical client-side Soroban deposit workflow for Freighter wallets:
+ * 1. Freighter wallet adapter connection & signing (`WalletContext.tsx`)
  * 2. Building the Soroban invocation transaction: `deposit(participant, league_id)`
- * 3. Simulating/preparing the transaction via Soroban RPC
- * 4. Requesting user signature via Freighter (`signTransaction`)
- * 5. Submitting the signed transaction to Stellar Testnet
- * 6. Polling for on-chain confirmation and returning the transaction hash
+ * 3. Simulating/preparing transaction footprints via Soroban RPC
+ * 4. Requesting user signature via Freighter browser extension (`signTransaction`)
+ * 5. Submitting the signed XDR transaction to Stellar Testnet
+ * 6. Polling for on-chain ledger confirmation and returning the transaction hash
  */
 
-import {
-  isConnected,
-  isAllowed,
-  setAllowed,
-  requestAccess,
-  getAddress,
-  getNetworkDetails,
-  signTransaction,
-} from "@stellar/freighter-api";
 import {
   Address,
   Contract,
@@ -32,10 +23,24 @@ export interface DepositParams {
   escrowContractId: string;
   leagueId: number | string;
   userPublicKey: string;
+  signTransaction: WalletTransactionSigner;
   rpcUrl?: string;
   networkPassphrase?: string;
   onProgress?: (status: string) => void;
 }
+
+export interface WalletAdapter {
+  id: string;
+  connect(): Promise<void>;
+  disconnect(): Promise<void>;
+  getPublicKey(): Promise<string>;
+  signTransaction: WalletTransactionSigner;
+}
+
+export type WalletTransactionSigner = (
+  xdr: string,
+  options: { networkPassphrase: string; address: string }
+) => Promise<{ signedTxXdr: string }>;
 
 export interface DepositResult {
   txHash: string;
@@ -49,63 +54,7 @@ const DEFAULT_NETWORK_PASSPHRASE =
   process.env.NEXT_PUBLIC_STELLAR_NETWORK_PASSPHRASE || Networks.TESTNET;
 
 /**
- * Checks if the Freighter browser extension is installed and available.
- */
-export async function isFreighterInstalled(): Promise<boolean> {
-  try {
-    const res = await isConnected();
-    return Boolean(res && res.isConnected);
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Connects to Freighter, requests permission if necessary, and returns the active public key.
- */
-export async function connectFreighter(): Promise<{
-  publicKey: string;
-  network: string;
-}> {
-  const installed = await isFreighterInstalled();
-  if (!installed) {
-    throw new Error(
-      "Freighter wallet extension was not detected. Please install Freighter from https://www.freighter.app"
-    );
-  }
-
-  const allowedRes = await isAllowed();
-  if (!allowedRes || !allowedRes.isAllowed) {
-    await setAllowed();
-  }
-
-  let publicKey = "";
-  const accessRes = await requestAccess();
-  if (accessRes && accessRes.address) {
-    publicKey = accessRes.address;
-  } else {
-    const addrRes = await getAddress();
-    if (addrRes && addrRes.address) {
-      publicKey = addrRes.address;
-    } else {
-      throw new Error(
-        accessRes?.error?.message ||
-          addrRes?.error?.message ||
-          "Could not retrieve public key from Freighter. Please unlock your wallet and try again."
-      );
-    }
-  }
-
-  const networkDetails = await getNetworkDetails();
-
-  return {
-    publicKey,
-    network: networkDetails?.network || "TESTNET",
-  };
-}
-
-/**
- * Builds, prepares, signs via Freighter, submits, and confirms a Soroban escrow deposit transaction.
+ * Builds, prepares, signs through the selected wallet, submits, and confirms a Soroban escrow deposit transaction.
  */
 export async function depositToSorobanEscrow(
   params: DepositParams
@@ -117,6 +66,7 @@ export async function depositToSorobanEscrow(
     rpcUrl = DEFAULT_SOROBAN_RPC,
     networkPassphrase = DEFAULT_NETWORK_PASSPHRASE,
     onProgress,
+    signTransaction: signWithWallet,
   } = params;
 
   if (!escrowContractId) {
@@ -134,7 +84,7 @@ export async function depositToSorobanEscrow(
   let account;
   try {
     account = await server.getAccount(userPublicKey);
-  } catch (err: any) {
+  } catch {
     throw new Error(
       `Failed to load account ${userPublicKey}. Ensure your Testnet account is funded with XLM for gas fees.`
     );
@@ -179,8 +129,8 @@ export async function depositToSorobanEscrow(
   let preparedTx;
   try {
     preparedTx = await server.prepareTransaction(tx);
-  } catch (simErr: any) {
-    const errMsg = simErr?.message || String(simErr);
+  } catch (simErr: unknown) {
+    const errMsg = simErr instanceof Error ? simErr.message : String(simErr);
     if (errMsg.includes("HostError") || errMsg.includes("Error(Contract")) {
       throw new Error(
         `Contract simulation rejected deposit. Ensure you have sufficient USDC balance and trustline. Details: ${errMsg}`
@@ -189,30 +139,24 @@ export async function depositToSorobanEscrow(
     throw new Error(`Transaction simulation failed: ${errMsg}`);
   }
 
-  // 5. Request Freighter signature
-  onProgress?.("Awaiting signature in Freighter...");
+  // 5. Request the selected wallet signature
+  onProgress?.("Awaiting signature in your wallet...");
   let signedXdr: string;
   try {
-    const signResult = await signTransaction(preparedTx.toXDR(), {
+    const signResult = await signWithWallet(preparedTx.toXDR(), {
       networkPassphrase,
       address: userPublicKey,
     });
-
-    if (signResult?.error) {
-      throw new Error(
-        signResult.error.message || String(signResult.error)
-      );
-    }
-
     signedXdr = signResult.signedTxXdr;
-  } catch (signErr: any) {
+  } catch (signErr: unknown) {
+    const message = signErr instanceof Error ? signErr.message : String(signErr);
     throw new Error(
-      signErr?.message || "Signature request was rejected in Freighter."
+      message || "Signature request was rejected in the selected wallet."
     );
   }
 
   if (!signedXdr) {
-    throw new Error("Freighter did not return a signed transaction.");
+    throw new Error("The selected wallet did not return a signed transaction.");
   }
 
   // 6. Submit transaction to Stellar network
@@ -249,8 +193,9 @@ export async function depositToSorobanEscrow(
         );
       }
       // status is NOT_FOUND (pending) - keep polling
-    } catch (pollErr: any) {
-      if (pollErr?.message?.includes("reverted") || pollErr?.message?.includes("failed on ledger")) {
+    } catch (pollErr: unknown) {
+      const pollMessage = pollErr instanceof Error ? pollErr.message : String(pollErr);
+      if (pollMessage.includes("reverted") || pollMessage.includes("failed on ledger")) {
         throw pollErr;
       }
       // Network hiccup during poll - continue

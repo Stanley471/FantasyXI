@@ -1,11 +1,13 @@
 import { Request, Response, NextFunction } from "express";
 import {
   leagueService,
+  LeagueService,
   LeagueValidationError,
   LeagueNotFoundError,
   LeagueForbiddenError,
+  LeagueInvitationError,
+  INVITATION_DEFAULT_TTL_HOURS,
 } from "../services/league/leagueService.js";
-import { LeagueStatus } from "../types/index.js";
 import { liveService } from "../services/live/liveService.js";
 
 /**
@@ -53,24 +55,56 @@ export async function createLeague(
   }
 }
 
+/**
+ * Maps league domain errors to HTTP responses; returns false for unknown errors.
+ */
+function sendLeagueError(error: unknown, res: Response): boolean {
+  if (error instanceof LeagueNotFoundError) {
+    res.status(404).json({ success: false, message: error.message });
+    return true;
+  }
+  if (error instanceof LeagueForbiddenError) {
+    res.status(403).json({ success: false, message: error.message });
+    return true;
+  }
+  if (error instanceof LeagueInvitationError) {
+    // 410 Gone: the link is unusable (unknown, expired, revoked or already used)
+    res.status(410).json({ success: false, message: error.message });
+    return true;
+  }
+  if (error instanceof LeagueValidationError) {
+    res.status(400).json({ success: false, message: error.message });
+    return true;
+  }
+  return false;
+}
+
+/**
+ * GET /api/v1/leagues
+ * Query: q, status, scoringType, creatorId, minEntryFee, maxEntryFee, minSize,
+ * maxSize, hasOpenSlots, sortBy, sortOrder, page, pageSize
+ */
 export async function getLeagues(
   req: Request,
   res: Response,
   next: NextFunction
 ): Promise<void> {
   try {
-    const { status, creatorId } = req.query;
-
-    const leagues = await leagueService.getLeagues({
-      status: status ? (status as LeagueStatus) : undefined,
-      creatorId: creatorId ? (creatorId as string) : undefined,
-    });
+    const filters = LeagueService.parseSearchFilters(req.query as Record<string, unknown>);
+    const result = await leagueService.getLeagues(filters, req.user?.id);
 
     res.json({
       success: true,
-      data: leagues,
+      data: result.items,
+      meta: {
+        total: result.total,
+        page: result.page,
+        pageSize: result.pageSize,
+        totalPages: Math.ceil(result.total / result.pageSize),
+      },
     });
   } catch (error) {
+    if (sendLeagueError(error, res)) return;
     next(error);
   }
 }
@@ -82,7 +116,7 @@ export async function getLeagueById(
 ): Promise<void> {
   try {
     const { id } = req.params;
-    const league = await leagueService.getLeagueById(id as string);
+    const league = await leagueService.getLeagueById(id as string, req.user?.id);
 
     res.json({
       success: true,
@@ -134,6 +168,10 @@ export async function joinLeague(
       data: member,
     });
   } catch (error) {
+    if (error instanceof LeagueForbiddenError || error instanceof LeagueInvitationError) {
+      sendLeagueError(error, res);
+      return;
+    }
     if (error instanceof LeagueNotFoundError) {
       res.status(404).json({
         success: false,
@@ -280,6 +318,149 @@ export async function cancelLeague(
       });
       return;
     }
+    next(error);
+  }
+}
+
+// ============================================================
+// Private league invitations
+// ============================================================
+
+/**
+ * POST /api/v1/leagues/:id/invitations (creator only)
+ * Body: { expiresInHours?: number }
+ * Returns the raw token once; the client builds the shareable link from it.
+ */
+export async function createLeagueInvitation(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user?.id) {
+      res.status(401).json({ success: false, message: "Authentication required" });
+      return;
+    }
+
+    const raw = req.body?.expiresInHours;
+    const expiresInHours = raw === undefined ? INVITATION_DEFAULT_TTL_HOURS : Number(raw);
+
+    const invitation = await leagueService.createInvitation(
+      req.params.id as string,
+      req.user.id,
+      expiresInHours
+    );
+
+    res.status(201).json({
+      success: true,
+      message: "Invitation created. The link can be used once and cannot be retrieved again.",
+      data: invitation,
+    });
+  } catch (error) {
+    if (sendLeagueError(error, res)) return;
+    next(error);
+  }
+}
+
+/**
+ * GET /api/v1/leagues/:id/invitations (creator only)
+ */
+export async function listLeagueInvitations(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user?.id) {
+      res.status(401).json({ success: false, message: "Authentication required" });
+      return;
+    }
+
+    const invitations = await leagueService.listInvitations(req.params.id as string, req.user.id);
+    res.json({ success: true, data: invitations });
+  } catch (error) {
+    if (sendLeagueError(error, res)) return;
+    next(error);
+  }
+}
+
+/**
+ * DELETE /api/v1/leagues/:id/invitations/:invitationId (creator only)
+ */
+export async function revokeLeagueInvitation(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user?.id) {
+      res.status(401).json({ success: false, message: "Authentication required" });
+      return;
+    }
+
+    await leagueService.revokeInvitation(
+      req.params.id as string,
+      req.params.invitationId as string,
+      req.user.id
+    );
+    res.json({ success: true, message: "Invitation revoked" });
+  } catch (error) {
+    if (sendLeagueError(error, res)) return;
+    next(error);
+  }
+}
+
+/**
+ * GET /api/v1/leagues/invitations/:token (public preview)
+ */
+export async function previewLeagueInvitation(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const preview = await leagueService.previewInvitation(req.params.token as string);
+    res.json({ success: true, data: preview });
+  } catch (error) {
+    if (sendLeagueError(error, res)) return;
+    next(error);
+  }
+}
+
+/**
+ * POST /api/v1/leagues/invitations/:token/accept
+ * Body: { squadId: string }
+ */
+export async function acceptLeagueInvitation(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user?.id) {
+      res.status(401).json({ success: false, message: "Authentication required to join a league" });
+      return;
+    }
+
+    const { squadId } = req.body ?? {};
+    if (!squadId || typeof squadId !== "string") {
+      res.status(400).json({ success: false, message: "squadId is required to join a league" });
+      return;
+    }
+
+    const member = await leagueService.acceptInvitation(
+      req.params.token as string,
+      req.user.id,
+      squadId
+    );
+
+    res.status(201).json({
+      success: true,
+      message: "Joined league successfully",
+      data: member,
+    });
+  } catch (error) {
+    if (sendLeagueError(error, res)) return;
     next(error);
   }
 }
