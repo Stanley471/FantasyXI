@@ -8,6 +8,7 @@ import { ApolloServer } from "@apollo/server";
 import { expressMiddleware } from "@as-integrations/express5";
 import DataLoader from "dataloader";
 import { prisma, getReadReplicaStatus } from "./config/db.js";
+import { closeRedisClient } from "./config/redis.js";
 import { preferReplicaReads } from "./middleware/readConsistency.js";
 import { financialAuditLog } from "./services/audit/financialAuditLog.js";
 import { resolvers } from "./graphql/resolvers.js";
@@ -176,5 +177,6 @@ process.on("SIGTERM", () => {
   // Persist buffered financial audit entries before exiting
   stopJobQueue()
     .finally(() => financialAuditLog.close())
+    .finally(() => closeRedisClient())
     .finally(() => process.exit(0));
 });
