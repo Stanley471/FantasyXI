@@ -8,6 +8,7 @@ import { api, ApiError } from "@/lib/api";
 import { League, Squad, LeagueStatus, LeagueSearchMeta, LeagueSortField } from "@/types";
 import { Badge, LeagueStatusBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { EmptyState } from "@/components/ui/EmptyState";
 import {
   IconTrophy,
   IconPlus,
@@ -46,6 +47,14 @@ const SORT_OPTIONS: Array<{ value: LeagueSortField; label: string }> = [
   { value: "prizePool", label: "Prize pool" },
   { value: "size", label: "League size" },
   { value: "members", label: "Members joined" },
+];
+
+const STATUS_OPTIONS: Array<{ value: LeagueStatus | ""; label: string }> = [
+  { value: "", label: "All Statuses" },
+  { value: LeagueStatus.UPCOMING, label: "Open / Upcoming" },
+  { value: LeagueStatus.ACTIVE, label: "In Progress" },
+  { value: LeagueStatus.COMPLETED, label: "Completed" },
+  { value: LeagueStatus.CANCELLED, label: "Cancelled" },
 ];
 
 /**
@@ -306,9 +315,9 @@ export default function LeaguesPage() {
           )}
         </div>
 
-        {/* Search */}
-        <div className="flex items-center gap-2 w-full sm:w-auto">
-          <div className="relative w-full sm:w-64">
+        {/* Search & Quick Status Filter */}
+        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+          <div className="relative flex-1 sm:w-64">
             <IconSearch className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
             <input
               type="text"
@@ -320,6 +329,20 @@ export default function LeaguesPage() {
               className="w-full pl-9 pr-3 py-1.5 bg-pitch-surface border border-pitch-border rounded-lg text-slate-200 placeholder-slate-500 text-xs focus:outline-none focus:border-emerald-500"
             />
           </div>
+
+          <select
+            value={filters.status}
+            onChange={(e) => updateFilter("status", e.target.value as LeagueStatus | "")}
+            aria-label="Filter leagues by status"
+            className="px-2.5 py-1.5 bg-pitch-surface border border-pitch-border rounded-lg text-slate-200 text-xs focus:outline-none focus:border-emerald-500"
+          >
+            {STATUS_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+
           <Button
             type="button"
             variant="secondary"
@@ -384,11 +407,11 @@ export default function LeaguesPage() {
               value={filters.status}
               onChange={(e) => updateFilter("status", e.target.value as LeagueStatus | "")}
               className={inputClass}
+              aria-label="Filter leagues by status"
             >
-              <option value="">Any</option>
-              {Object.values(LeagueStatus).map((status) => (
-                <option key={status} value={status}>
-                  {status}
+              {STATUS_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
                 </option>
               ))}
             </select>
@@ -520,22 +543,25 @@ export default function LeaguesPage() {
           ))}
         </div>
       ) : (
-        <div className="py-20 text-center bg-pitch-surface border border-dashed border-pitch-border rounded-xl p-8">
-          <div className="w-12 h-12 rounded-2xl bg-amber-500/10 text-amber-400 flex items-center justify-center mx-auto mb-3">
-            <IconTrophy className="w-6 h-6" />
-          </div>
-          <h3 className="text-base font-bold text-white mb-1">No Leagues Found</h3>
-          <p className="text-xs text-slate-400 max-w-sm mx-auto mb-5">
-            {activeTab === "my"
+        <EmptyState
+          icon={<IconTrophy className="w-6 h-6 text-amber-400" />}
+          title="No Leagues Found"
+          description={
+            debouncedSearch || filters.status
+              ? `No leagues match your search query or status filter criteria.`
+              : activeTab === "my"
               ? "You haven't created any leagues yet. Explore public leagues or create your own!"
-              : "No public leagues match your search and filters. Create the first league now!"}
-          </p>
-          <Link href="/leagues/create">
-            <Button variant="primary" size="md" className="uppercase font-bold tracking-wide text-xs">
-              Create New League
-            </Button>
-          </Link>
-        </div>
+              : "No public leagues match your search and filters. Create the first league now!"
+          }
+          action={
+            <Link href="/leagues/create">
+              <Button variant="primary" size="md" className="uppercase font-bold tracking-wide text-xs">
+                Create New League
+              </Button>
+            </Link>
+          }
+          className="py-16 bg-pitch-surface border-pitch-border"
+        />
       )}
 
       {/* Pagination */}
