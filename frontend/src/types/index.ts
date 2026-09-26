@@ -270,6 +270,33 @@ export interface LeagueStandingsEntry {
 }
 
 // ============================================================
+// League Chat (REST history + WebSocket /api/v1/leagues/:id/chat/ws)
+// ============================================================
+
+export interface ChatMessage {
+  id: string;
+  leagueId: string;
+  userId: string;
+  username: string;
+  body: string;
+  createdAt: string;
+}
+
+/** A message in the UI, including the sender's own messages that are still in flight */
+export interface ChatEntry extends ChatMessage {
+  /** Correlates an optimistic message with the server's acknowledgement */
+  clientId?: string;
+  status?: "sending" | "failed";
+  error?: string;
+  /** Transport used for the latest send attempt */
+  via?: "socket" | "http";
+  /** The socket dropped before an ack arrived, so the server may still have saved it */
+  lostInFlight?: boolean;
+}
+
+export type ChatConnectionState = "connecting" | "open" | "reconnecting" | "unavailable";
+
+// ============================================================
 // Live Matchday Feed (GET /api/v1/leagues/:id/live, Server-Sent Events)
 // ============================================================
 
