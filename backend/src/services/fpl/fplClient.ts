@@ -1,33 +1,89 @@
 /**
- * External FPL API Client.
+ * External FPL API Client with Redis & In-Memory Caching Layer.
  *
  * Provides typed methods to query the official Fantasy Premier League endpoints:
  * - /bootstrap-static/ (teams, players, gameweeks)
  * - /fixtures/ (match fixtures)
  * - /event/{gw}/live/ (live player stats per gameweek)
  *
- * Implements a simple in-memory cache to prevent hammering the upstream FPL API.
- *
- * Laravel equivalent: Like a dedicated ThirdParty/FplService using Http::timeout()->withHeaders().
+ * Implements a Redis caching layer (with in-memory fallback) to prevent hammering
+ * the upstream FPL API, mitigate rate-limiting, and ensure sub-second response times.
  */
 
+import { getRedisClient, IRedisCacheClient } from "../../config/redis.js";
+
 const FPL_BASE_URL = "https://fantasy.premierleague.com/api";
+
+/**
+ * Sensible default cache TTLs (between 5 and 15 minutes) for FPL endpoints.
+ */
+export const FPL_CACHE_TTL = {
+  DEFAULT_SECONDS: 600, // 10 minutes
+  BOOTSTRAP_STATIC_SECONDS: 900, // 15 minutes (teams, players baseline rarely change midday)
+  FIXTURES_SECONDS: 600, // 10 minutes
+  GAMEWEEK_LIVE_SECONDS: 300, // 5 minutes
+};
 
 interface CacheEntry<T> {
   data: T;
   expiresAt: number;
 }
 
+export interface FplClientOptions {
+  baseUrl?: string;
+  redis?: IRedisCacheClient | null;
+  keyPrefix?: string;
+  defaultTtlSeconds?: number;
+}
+
 export class FplClient {
   private cache = new Map<string, CacheEntry<unknown>>();
   private baseUrl: string;
-  
+  private redis: IRedisCacheClient | null = null;
+  private keyPrefix: string;
+  private defaultTtlSeconds: number;
+
   // Circuit breaker state
   private consecutiveFailures = 0;
   private circuitOpenUntil = 0;
 
-  constructor(baseUrl: string = FPL_BASE_URL) {
-    this.baseUrl = baseUrl;
+  constructor(
+    baseUrlOrOptions?: string | FplClientOptions,
+    redisClient?: IRedisCacheClient | null
+  ) {
+    if (typeof baseUrlOrOptions === "object" && baseUrlOrOptions !== null) {
+      this.baseUrl = baseUrlOrOptions.baseUrl || FPL_BASE_URL;
+      this.redis =
+        baseUrlOrOptions.redis !== undefined
+          ? baseUrlOrOptions.redis
+          : getRedisClient();
+      this.keyPrefix = baseUrlOrOptions.keyPrefix || "fpl:cache:";
+      this.defaultTtlSeconds =
+        baseUrlOrOptions.defaultTtlSeconds || FPL_CACHE_TTL.DEFAULT_SECONDS;
+    } else {
+      this.baseUrl = baseUrlOrOptions || FPL_BASE_URL;
+      this.redis = redisClient !== undefined ? redisClient : getRedisClient();
+      this.keyPrefix = "fpl:cache:";
+      this.defaultTtlSeconds = FPL_CACHE_TTL.DEFAULT_SECONDS;
+    }
+  }
+
+  /**
+   * Allows injecting or replacing the Redis cache client (e.g. for testing).
+   */
+  public setRedisClient(client: IRedisCacheClient | null): void {
+    this.redis = client;
+  }
+
+  /**
+   * Returns current Redis cache client or null.
+   */
+  public getRedisClient(): IRedisCacheClient | null {
+    return this.redis;
+  }
+
+  private getCacheKey(endpoint: string): string {
+    return `${this.keyPrefix}${endpoint}`;
   }
 
   private async fetchWithRetry(url: string, retries = 3, backoffMs = 1000): Promise<Response> {
@@ -77,16 +133,45 @@ export class FplClient {
   }
 
   /**
-   * Generic fetch wrapper with in-memory caching and standard User-Agent header.
+   * Generic fetch wrapper with Redis caching, in-memory fallback, and standard User-Agent header.
+   * TTL is in seconds (or auto-converted if milliseconds are passed).
    */
-  private async get<T>(endpoint: string, ttlMs: number = 300_000): Promise<T> {
-    const cacheKey = endpoint;
-    const cached = this.cache.get(cacheKey);
+  public async get<T>(endpoint: string, ttlSeconds: number = this.defaultTtlSeconds): Promise<T> {
+    const effectiveTtlSeconds =
+      ttlSeconds > 10_000 ? Math.round(ttlSeconds / 1000) : ttlSeconds;
+    const cacheKey = this.getCacheKey(endpoint);
 
-    if (cached && Date.now() < cached.expiresAt) {
-      return cached.data as T;
+    // 1. Try Redis cache first
+    if (this.redis) {
+      try {
+        const cachedRaw = await this.redis.get(cacheKey);
+        if (cachedRaw) {
+          console.log(`[FplClient] Cache HIT (Redis) for ${cacheKey}`);
+          const parsed = JSON.parse(cachedRaw) as T;
+          // Synchronize local memory cache
+          this.cache.set(cacheKey, {
+            data: parsed,
+            expiresAt: Date.now() + effectiveTtlSeconds * 1000,
+          });
+          return parsed;
+        }
+      } catch (err) {
+        console.warn(
+          `[FplClient] Redis GET error for ${cacheKey}, falling back:`,
+          (err as Error).message
+        );
+      }
     }
 
+    // 2. Try in-memory fallback cache
+    const memoryCached = this.cache.get(cacheKey);
+    if (memoryCached && Date.now() < memoryCached.expiresAt) {
+      console.log(`[FplClient] Cache HIT (Memory) for ${cacheKey}`);
+      return memoryCached.data as T;
+    }
+
+    // 3. Cache MISS: Fetch from upstream official FPL API
+    console.log(`[FplClient] Cache MISS for ${cacheKey}. Fetching upstream from ${this.baseUrl}...`);
     const url = `${this.baseUrl}${endpoint}`;
     const response = await this.fetchWithRetry(url);
 
@@ -97,19 +182,61 @@ export class FplClient {
     }
 
     const data = (await response.json()) as T;
+
+    // 4. Populate Redis cache
+    if (this.redis) {
+      try {
+        await this.redis.set(cacheKey, JSON.stringify(data), "EX", effectiveTtlSeconds);
+        console.log(
+          `[FplClient] Cache SET (Redis) for ${cacheKey} (TTL: ${effectiveTtlSeconds}s)`
+        );
+      } catch (err) {
+        console.warn(
+          `[FplClient] Redis SET error for ${cacheKey}:`,
+          (err as Error).message
+        );
+      }
+    }
+
+    // 5. Populate in-memory fallback cache
     this.cache.set(cacheKey, {
       data,
-      expiresAt: Date.now() + ttlMs,
+      expiresAt: Date.now() + effectiveTtlSeconds * 1000,
     });
 
     return data;
   }
 
   /**
-   * Clear the in-memory cache manually (e.g. before an explicit force-sync).
+   * Clear cache manually (e.g. before an explicit force-sync).
+   * Clears both in-memory cache and Redis keys.
    */
-  public clearCache(): void {
-    this.cache.clear();
+  public async clearCache(endpoint?: string): Promise<void> {
+    if (endpoint) {
+      const cacheKey = this.getCacheKey(endpoint);
+      this.cache.delete(cacheKey);
+      if (this.redis) {
+        try {
+          await this.redis.del(cacheKey);
+          console.log(`[FplClient] Cache DEL (Redis) for ${cacheKey}`);
+        } catch (err) {
+          console.warn(`[FplClient] Redis DEL error for ${cacheKey}:`, (err as Error).message);
+        }
+      }
+    } else {
+      this.cache.clear();
+      if (this.redis) {
+        try {
+          const keys = await this.redis.keys(`${this.keyPrefix}*`);
+          if (keys.length > 0) {
+            await this.redis.del(...keys);
+            console.log(`[FplClient] Cache DEL (Redis) cleared ${keys.length} keys`);
+          }
+        } catch (err) {
+          console.warn(`[FplClient] Redis DEL pattern error:`, (err as Error).message);
+        }
+      }
+    }
   }
 
   /**
@@ -117,6 +244,7 @@ export class FplClient {
    * - events (all 38 gameweeks with deadlines)
    * - teams (all 20 Premier League clubs)
    * - elements (all ~600 players with current prices, totals, form)
+   * Cached for 15 minutes.
    */
   public async getBootstrapStatic(): Promise<{
     events: Array<{
@@ -159,11 +287,12 @@ export class FplClient {
       photo?: string;
     }>;
   }> {
-    return this.get("/bootstrap-static/", 180_000); // 3-minute cache
+    return this.get("/bootstrap-static/", FPL_CACHE_TTL.BOOTSTRAP_STATIC_SECONDS);
   }
 
   /**
    * Fetches fixtures for the entire season or filtered by gameweek event ID.
+   * Cached for 10 minutes.
    */
   public async getFixtures(eventId?: number): Promise<
     Array<{
@@ -180,12 +309,13 @@ export class FplClient {
     }>
   > {
     const endpoint = eventId !== undefined ? `/fixtures/?event=${eventId}` : "/fixtures/";
-    return this.get(endpoint, 120_000); // 2-minute cache
+    return this.get(endpoint, FPL_CACHE_TTL.FIXTURES_SECONDS);
   }
 
   /**
    * Fetches live match stats for a specific gameweek.
    * Contains detailed stats for every player (minutes, goals, clean sheets, bonus, total points).
+   * Cached for 5 minutes.
    */
   public async getGameweekLive(gameweekId: number): Promise<{
     elements: Array<{
@@ -207,7 +337,7 @@ export class FplClient {
       };
     }>;
   }> {
-    return this.get(`/event/${gameweekId}/live/`, 60_000); // 1-minute cache
+    return this.get(`/event/${gameweekId}/live/`, FPL_CACHE_TTL.GAMEWEEK_LIVE_SECONDS);
   }
 }
 
