@@ -7,6 +7,7 @@ import { IconFootball, IconSwap } from "@/components/ui/Icons";
 import { useDraggable, useDroppable } from "@dnd-kit/core";
 
 import { useTeamStore } from "@/store/teamStore";
+import { PlayerCardSkeleton } from "@/components/team/PlayerCardSkeleton";
 
 export interface PlayerCardProps {
   player?: Player | null;
@@ -17,6 +18,7 @@ export interface PlayerCardProps {
   benchIndex?: number; // 0 for sub keeper, 1, 2, 3 for outfield
   isSwapCandidate?: boolean;
   isOverlay?: boolean;
+  isLoading?: boolean;
   onQuickAction?: (action: "captain" | "vice" | "swap" | "transfer") => void;
 }
 
@@ -29,6 +31,7 @@ export const PlayerCard: React.FC<PlayerCardProps> = ({
   benchIndex,
   isSwapCandidate = false,
   isOverlay = false,
+  isLoading = false,
 }) => {
   const isSelectedForSwap = useTeamStore(
     (state) => state.selectedPlayerId !== null && player?.id === state.selectedPlayerId
@@ -57,6 +60,10 @@ export const PlayerCard: React.FC<PlayerCardProps> = ({
     setDraggableRef(node);
     setDroppableRef(node);
   };
+
+  if (isLoading) {
+    return <PlayerCardSkeleton positionSlot={positionSlot} isStarter={isStarter} benchIndex={benchIndex} />;
+  }
 
   // Empty slot (when building or drafting)
   if (!player) {

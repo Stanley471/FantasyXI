@@ -413,13 +413,39 @@ export default function TeamPage() {
 
   if (isLoading) {
     return (
-      <div className="py-24 text-center text-slate-400">
-        <div className="inline-block w-10 h-10 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin mb-4" />
-        <h2 className="text-base font-bold text-white uppercase tracking-tight">
-          Loading Dugout & Tactical Pitch...
-        </h2>
-        <p className="text-xs text-slate-500 mt-1">Retrieving squad lineup and FPL player telemetry</p>
-      </div>
+      <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
+        <div className="space-y-6 pb-12">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-pitch-surface border border-pitch-border p-5 rounded-xl shadow-md">
+            <div>
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">
+                  Tactical Pitch
+                </span>
+                <span className="text-xs font-mono text-slate-500">&bull; Gameweek Lineup</span>
+              </div>
+              <div className="h-8 w-40 rounded-md bg-slate-800/90 animate-pulse border border-slate-700" />
+            </div>
+            <div className="flex items-center gap-2 text-xs font-mono">
+              <span className="text-slate-400 uppercase tracking-wider text-[11px]">Formation</span>
+              <span className="h-5 w-14 rounded-md bg-slate-800 border border-slate-700 animate-pulse" />
+            </div>
+          </div>
+
+          <BudgetBar
+            onAutoPick={handleAutoPick}
+            onReset={() => {
+              setPlayers([]);
+              setSelectedPlayerId(null);
+            }}
+            isSaving={isSaving}
+            onSave={handleSaveSquad}
+            canSave={canSave}
+          />
+
+          <Pitch isLoading />
+          <Bench isLoading />
+        </div>
+      </DndContext>
     );
   }
 
