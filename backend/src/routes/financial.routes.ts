@@ -3,6 +3,7 @@ import {
   getPaymentRequirement,
   submitPayment,
   verifyPayment,
+  reconcileDeposit,
   getSettlementPlan,
   reconcileLeague,
   getAffiliateDashboard,
@@ -18,6 +19,9 @@ router.use(requireAuth);
 router.get("/requirement", getPaymentRequirement);
 router.post("/submit", submitPayment);
 router.post("/verify", verifyPayment);
+// Self-service recovery: checks the escrow contract directly for the caller's own
+// deposit when the wallet's success callback never reached submit/verify above.
+router.post("/reconcile-deposit", reconcileDeposit);
 router.get("/settlement-plan", getSettlementPlan);
 router.get("/affiliate-dashboard", getAffiliateDashboard);
 

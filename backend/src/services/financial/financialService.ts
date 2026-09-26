@@ -478,6 +478,153 @@ export class FinancialService {
   }
 
   /**
+   * Reconciles a membership whose payment never completed client-side verification —
+   * e.g. the wallet's success callback was lost to a network drop or a closed tab
+   * after the deposit already landed on-chain. Instead of trusting a transaction hash
+   * from the client, this checks the Soroban escrow contract directly for the member's
+   * own deposit balance and confirms membership only if it covers the entry fee.
+   *
+   * Idempotent and safe under concurrent retries: the confirming update is conditioned
+   * on the member not already being PAYMENT_CONFIRMED, so two overlapping calls (e.g. a
+   * user mashing "retry") can never double-confirm or double-credit the same deposit.
+   */
+  public async reconcileDeposit(
+    userId: string,
+    leagueId: string
+  ): Promise<PaymentVerificationResult> {
+    const member = await this.db.leagueMember.findUnique({
+      where: {
+        leagueId_userId: {
+          leagueId,
+          userId,
+        },
+      },
+      include: {
+        league: true,
+      },
+    });
+
+    if (!member) {
+      throw new FinancialNotFoundError("Membership record not found");
+    }
+
+    if (
+      member.paymentStatus === PaymentStatus.PAYMENT_CONFIRMED &&
+      member.status === MembershipStatus.ACTIVE
+    ) {
+      return {
+        success: true,
+        txHash: "",
+        amount: member.league.entryFee,
+        assetCode: stellarConfig.usdcAssetCode,
+      };
+    }
+
+    if (!member.stellarAddress) {
+      return {
+        success: false,
+        txHash: "",
+        error:
+          "No wallet address is on record for this membership yet. Submit the deposit first.",
+      };
+    }
+
+    let onChainStroops: bigint;
+    try {
+      const contractLeagueId = FinancialService.toContractLeagueId(leagueId);
+      onChainStroops = await this.stellar.getContractDeposit(
+        contractLeagueId,
+        member.stellarAddress
+      );
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        success: false,
+        txHash: "",
+        error: `Could not reach the Soroban network to reconcile your deposit: ${message}`,
+      };
+    }
+
+    const depositedUsdc = Number(onChainStroops) / 10_000_000;
+    const entryFee = Number(member.league.entryFee);
+    if (depositedUsdc + 0.0001 < entryFee) {
+      return {
+        success: false,
+        txHash: "",
+        error:
+          "No matching on-chain deposit was found yet. If you just submitted the transaction, wait a few seconds and retry.",
+      };
+    }
+
+    // Conditional claim: only the first caller to observe an unconfirmed member wins the race.
+    const claim = await this.db.leagueMember.updateMany({
+      where: { id: member.id, paymentStatus: { not: PaymentStatus.PAYMENT_CONFIRMED } },
+      data: {
+        paymentStatus: PaymentStatus.PAYMENT_CONFIRMED,
+        status: MembershipStatus.ACTIVE,
+        hasPaid: true,
+      },
+    });
+
+    if (claim.count === 0) {
+      // Another request (or the original verify-payment call) already confirmed this
+      // member in the meantime — reconciliation is a no-op, which is the correct outcome.
+      return {
+        success: true,
+        txHash: "",
+        amount: member.league.entryFee,
+        assetCode: stellarConfig.usdcAssetCode,
+      };
+    }
+
+    const existingTx = await this.db.transaction.findFirst({
+      where: { memberId: member.id, type: TransactionType.ENTRY_FEE },
+    });
+
+    if (existingTx) {
+      await this.db.transaction.update({
+        where: { id: existingTx.id },
+        data: { status: TransactionStatus.CONFIRMED, confirmedAt: new Date() },
+      });
+    } else {
+      await this.db.transaction.create({
+        data: {
+          type: TransactionType.ENTRY_FEE,
+          status: TransactionStatus.CONFIRMED,
+          amount: member.league.entryFee,
+          asset: stellarConfig.usdcAssetCode,
+          assetIssuer: stellarConfig.usdcIssuer,
+          memo: this.formatPaymentMemo(leagueId, userId),
+          memberId: member.id,
+          leagueId: member.leagueId,
+          confirmedAt: new Date(),
+        },
+      });
+    }
+
+    this.audit.record({
+      action: FinancialAuditAction.DEPOSIT_CONFIRMED,
+      userId,
+      actorId: userId,
+      leagueId,
+      amount: member.league.entryFee,
+      asset: stellarConfig.usdcAssetCode,
+      metadata: {
+        memberId: member.id,
+        reconciledViaOnChainQuery: true,
+        onChainDepositUsdc: depositedUsdc,
+      },
+    });
+
+    return {
+      success: true,
+      txHash: "",
+      amount: member.league.entryFee,
+      assetCode: stellarConfig.usdcAssetCode,
+    };
+  }
+
+  /**
    * Prepares a deterministic settlement plan for a completed league.
    * Calculates gross total, platform fee, and 60/30/10 prize amounts using PrizeService.
    */
