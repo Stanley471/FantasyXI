@@ -12,6 +12,7 @@ import {
   SquadLockedError,
   PlayerForValidation,
 } from "./squadValidator.js";
+import { acquireLock } from "./lockManager.js";
 
 /**
  * Custom error thrown when a user attempts to modify a squad they do not own.
@@ -309,12 +310,14 @@ export class SquadService {
       .map((p) => ({ id: p.id, position: p.position }));
     const transfers = SquadService.pairTransfers(outgoing, incoming);
 
+    const lockResource = `squad:${squadId}`;
+    const releaseLock = await acquireLock(lockResource, { ttlMs: 5_000, retryCount: 3, retryDelayMs: 200 });
+
     let transferGameweek: { id: number } | null = null;
     let transferCosts: number[] = [];
     let freeTransfersLeft = existing.freeTransfers;
 
     if (transfers.length > 0) {
-      // Transfers count towards the next gameweek whose deadline has not passed
       const targetGameweek = await prisma.gameweek.findFirst({
         where: { deadline: { gt: new Date() } },
         orderBy: { deadline: "asc" },
@@ -340,83 +343,89 @@ export class SquadService {
       freeTransfersLeft = Math.max(0, available - transfers.length);
     }
 
-    return prisma.$transaction(async (tx) => {
-      // 1. Update squad metadata, bank and free transfer balance
-      await tx.squad.update({
-        where: { id: squadId },
-        data: {
-          name: input.name ? input.name.trim() : existing.name,
-          budgetRemaining,
-          ...(transferGameweek && {
-            freeTransfers: freeTransfersLeft,
-            freeTransfersGameweekId: transferGameweek.id,
-          }),
-        },
-      });
-
-      // 2. Remove sold players
-      await tx.squadPlayer.deleteMany({
-        where: { squadId, playerId: { in: outgoing.map((p: { id: number }) => p.id) } },
-      });
-
-      // 3. Update lineup of kept players, preserving their purchase price
-      for (const sel of input.players.filter((p) => owned.has(p.playerId))) {
-        await tx.squadPlayer.update({
-          where: { squadId_playerId: { squadId, playerId: sel.playerId } },
+    try {
+      return await prisma.$transaction(async (tx) => {
+        // 1. Update squad metadata, bank and free transfer balance
+        await tx.squad.update({
+          where: { id: squadId },
           data: {
-            isStarter: sel.isStarter,
-            isCaptain: sel.isCaptain,
-            isViceCaptain: sel.isViceCaptain,
-            positionOrder: sel.positionOrder,
+            name: input.name ? input.name.trim() : existing.name,
+            budgetRemaining,
+            ...(transferGameweek && {
+              freeTransfers: freeTransfersLeft,
+              freeTransfersGameweekId: transferGameweek.id,
+            }),
           },
         });
-      }
 
-      // 4. Insert new signings at their current price
-      await tx.squadPlayer.createMany({
-        data: input.players
-          .filter((sel) => !owned.has(sel.playerId))
-          .map((sel) => ({
-            squadId,
-            playerId: sel.playerId,
-            isStarter: sel.isStarter,
-            isCaptain: sel.isCaptain,
-            isViceCaptain: sel.isViceCaptain,
-            positionOrder: sel.positionOrder,
-            purchasePrice: playerMap.get(sel.playerId)!.price,
-          })),
-      });
-
-      // 5. Transfer audit history
-      if (transferGameweek) {
-        await tx.squadTransfer.createMany({
-          data: transfers.map((t, i) => ({
-            squadId,
-            gameweekId: transferGameweek!.id,
-            playerInId: t.playerInId,
-            playerOutId: t.playerOutId,
-            inPrice: playerMap.get(t.playerInId)!.price,
-            outPrice: sellPrices.get(t.playerOutId)!,
-            pointsCost: transferCosts[i],
-          })),
+        // 2. Remove sold players
+        await tx.squadPlayer.deleteMany({
+          where: { squadId, playerId: { in: outgoing.map((p: { id: number }) => p.id) } },
         });
-      }
 
-      // Return updated squad with players
-      return tx.squad.findUnique({
-        where: { id: squadId },
-        include: {
-          players: {
-            include: {
-              player: {
-                include: { team: true },
-              },
+        // 3. Update lineup of kept players, preserving their purchase price
+        for (const sel of input.players.filter((p) => owned.has(p.playerId))) {
+          await tx.squadPlayer.update({
+            where: { squadId_playerId: { squadId, playerId: sel.playerId } },
+            data: {
+              isStarter: sel.isStarter,
+              isCaptain: sel.isCaptain,
+              isViceCaptain: sel.isViceCaptain,
+              positionOrder: sel.positionOrder,
             },
-            orderBy: { positionOrder: "asc" },
+          });
+        }
+
+        // 4. Insert new signings at their current price
+        await tx.squadPlayer.createMany({
+          data: input.players
+            .filter((sel) => !owned.has(sel.playerId))
+            .map((sel) => ({
+              squadId,
+              playerId: sel.playerId,
+              isStarter: sel.isStarter,
+              isCaptain: sel.isCaptain,
+              isViceCaptain: sel.isViceCaptain,
+              positionOrder: sel.positionOrder,
+              purchasePrice: playerMap.get(sel.playerId)!.price,
+            })),
+        });
+
+        // 5. Transfer audit history
+        if (transferGameweek) {
+          await tx.squadTransfer.createMany({
+            data: transfers.map((t, i) => ({
+              squadId,
+              gameweekId: transferGameweek!.id,
+              playerInId: t.playerInId,
+              playerOutId: t.playerOutId,
+              inPrice: playerMap.get(t.playerInId)!.price,
+              outPrice: sellPrices.get(t.playerOutId)!,
+              pointsCost: transferCosts[i],
+            })),
+          });
+        }
+
+        // Return updated squad with players
+        return tx.squad.findUnique({
+          where: { id: squadId },
+          include: {
+            players: {
+              include: {
+                player: {
+                  include: { team: true },
+                },
+              },
+              orderBy: { positionOrder: "asc" },
+            },
           },
-        },
+        });
       });
-    });
+    } finally {
+      if (releaseLock) {
+        await releaseLock();
+      }
+    }
   }
 
   /**

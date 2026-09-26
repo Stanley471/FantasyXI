@@ -62,6 +62,23 @@ function getPrismaInstance(): PrismaClient {
 }
 
 /**
+ * Sets the PostgreSQL RLS context for the current request.
+ *
+ * Call this in Express middleware after authentication to ensure all
+ * subsequent queries are scoped to the current user's tenant.
+ *
+ * @param userId - The authenticated user's ID
+ */
+export async function setRlsContext(userId: string): Promise<void> {
+  const client = getPrismaInstance();
+  try {
+    await client.$executeRaw`SELECT set_rls_context(${userId})`;
+  } catch {
+    // RLS may not be enabled in all environments; fail silently
+  }
+}
+
+/**
  * Status of configured read replicas (empty when replication is disabled).
  */
 export function getReadReplicaStatus() {
