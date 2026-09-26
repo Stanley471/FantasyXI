@@ -232,9 +232,17 @@ npm run dev
 Backend API will be running at `http://localhost:5000`.
 
 ### 3. Frontend Setup
-Navigate to `frontend/`:
+The frontend is a Next.js app and should be started from the `frontend/` directory using a supported Node.js version.
+
+Requirements:
+- **Node.js**: `v20.x` or `v24.x`
+- **Package manager**: `npm`
+
+From the repository root:
 ```bash
-cd ../frontend
+cd frontend
+node -v
+npm install
 cp .env.example .env.local
 ```
 
@@ -247,12 +255,13 @@ NEXT_PUBLIC_STELLAR_SOROBAN_RPC_URL="https://soroban-testnet.stellar.org"
 NEXT_PUBLIC_STELLAR_NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
 ```
 
-Install dependencies and start Next.js:
+Install dependencies and start the local Next.js development server:
 ```bash
 npm install
 npm run dev
 ```
-Frontend will be accessible at `http://localhost:3000`.
+
+For the current Next.js setup, `npm run dev` starts the local development server (using the standard Next.js app setup; in v16 this can use Turbopack under the hood). The frontend will be available at `http://localhost:3000`.
 
 ---
 
