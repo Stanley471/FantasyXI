@@ -1,6 +1,6 @@
 "use client";
 
-import React from "react";
+import React, { useMemo } from "react";
 import { Position, SquadPlayer, Player } from "@/types";
 import { PlayerCard } from "./PlayerCard";
 import { detectFormation } from "@/lib/formation";
@@ -8,10 +8,16 @@ import { detectFormation } from "@/lib/formation";
 import { useTeamStore } from "@/store/teamStore";
 
 export const Pitch: React.FC = () => {
-  const starters = useTeamStore((state) => 
-    state.players.filter((p) => p.isStarter).sort((a, b) => a.positionOrder - b.positionOrder)
+  // Select the raw players array and derive `starters` with useMemo rather than
+  // inside the selector: a selector that returns a freshly filtered/sorted array
+  // on every call breaks useSyncExternalStore's reference-equality check and
+  // causes an infinite re-render loop ("Maximum update depth exceeded").
+  const players = useTeamStore((state) => state.players);
+  const starters = useMemo(
+    () => players.filter((p) => p.isStarter).sort((a, b) => a.positionOrder - b.positionOrder),
+    [players]
   );
-  
+
   // Group starters by position
   const gkpStarters = starters.filter(
     (s) => s.player?.position === Position.GKP
@@ -35,7 +41,7 @@ export const Pitch: React.FC = () => {
   const currentFormation = detectFormation(starters as any);
 
   return (
-    <div className="w-full relative rounded-2xl overflow-hidden shadow-2xl border border-pitch-border bg-slate-950">
+    <div className="w-full relative rounded-2xl overflow-hidden shadow-2xl border border-pitch-border bg-slate-950" data-testid="pitch">
       {/* Tactical Grass Pitch Canvas */}
       <div className="pitch-grass relative w-full min-h-[580px] sm:min-h-[660px] flex flex-col justify-between py-6 px-2 sm:px-6">
         {/* Pitch Tactical Line Markings */}

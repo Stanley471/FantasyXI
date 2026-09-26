@@ -82,7 +82,7 @@ export const PlayerPickerModal: React.FC<PlayerPickerModalProps> = ({
   const effectiveBudget = remainingBudget + (replacingPlayer ? replacingPlayer.price : 0);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fadeIn">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fadeIn" data-testid="player-picker-modal">
       <div className="relative w-full max-w-2xl bg-pitch-surface border border-pitch-border rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh]">
         {/* Header */}
         <div className="p-5 border-b border-pitch-border flex items-center justify-between bg-slate-950/60">
@@ -185,6 +185,7 @@ export const PlayerPickerModal: React.FC<PlayerPickerModalProps> = ({
               return (
                 <div
                   key={p.id}
+                  data-testid={`picker-row-${p.id}`}
                   className={`flex items-center justify-between p-3 rounded-lg transition-colors ${
                     isDisabled ? "opacity-50 bg-slate-950/30" : "hover:bg-slate-900/60"
                   }`}
@@ -239,6 +240,7 @@ export const PlayerPickerModal: React.FC<PlayerPickerModalProps> = ({
                         onClose();
                       }}
                       className="text-xs uppercase font-bold"
+                      data-testid={`pick-player-${p.id}`}
                     >
                       {isReplacingSame ? "Selected" : "Pick"}
                     </Button>

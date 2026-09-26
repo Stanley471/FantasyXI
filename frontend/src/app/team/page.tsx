@@ -444,14 +444,14 @@ export default function TeamPage() {
 
         {/* Notifications */}
         {saveSuccessMsg && (
-          <div className="p-3.5 rounded-lg bg-emerald-950/40 border border-emerald-500/40 flex items-center gap-3 text-emerald-300 text-xs animate-fadeIn">
+          <div data-testid="save-success" className="p-3.5 rounded-lg bg-emerald-950/40 border border-emerald-500/40 flex items-center gap-3 text-emerald-300 text-xs animate-fadeIn">
             <IconCheck className="w-4 h-4 text-emerald-400 flex-shrink-0" />
             <span className="font-semibold">{saveSuccessMsg}</span>
           </div>
         )}
 
         {errorMessage && (
-          <div className="p-3.5 rounded-lg bg-rose-950/40 border border-rose-500/40 flex items-center gap-3 text-rose-300 text-xs animate-shake">
+          <div data-testid="save-error" className="p-3.5 rounded-lg bg-rose-950/40 border border-rose-500/40 flex items-center gap-3 text-rose-300 text-xs animate-shake">
             <IconAlertCircle className="w-4 h-4 text-rose-400 flex-shrink-0" />
             <span className="font-semibold">{errorMessage}</span>
           </div>
@@ -471,7 +471,7 @@ export default function TeamPage() {
 
         {/* Validation Errors Pill if invalid */}
         {!validation.valid && validation.errors.length > 0 && (
-          <div className="p-3 rounded-lg bg-amber-950/30 border border-amber-500/30 text-amber-300 text-xs space-y-1">
+          <div data-testid="formation-errors" className="p-3 rounded-lg bg-amber-950/30 border border-amber-500/30 text-amber-300 text-xs space-y-1">
             <div className="font-bold uppercase tracking-wider flex items-center gap-1.5 text-[11px]">
               <IconAlertCircle className="w-3.5 h-3.5" />
               <span>Lineup Constraints Checklist</span>
@@ -535,6 +535,7 @@ export default function TeamPage() {
                     setSelectedPlayerId(null);
                   }}
                   className="w-full justify-start text-sm"
+                  data-testid="transfer-out-button"
                 >
                   <IconSwap className="w-4 h-4 mr-2 opacity-70" /> Transfer Out
                 </Button>

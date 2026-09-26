@@ -97,13 +97,18 @@ export const useTeamStore = create<TeamState>((set, get) => ({
         return { players: prev };
       }
 
-      const tempStarter = a.isStarter;
+      // Capture both original starter flags before mutating either player —
+      // comparing against a mutated value here previously made the "did this
+      // cross the starter/bench boundary?" check below always false, since
+      // b.isStarter is reassigned to a's original value in the very next lines.
+      const aWasStarter = a.isStarter;
+      const bWasStarter = b.isStarter;
       const tempOrder = a.positionOrder;
 
       a.isStarter = b.isStarter;
       a.positionOrder = b.positionOrder;
 
-      b.isStarter = tempStarter;
+      b.isStarter = aWasStarter;
       b.positionOrder = tempOrder;
 
       if (!a.isStarter && a.isCaptain) {
@@ -127,7 +132,7 @@ export const useTeamStore = create<TeamState>((set, get) => ({
       clone[idxB] = b;
 
       // Validate new formation if we swapped a starter with a bench player
-      if (tempStarter !== b.isStarter) {
+      if (aWasStarter !== bWasStarter) {
         // Need to import validateFormation and count starters dynamically. 
         // We will inline the validation logic for Outfields here since we don't have access to validateFormation import easily inside the store without adding the import.
         const newStarters = clone.filter(p => p.isStarter);

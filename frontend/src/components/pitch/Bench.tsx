@@ -1,14 +1,18 @@
 "use client";
 
-import React from "react";
+import React, { useMemo } from "react";
 import { Position, SquadPlayer, Player } from "@/types";
 import { PlayerCard } from "./PlayerCard";
 
 import { useTeamStore } from "@/store/teamStore";
 
 export const Bench: React.FC = () => {
-  const benchPlayers = useTeamStore((state) => 
-    state.players.filter((p) => !p.isStarter).sort((a, b) => a.positionOrder - b.positionOrder)
+  // See Pitch.tsx: derive with useMemo, not inside the selector, to avoid an
+  // infinite re-render loop from useSyncExternalStore reference-equality checks.
+  const players = useTeamStore((state) => state.players);
+  const benchPlayers = useMemo(
+    () => players.filter((p) => !p.isStarter).sort((a, b) => a.positionOrder - b.positionOrder),
+    [players]
   );
   // Ensure exactly 4 slots (1 GK, 3 Outfield)
   const defaultSlots: Position[] = [
@@ -19,7 +23,7 @@ export const Bench: React.FC = () => {
   ];
 
   return (
-    <div className="w-full bg-slate-950/90 border border-pitch-border rounded-xl p-4 sm:p-5 shadow-inner">
+    <div className="w-full bg-slate-950/90 border border-pitch-border rounded-xl p-4 sm:p-5 shadow-inner" data-testid="bench">
       <div className="flex items-center justify-between mb-3 px-1">
         <div className="flex items-center gap-2">
           <span className="w-2 h-2 rounded-full bg-amber-400" />
