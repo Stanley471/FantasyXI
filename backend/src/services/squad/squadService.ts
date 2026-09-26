@@ -604,6 +604,57 @@ export class SquadService {
       },
     });
   }
+
+  /**
+   * Total team value: bank (available budget) plus the current selling price
+   * of every squad player. Selling price applies the FPL sell-on fee (half
+   * the profit, rounded down) so a squad's value tracks daily FPL price
+   * changes rather than the flat purchase price.
+   */
+  public static calculateTeamValue(
+    budgetRemaining: number,
+    players: Array<{ purchasePrice: number; currentPrice: number }>
+  ): number {
+    const squadValue = players.reduce(
+      (sum, p) =>
+        sum + SquadService.calculateSellingPrice(p.purchasePrice, p.currentPrice),
+      0
+    );
+    return Math.round((budgetRemaining + squadValue) * 10) / 10;
+  }
+
+  /**
+   * Computes a squad's current bank balance, squad (selling) value and total
+   * team value using each player's live FPL price. Reflects daily price
+   * fluctuations synced by `syncDailyPlayerPrices` without requiring the
+   * bank balance itself to be mutated (only transfers change the bank).
+   */
+  public async getSquadValuation(squadId: string): Promise<{
+    squadId: string;
+    bank: number;
+    squadValue: number;
+    teamValue: number;
+  }> {
+    const squad = await this.db.squad.findUnique({
+      where: { id: squadId },
+      include: { players: { include: { player: true } } },
+    });
+
+    if (!squad) {
+      throw new SquadValidationError(`Squad with ID ${squadId} not found`);
+    }
+
+    const bank = Number(squad.budgetRemaining);
+    const players = squad.players.map((sp: any) => ({
+      purchasePrice: Number(sp.purchasePrice),
+      currentPrice: Number(sp.player.price),
+    }));
+
+    const teamValue = SquadService.calculateTeamValue(bank, players);
+    const squadValue = Math.round((teamValue - bank) * 10) / 10;
+
+    return { squadId, bank, squadValue, teamValue };
+  }
 }
 
 export const squadService = new SquadService();
