@@ -1,7 +1,7 @@
 #![no_std]
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env,
-    Vec,
+    Symbol, Vec,
 };
 
 const DAY_IN_LEDGERS: u32 = 17280;
@@ -10,6 +10,7 @@ const INSTANCE_LIFETIME_THRESHOLD: u32 = 14 * DAY_IN_LEDGERS;
 
 const PERSISTENT_BUMP_AMOUNT: u32 = 30 * DAY_IN_LEDGERS;
 const PERSISTENT_LIFETIME_THRESHOLD: u32 = 14 * DAY_IN_LEDGERS;
+const EMERGENCY_REFUND_TIMELOCK_SECONDS: u64 = 14 * 24 * 60 * 60;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -28,6 +29,11 @@ pub enum EscrowError {
     FeeExceedsMaxCap = 11,
     InvalidPrizeDistribution = 12,
     NoClaimablePrize = 13,
+    ContractPaused = 14,
+    AlreadyPaused = 15,
+    NotPaused = 16,
+    TimelockNotElapsed = 17,
+    NoDeposit = 18,
     InvalidProof = 14,
     InvalidMultisig = 15,
 }
@@ -71,6 +77,8 @@ pub struct AdminConfig {
 #[contracttype]
 pub enum DataKey {
     Admin,
+    IsPaused,
+    PausedAt,
     AdminConfig,
     League(u64),
     Deposit(u64, Address),
@@ -85,6 +93,26 @@ pub struct FantasyXIEscrow;
 
 #[contractimpl]
 impl FantasyXIEscrow {
+    fn is_paused(env: &Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::IsPaused)
+            .unwrap_or(false)
+    }
+
+    fn require_admin(env: &Env, admin: &Address) -> Result<(), EscrowError> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(EscrowError::NotInitialized)?;
+        if admin != &stored_admin {
+            return Err(EscrowError::NotAuthorized);
+        }
+        Ok(())
+    }
+
     /// Initializes the global escrow contract with an admin.
     pub fn initialize(env: Env, admin: Address) -> Result<(), EscrowError> {
         if env.storage().instance().has(&DataKey::Admin) {
@@ -93,6 +121,7 @@ impl FantasyXIEscrow {
         admin.require_auth();
 
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::IsPaused, &false);
         let mut signers = Vec::new(&env);
         signers.push_back(admin.clone());
         env.storage().instance().set(
@@ -134,6 +163,41 @@ impl FantasyXIEscrow {
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         Ok(())
+    }
+
+    /// Pauses deposits and settlement while leaving refunds available.
+    pub fn pause(env: Env, admin: Address) -> Result<(), EscrowError> {
+        Self::require_admin(&env, &admin)?;
+        if Self::is_paused(&env) {
+            return Err(EscrowError::AlreadyPaused);
+        }
+
+        let paused_at = env.ledger().timestamp();
+        env.storage().instance().set(&DataKey::IsPaused, &true);
+        env.storage().instance().set(&DataKey::PausedAt, &paused_at);
+        env.events()
+            .publish((Symbol::new(&env, "ContractPaused"),), paused_at);
+        Ok(())
+    }
+
+    /// Resumes deposits and settlement after an emergency pause.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), EscrowError> {
+        Self::require_admin(&env, &admin)?;
+        if !Self::is_paused(&env) {
+            return Err(EscrowError::NotPaused);
+        }
+
+        let unpaused_at = env.ledger().timestamp();
+        env.storage().instance().set(&DataKey::IsPaused, &false);
+        env.storage().instance().remove(&DataKey::PausedAt);
+        env.events()
+            .publish((Symbol::new(&env, "ContractUnpaused"),), unpaused_at);
+        Ok(())
+    }
+
+    /// Returns whether the escrow is currently paused.
+    pub fn is_paused_view(env: Env) -> bool {
+        Self::is_paused(&env)
     }
 
     /// Registers a new competition partition identified by `league_id`.
@@ -186,6 +250,9 @@ impl FantasyXIEscrow {
 
     /// Participant deposits their entry fee into the league escrow partition.
     pub fn deposit(env: Env, participant: Address, league_id: u64) -> Result<(), EscrowError> {
+        if Self::is_paused(&env) {
+            return Err(EscrowError::ContractPaused);
+        }
         participant.require_auth();
 
         let league_key = DataKey::League(league_id);
@@ -262,6 +329,10 @@ impl FantasyXIEscrow {
         platform_treasury: Address,
         platform_fee: i128,
     ) -> Result<(), EscrowError> {
+        if Self::is_paused(&env) {
+            return Err(EscrowError::ContractPaused);
+        }
+        Self::settle_with_affiliate(
         let mut approvals = Vec::new(&env);
         approvals.push_back(admin);
         Self::settle_internal(
@@ -419,6 +490,7 @@ impl FantasyXIEscrow {
         // Calculate expected distributions based on prize curve rules
         let prize_pool = league.total_deposited - platform_fee;
         let mut expected_payouts = Vec::new(&env);
+        let mut tied_first_payouts = Vec::new(&env);
         if winners.len() == 1 {
             expected_payouts.push_back(prize_pool);
         } else if winners.len() == 2 {
@@ -426,6 +498,9 @@ impl FantasyXIEscrow {
             let p2 = prize_pool - p1;
             expected_payouts.push_back(p1);
             expected_payouts.push_back(p2);
+            let tied_first = prize_pool / 2;
+            tied_first_payouts.push_back(tied_first);
+            tied_first_payouts.push_back(prize_pool - tied_first);
         } else if winners.len() >= 3 {
             let p1 = (prize_pool * 60) / 100;
             let p2 = (prize_pool * 30) / 100;
@@ -433,19 +508,32 @@ impl FantasyXIEscrow {
             expected_payouts.push_back(p1);
             expected_payouts.push_back(p2);
             expected_payouts.push_back(p3);
+            let tied_first = (p1 + p2) / 2;
+            tied_first_payouts.push_back(tied_first);
+            tied_first_payouts.push_back(p1 + p2 - tied_first);
+            tied_first_payouts.push_back(p3);
             for _ in 3..winners.len() {
                 expected_payouts.push_back(0);
+                tied_first_payouts.push_back(0);
             }
         } else {
             return Err(EscrowError::InvalidPrizeDistribution);
         }
+
+        let uses_tied_first = winners.len() >= 2
+            && !tied_first_payouts.is_empty()
+            && winners.get(0).unwrap().amount == tied_first_payouts.get(0).unwrap()
+            && winners.get(1).unwrap().amount == tied_first_payouts.get(1).unwrap();
 
         let mut total_payout = platform_fee;
         for (i, winner) in winners.iter().enumerate() {
             if winner.amount < 0 {
                 return Err(EscrowError::InvalidAmount);
             }
-            if winner.amount != expected_payouts.get(i as u32).unwrap() {
+            let matches_standard = winner.amount == expected_payouts.get(i as u32).unwrap();
+            let matches_tied_first =
+                uses_tied_first && winner.amount == tied_first_payouts.get(i as u32).unwrap();
+            if !matches_standard && !matches_tied_first {
                 return Err(EscrowError::InvalidPrizeDistribution);
             }
             total_payout += winner.amount;
@@ -538,6 +626,63 @@ impl FantasyXIEscrow {
             }
             signer.require_auth();
         }
+        Ok(())
+    }
+
+    /// Allows a depositor to recover their original entry fee after the
+    /// contract has remained paused for the emergency timelock.
+    pub fn emergency_refund_league(
+        env: Env,
+        participant: Address,
+        league_id: u64,
+    ) -> Result<(), EscrowError> {
+        participant.require_auth();
+
+        if !Self::is_paused(&env) {
+            return Err(EscrowError::NotPaused);
+        }
+
+        let paused_at: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PausedAt)
+            .ok_or(EscrowError::NotPaused)?;
+        let unlock_at = paused_at
+            .checked_add(EMERGENCY_REFUND_TIMELOCK_SECONDS)
+            .ok_or(EscrowError::TimelockNotElapsed)?;
+        if env.ledger().timestamp() < unlock_at {
+            return Err(EscrowError::TimelockNotElapsed);
+        }
+
+        let league_key = DataKey::League(league_id);
+        let mut league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&league_key)
+            .ok_or(EscrowError::LeagueNotFound)?;
+        let deposit_key = DataKey::Deposit(league_id, participant.clone());
+        let amount: i128 = env
+            .storage()
+            .persistent()
+            .get(&deposit_key)
+            .ok_or(EscrowError::NoDeposit)?;
+
+        if amount > 0 {
+            token::Client::new(&env, &league.asset).transfer(
+                &env.current_contract_address(),
+                &participant,
+                &amount,
+            );
+        }
+
+        env.storage().persistent().remove(&deposit_key);
+        league.total_deposited -= amount;
+        league.participant_count -= 1;
+        env.storage().persistent().set(&league_key, &league);
+        env.events().publish(
+            (Symbol::new(&env, "EmergencyRefund"), league_id),
+            (participant, amount),
+        );
         Ok(())
     }
 
@@ -1185,6 +1330,84 @@ mod test {
     }
 
     #[test]
+    fn test_pause_blocks_deposit_and_settle_until_unpaused() {
+        let (env, admin, token_addr, client) = setup_test();
+        let user = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let token_admin = token::StellarAssetClient::new(&env, &token_addr);
+        token_admin.mint(&user, &50_000_000);
+        client.create_league(&admin, &820, &50_000_000, &token_addr);
+
+        client.pause(&admin);
+        assert!(client.is_paused_view());
+        assert_eq!(
+            client.try_deposit(&user, &820),
+            Err(Ok(EscrowError::ContractPaused))
+        );
+        let winners = vec![
+            &env,
+            WinnerPayout {
+                winner: user.clone(),
+                amount: 47_500_000,
+            },
+        ];
+        assert_eq!(
+            client.try_settle(&admin, &820, &winners, &treasury, &2_500_000),
+            Err(Ok(EscrowError::ContractPaused))
+        );
+
+        client.unpause(&admin);
+        assert!(!client.is_paused_view());
+        client.deposit(&user, &820);
+        assert_eq!(client.get_deposit(&820, &user), 50_000_000);
+    }
+
+    #[test]
+    fn test_emergency_refund_requires_timelock_and_returns_original_deposit() {
+        let (env, admin, token_addr, client) = setup_test();
+        let user = Address::generate(&env);
+        let token_admin = token::StellarAssetClient::new(&env, &token_addr);
+        token_admin.mint(&user, &50_000_000);
+        client.create_league(&admin, &821, &50_000_000, &token_addr);
+        client.deposit(&user, &821);
+
+        let token_client = token::Client::new(&env, &token_addr);
+        assert_eq!(token_client.balance(&user), 0);
+        client.pause(&admin);
+
+        env.ledger().set_timestamp(14 * 24 * 60 * 60 - 1);
+        assert_eq!(
+            client.try_emergency_refund_league(&user, &821),
+            Err(Ok(EscrowError::TimelockNotElapsed))
+        );
+
+        env.ledger().set_timestamp(14 * 24 * 60 * 60);
+        client.emergency_refund_league(&user, &821);
+        assert_eq!(token_client.balance(&user), 50_000_000);
+        assert_eq!(client.get_deposit(&821, &user), 0);
+        assert_eq!(client.get_league(&821).unwrap().total_deposited, 0);
+        assert_eq!(
+            client.try_emergency_refund_league(&user, &821),
+            Err(Ok(EscrowError::NoDeposit))
+        );
+    }
+
+    #[test]
+    fn test_only_admin_can_pause_and_unpause() {
+        let (env, admin, _token_addr, client) = setup_test();
+        let attacker = Address::generate(&env);
+
+        assert_eq!(
+            client.try_pause(&attacker),
+            Err(Ok(EscrowError::NotAuthorized))
+        );
+        client.pause(&admin);
+        assert_eq!(
+            client.try_pause(&admin),
+            Err(Ok(EscrowError::AlreadyPaused))
+        );
+        client.unpause(&admin);
+        assert_eq!(client.try_unpause(&admin), Err(Ok(EscrowError::NotPaused)));
     fn test_settle_with_affiliate_payout() {
         let (env, admin, token_addr, client) = setup_test();
         let token_admin_client = token::StellarAssetClient::new(&env, &token_addr);

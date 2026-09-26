@@ -33,6 +33,7 @@ import {
   PaymentStatus,
   TransactionType,
   TransactionStatus,
+  UserRole,
   PaymentRequirement,
   PaymentSubmissionInput,
   PaymentVerificationResult,
@@ -82,6 +83,15 @@ export interface RefundReconciliationReport {
   remainingEscrowStroops: string;
   outstandingMemberIds: string[];
   isFullyRefunded: boolean;
+}
+
+export interface SettlementDispatchReport {
+  leagueId: string;
+  contractLeagueId: string;
+  stellarTxHash: string;
+  ledgerSeq?: number;
+  winnerTransactionCount: number;
+  platformFee: number;
 }
 
 export class FinancialValidationError extends Error {
@@ -553,7 +563,7 @@ export class FinancialService {
       league.entryFee
     );
 
-    // Sort participants deterministically by points descending, then join timestamp
+    // Sort participants deterministically by points descending, then join timestamp.
     const sortedMembers = [...paidMembers].sort((a: any, b: any) => {
       const aPoints = a.squad?.totalPoints || 0;
       const bPoints = b.squad?.totalPoints || 0;
@@ -562,8 +572,18 @@ export class FinancialService {
     });
 
     const winners: SettlementWinner[] = [];
+    const hasFirstPlaceTie =
+      sortedMembers.length > 1 &&
+      (sortedMembers[0].squad?.totalPoints || 0) ===
+        (sortedMembers[1].squad?.totalPoints || 0);
+    const tiedFirstPrize = hasFirstPlaceTie
+      ? Math.floor((distribution.prizes.first + distribution.prizes.second) * 100 / 2) / 100
+      : distribution.prizes.first;
+    const tiedSecondPrize = hasFirstPlaceTie
+      ? distribution.prizes.first + distribution.prizes.second - tiedFirstPrize
+      : distribution.prizes.second;
 
-    // Winner 1 (60% or 70% if 2 players)
+    // Winner 1 (or the deterministic first half of a tied first place).
     if (sortedMembers[0] && distribution.prizes.first > 0) {
       winners.push({
         rank: 1,
@@ -572,20 +592,20 @@ export class FinancialService {
         stellarAddress: sortedMembers[0].stellarAddress || "PENDING_WALLET_LINK",
         squadName: sortedMembers[0].squad?.name || "Squad 1",
         totalPoints: sortedMembers[0].squad?.totalPoints || 0,
-        prizeAmount: distribution.prizes.first,
+        prizeAmount: hasFirstPlaceTie ? tiedFirstPrize : distribution.prizes.first,
       });
     }
 
-    // Winner 2 (30%)
+    // Winner 2 (or the deterministic second half of a tied first place).
     if (sortedMembers[1] && distribution.prizes.second > 0) {
       winners.push({
-        rank: 2,
+        rank: hasFirstPlaceTie ? 1 : 2,
         userId: sortedMembers[1].userId,
         username: sortedMembers[1].user?.username || "Unknown",
         stellarAddress: sortedMembers[1].stellarAddress || "PENDING_WALLET_LINK",
         squadName: sortedMembers[1].squad?.name || "Squad 2",
         totalPoints: sortedMembers[1].squad?.totalPoints || 0,
-        prizeAmount: distribution.prizes.second,
+        prizeAmount: hasFirstPlaceTie ? tiedSecondPrize : distribution.prizes.second,
       });
     }
 
@@ -627,6 +647,132 @@ export class FinancialService {
       winners,
       canSettle: true,
       proofHash,
+    };
+  }
+
+  /**
+   * Dispatches a verified settlement to Soroban and records the confirmed
+   * payout and platform-fee transactions atomically.
+   */
+  public async executeSettlement(
+    leagueId: string,
+    adminUserId: string
+  ): Promise<SettlementDispatchReport> {
+    const league = await this.db.league.findUnique({
+      where: { id: leagueId },
+      include: { endGameweek: true },
+    });
+
+    if (!league) {
+      throw new FinancialNotFoundError(`League ${leagueId} not found`);
+    }
+    if (league.status === LeagueStatus.COMPLETED) {
+      throw new FinancialConflictError("League settlement has already been executed");
+    }
+    if (league.status === LeagueStatus.CANCELLED) {
+      throw new FinancialValidationError("Cancelled leagues cannot be settled");
+    }
+    if (!league.endGameweek?.isFinished) {
+      throw new FinancialValidationError(
+        "Settlement is blocked until the league end gameweek is finished"
+      );
+    }
+
+    const admin = await this.db.user.findUnique({ where: { id: adminUserId } });
+    if (!admin || admin.role !== UserRole.ADMIN) {
+      throw new FinancialForbiddenError("Only an administrator can execute settlements");
+    }
+
+    const plan = await this.prepareSettlement(leagueId, league.creatorId);
+    if (!plan.canSettle || plan.winners.length === 0) {
+      throw new FinancialValidationError(
+        plan.unsettledReason || "The league has no eligible settlement winners"
+      );
+    }
+
+    for (const winner of plan.winners) {
+      if (!this.stellar.isValidStellarAddress(winner.stellarAddress)) {
+        throw new FinancialValidationError(
+          `Winner ${winner.userId} does not have a linked Stellar address`
+        );
+      }
+    }
+
+    const contractLeagueId = FinancialService.toContractLeagueId(leagueId);
+    const toStroops = (amount: number): bigint =>
+      BigInt(Math.round(amount * 100)) * 100_000n;
+    let result;
+    try {
+      result = await this.stellar.settleLeague(
+        contractLeagueId,
+        plan.winners.map((winner) => ({
+          winner: winner.stellarAddress,
+          amount: toStroops(winner.prizeAmount).toString(),
+        })),
+        toStroops(plan.platformFee)
+      );
+    } catch (error) {
+      throw new FinancialConflictError(
+        `Settlement dispatch failed: ${(error as Error).message}`
+      );
+    }
+
+    if (!result.success || !result.txHash) {
+      throw new FinancialConflictError(
+        result.error || "Settlement transaction was not confirmed"
+      );
+    }
+
+    const confirmedAt = new Date();
+    await this.db.$transaction([
+      this.db.league.update({
+        where: { id: leagueId },
+        data: {
+          status: LeagueStatus.COMPLETED,
+          prizePool: plan.netPrizePool,
+        },
+      }),
+      ...plan.winners.map((winner) =>
+        this.db.transaction.create({
+          data: {
+            userId: winner.userId,
+            leagueId,
+            type: TransactionType.PRIZE_PAYOUT,
+            amount: winner.prizeAmount,
+            asset: stellarConfig.usdcAssetCode,
+            assetIssuer: stellarConfig.usdcIssuer,
+            stellarTxHash: result.txHash,
+            ledgerSeq: result.ledgerSeq,
+            status: TransactionStatus.CONFIRMED,
+            confirmedAt,
+            memo: `PRIZE_PAYOUT:${leagueId}:${winner.rank}`,
+          },
+        })
+      ),
+      this.db.transaction.create({
+        data: {
+          userId: adminUserId,
+          leagueId,
+          type: TransactionType.PLATFORM_FEE,
+          amount: plan.platformFee,
+          asset: stellarConfig.usdcAssetCode,
+          assetIssuer: stellarConfig.usdcIssuer,
+          stellarTxHash: result.txHash,
+          ledgerSeq: result.ledgerSeq,
+          status: TransactionStatus.CONFIRMED,
+          confirmedAt,
+          memo: `PLATFORM_FEE:${leagueId}`,
+        },
+      }),
+    ]);
+
+    return {
+      leagueId,
+      contractLeagueId: contractLeagueId.toString(),
+      stellarTxHash: result.txHash,
+      ledgerSeq: result.ledgerSeq,
+      winnerTransactionCount: plan.winners.length,
+      platformFee: plan.platformFee,
     };
   }
 

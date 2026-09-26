@@ -238,6 +238,7 @@ model Gameweek {
   fixtures        Fixture[]
   playerStats     PlayerGameweekStats[]
   squadScores     SquadGameweekScore[]
+  transfers       SquadTransfer[]
   leaguesStarting League[]              @relation("LeagueStartGW")
   leaguesEnding   League[]              @relation("LeagueEndGW")
   chipUsages      SquadChipUsage[]
@@ -310,6 +311,7 @@ model Squad {
   user           User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
   players        SquadPlayer[]
   gameweekScores SquadGameweekScore[]
+  transfers      SquadTransfer[]
   memberships    LeagueMember[]
   chipUsages     SquadChipUsage[]
   squadTransfers SquadTransfer[]

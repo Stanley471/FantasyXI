@@ -65,6 +65,7 @@ import {
   submitPayment,
   verifyPayment,
   getSettlementPlan,
+  executeSettlement,
   reconcileLeague,
 } from "../controllers/financial.controller.js";
 
@@ -78,6 +79,13 @@ router.use("/:leagueId/financial", primaryReads, financialRoutes);
 router.get("/:leagueId/payment-requirement", primaryReads, requireAuth, getPaymentRequirement);
 router.post("/:leagueId/submit-payment", requireAuth, submitPayment);
 router.post("/:leagueId/verify-payment", requireAuth, verifyPayment);
+router.get("/:leagueId/settlement-plan", requireAuth, getSettlementPlan);
+router.post(
+  "/:leagueId/settle",
+  requireAuth,
+  requireRole(UserRole.ADMIN),
+  executeSettlement
+);
 router.get("/:leagueId/settlement-plan", primaryReads, requireAuth, getSettlementPlan);
 router.get(
   "/:leagueId/reconcile",
@@ -88,4 +96,3 @@ router.get(
 );
 
 export default router;
-
