@@ -54,6 +54,8 @@ export function toSafeUser(user: {
   username: string;
   name?: string | null;
   role?: UserRole | string | null;
+  passwordHash?: string | null;
+  googleId?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }): SafeUser {
@@ -63,9 +65,27 @@ export function toSafeUser(user: {
     username: user.username,
     name: user.name ?? null,
     role: (user.role as UserRole | undefined) ?? UserRole.USER,
+    // Which sign-in methods the account can use; never exposes the secrets themselves
+    authProviders: {
+      password: Boolean(user.passwordHash),
+      google: Boolean(user.googleId),
+    },
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
   };
+}
+
+/** Prisma unique-constraint violation (e.g. a concurrent insert of the same googleId). */
+function isUniqueViolation(error: unknown): boolean {
+  return (error as { code?: string } | null)?.code === "P2002";
+}
+
+/** Verified Google identity passed to the account linking operations. */
+export interface GoogleIdentityInput {
+  googleId: string;
+  email: string;
+  name?: string | null;
+  emailVerified: boolean;
 }
 
 /**
@@ -276,12 +296,7 @@ export class AuthService {
    * 4. If neither matches -> creates new user with passwordHash = null.
    * 5. Always issues FantasyXI JWT access token.
    */
-  public async handleGoogleAuth(input: {
-    googleId: string;
-    email: string;
-    name?: string | null;
-    emailVerified: boolean;
-  }): Promise<AuthResult> {
+  public async handleGoogleAuth(input: GoogleIdentityInput): Promise<AuthResult> {
     if (!input.googleId) {
       throw new AuthValidationError("Google ID is required");
     }
@@ -347,15 +362,28 @@ export class AuthService {
         finalUsername = `${base}_${crypto.randomBytes(2).toString("hex")}`;
       }
 
-      user = await this.db.user.create({
-        data: {
-          email: normalizedEmail,
-          name: input.name ? input.name.trim() : null,
-          googleId: input.googleId,
-          username: finalUsername,
-          passwordHash: null,
-        },
-      });
+      try {
+        user = await this.db.user.create({
+          data: {
+            email: normalizedEmail,
+            name: input.name ? input.name.trim() : null,
+            googleId: input.googleId,
+            username: finalUsername,
+            passwordHash: null,
+          },
+        });
+      } catch (error) {
+        // A concurrent first sign-in with the same Google account won the race
+        if (!isUniqueViolation(error)) throw error;
+        user = await this.db.user.findUnique({
+          where: { googleId: input.googleId },
+        });
+        if (!user) {
+          throw new AuthConflictError(
+            "An account with this email already exists. Sign in and link Google from your profile."
+          );
+        }
+      }
     }
 
     const safeUser = toSafeUser(user);
@@ -370,6 +398,134 @@ export class AuthService {
       user: safeUser,
       token,
     };
+  }
+
+  /**
+   * Links a Google identity to an already signed-in account.
+   *
+   * Unlike sign-in, the Google email does not have to match the account email:
+   * the user proved ownership of both by being signed in and completing the
+   * Google consent screen. Rules:
+   * - the Google email must be verified;
+   * - a Google account can belong to only one FantasyXI account;
+   * - an account already linked to a different Google account must unlink first.
+   * Linking the same Google account again is a no-op.
+   */
+  public async linkGoogleAccount(
+    userId: string,
+    identity: GoogleIdentityInput
+  ): Promise<SafeUser> {
+    if (!identity.googleId) {
+      throw new AuthValidationError("Google ID is required");
+    }
+    if (!identity.emailVerified) {
+      throw new AuthValidationError("Google account email is not verified");
+    }
+
+    const user = await this.db.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new AuthNotFoundError("User not found");
+    }
+
+    if (user.googleId === identity.googleId) {
+      return toSafeUser(user);
+    }
+    if (user.googleId) {
+      throw new AuthConflictError(
+        "Your account is already linked to a different Google account. Unlink it first."
+      );
+    }
+
+    const owner = await this.db.user.findUnique({
+      where: { googleId: identity.googleId },
+    });
+    if (owner && owner.id !== userId) {
+      throw new AuthConflictError(
+        "This Google account is already linked to another FantasyXI account."
+      );
+    }
+
+    try {
+      const updated = await this.db.user.update({
+        where: { id: userId },
+        data: {
+          googleId: identity.googleId,
+          name: user.name ?? identity.name ?? null,
+        },
+      });
+      return toSafeUser(updated);
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        throw new AuthConflictError(
+          "This Google account is already linked to another FantasyXI account."
+        );
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Removes the Google identity from an account. Refused while Google is the
+   * only way to sign in, so users cannot lock themselves out.
+   */
+  public async unlinkGoogleAccount(userId: string): Promise<SafeUser> {
+    const user = await this.db.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new AuthNotFoundError("User not found");
+    }
+    if (!user.googleId) {
+      return toSafeUser(user);
+    }
+    if (!user.passwordHash) {
+      throw new AuthConflictError(
+        "Set a password before unlinking Google, otherwise you will not be able to sign in."
+      );
+    }
+
+    const updated = await this.db.user.update({
+      where: { id: userId },
+      data: { googleId: null },
+    });
+    return toSafeUser(updated);
+  }
+
+  /**
+   * Sets a password so a Google-only account can also sign in with email and
+   * password, or changes an existing password (the current one is required).
+   */
+  public async setPassword(
+    userId: string,
+    input: { password?: string; currentPassword?: string }
+  ): Promise<SafeUser> {
+    if (!input.password || typeof input.password !== "string") {
+      throw new AuthValidationError("Password is required");
+    }
+    if (input.password.length < MIN_PASSWORD_LENGTH) {
+      throw new AuthValidationError(
+        `Password must be at least ${MIN_PASSWORD_LENGTH} characters long`
+      );
+    }
+
+    const user = await this.db.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new AuthNotFoundError("User not found");
+    }
+
+    if (user.passwordHash) {
+      const currentMatches =
+        typeof input.currentPassword === "string" &&
+        (await bcrypt.compare(input.currentPassword, user.passwordHash));
+      if (!currentMatches) {
+        throw new AuthUnauthorizedError("Current password is incorrect");
+      }
+    }
+
+    const passwordHash = await bcrypt.hash(input.password, BCRYPT_SALT_ROUNDS);
+    const updated = await this.db.user.update({
+      where: { id: userId },
+      data: { passwordHash },
+    });
+    return toSafeUser(updated);
   }
 
   /**

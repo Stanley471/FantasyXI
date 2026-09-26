@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { api, ApiError } from "@/lib/api";
+import { redirectToGoogleSignIn, safeReturnTo } from "@/lib/googleAuth";
 import { IconFootball, IconGoogle, IconAlertCircle, IconCheck } from "@/components/ui/Icons";
 import { Button } from "@/components/ui/Button";
 
@@ -13,7 +14,8 @@ function RegisterForm() {
   const searchParams = useSearchParams();
   const { login, isAuthenticated } = useAuth();
 
-  const returnTo = searchParams.get("returnTo") || "/team";
+  const requestedReturnTo = searchParams.get("returnTo");
+  const returnTo = requestedReturnTo ? safeReturnTo(requestedReturnTo) : "/team";
 
   const [name, setName] = useState("");
   const [username, setUsername] = useState("");
@@ -106,12 +108,7 @@ function RegisterForm() {
   };
 
   const handleGoogleSignup = () => {
-    const backendUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
-    const googleEndpoint = new URL("/api/v1/auth/google", backendUrl);
-    if (returnTo && returnTo !== "/") {
-      googleEndpoint.searchParams.set("returnTo", returnTo);
-    }
-    window.location.href = googleEndpoint.toString();
+    redirectToGoogleSignIn(returnTo);
   };
 
   return (
