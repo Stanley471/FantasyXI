@@ -12,6 +12,17 @@ import {
   SquadLockedError,
   PlayerForValidation,
 } from "./squadValidator.js";
+import {
+  DEADLINE_TRANSACTION_OPTIONS,
+  assertGameweeksOpen,
+  lockSquadForUpdate,
+} from "./deadlineGuard.js";
+
+/** The earliest gameweek that has not finished: the next (or in-progress) deadline. */
+const NEXT_UNFINISHED_GAMEWEEK = {
+  where: { isFinished: false },
+  orderBy: { deadline: "asc" as const },
+};
 
 /**
  * Custom error thrown when a user attempts to modify a squad they do not own.
@@ -214,6 +225,11 @@ export class SquadService {
   /**
    * Updates a squad's lineup, captaincy, or transfers.
    * Throws SquadLockedError if the active gameweek deadline has passed.
+   *
+   * Deadline enforcement is race-free: the squad row is locked for the whole
+   * transaction, all state is re-read under that lock, and the deadline is
+   * re-checked against the database clock as the last step before commit.
+   * A request that raced the deadline is rolled back, never half-applied.
    */
   public async updateSquad(
     squadId: string,
@@ -235,8 +251,9 @@ export class SquadService {
       );
     }
 
-    // Check gameweek deadline
-    const currentGameweek = await prisma.gameweek.findFirst({
+    // Fast-fail deadline checks before taking any locks. They are repeated
+    // authoritatively inside the transaction below.
+    const currentGameweek = await this.db.gameweek.findFirst({
       where: { isCurrent: true },
     });
 
@@ -245,107 +262,136 @@ export class SquadService {
     }
 
     // Squads stay locked from the deadline lock until the gameweek is settled
-    const lockedGameweek = await prisma.gameweek.findFirst({
+    const lockedGameweek = await this.db.gameweek.findFirst({
       where: { isLocked: true, settledAt: null },
     });
     if (lockedGameweek) {
       throw new SquadLockedError(lockedGameweek.deadline);
     }
 
-    // Fetch players for validation
-    const playerIds = input.players.map((p) => p.playerId);
-    const dbPlayers = await prisma.player.findMany({
-      where: { id: { in: playerIds } },
-      select: {
-        id: true,
-        teamId: true,
-        position: true,
-        price: true,
-        displayName: true,
-      },
-    });
-
-    // Selling price of every player currently owned
-    const owned = new Map<number, any>(
-      existing.players.map((sp: any) => [sp.playerId, sp])
-    );
-    const sellPrices = new Map<number, number>(
-      existing.players.map((sp: any) => [
-        sp.playerId,
-        SquadService.calculateSellingPrice(Number(sp.purchasePrice), Number(sp.player.price)),
-      ])
-    );
-
-    // Kept players are valued at their selling price, new signings at current price,
-    // so the budget check becomes: bank + sales >= purchases
-    const playersForValidation: PlayerForValidation[] = dbPlayers.map((p) => ({
-      id: p.id,
-      teamId: p.teamId,
-      position: p.position,
-      price: owned.has(p.id) ? sellPrices.get(p.id)! : Number(p.price),
-      displayName: p.displayName,
-    }));
-
-    const totalSellValue = [...sellPrices.values()].reduce((sum, v) => sum + v, 0);
-    const availableFunds =
-      Math.round((Number(existing.budgetRemaining) + totalSellValue) * 10) / 10;
-
-    const validated = SquadValidator.validateSquad(
-      input.players,
-      playersForValidation,
-      availableFunds
-    );
-
-    const budgetRemaining = Math.round((availableFunds - validated.totalCost) * 10) / 10;
-    const playerMap = new Map(dbPlayers.map((p) => [p.id, p]));
-
-    // Work out transfers against the currently owned players
-    const newIds = new Set(playerIds);
-    const outgoing = existing.players
-      .filter((sp: any) => !newIds.has(sp.playerId))
-      .map((sp: any) => ({ id: sp.playerId, position: sp.player.position }));
-    const incoming = dbPlayers
-      .filter((p) => !owned.has(p.id))
-      .map((p) => ({ id: p.id, position: p.position }));
-    const transfers = SquadService.pairTransfers(outgoing, incoming);
-
-    let transferGameweek: { id: number } | null = null;
-    let transferCosts: number[] = [];
-    let freeTransfersLeft = existing.freeTransfers;
-
-    if (transfers.length > 0) {
-      // Transfers count towards the next gameweek whose deadline has not passed
-      const targetGameweek = await prisma.gameweek.findFirst({
-        where: { deadline: { gt: new Date() } },
-        orderBy: { deadline: "asc" },
-      });
-      if (!targetGameweek) {
-        throw new SquadValidationError("Transfers are closed: no upcoming gameweek");
-      }
-
-      let available = existing.freeTransfers;
-      if (
-        existing.freeTransfersGameweekId !== null &&
-        existing.freeTransfersGameweekId !== targetGameweek.id
-      ) {
-        const savedGameweek = await prisma.gameweek.findUnique({
-          where: { id: existing.freeTransfersGameweekId },
-        });
-        const elapsed = savedGameweek ? targetGameweek.fplId - savedGameweek.fplId : 1;
-        available = SquadService.rollFreeTransfers(existing.freeTransfers, elapsed);
-      }
-
-      transferGameweek = targetGameweek;
-      transferCosts = SquadService.calculateTransferCosts(transfers.length, available);
-      freeTransfersLeft = Math.max(0, available - transfers.length);
+    const nextGameweek = await this.db.gameweek.findFirst(NEXT_UNFINISHED_GAMEWEEK);
+    if (nextGameweek) {
+      SquadValidator.validateDeadline(nextGameweek.deadline);
     }
 
-    return prisma.$transaction(async (tx) => {
-      // 1. Update squad metadata, bank and free transfer balance
+    if (!Array.isArray(input?.players)) {
+      throw new SquadValidationError("players must be an array of squad selections");
+    }
+
+    return this.db.$transaction(async (tx: any) => {
+      // 1. Serialise concurrent edits of this squad and re-read it under the lock
+      await lockSquadForUpdate(tx, squadId);
+      const squad = await tx.squad.findUnique({
+        where: { id: squadId },
+        include: { players: { include: { player: true } } },
+      });
+      if (!squad) {
+        throw new SquadValidationError(`Squad ${squadId} not found`);
+      }
+
+      // The earliest unfinished gameweek governs every edit: once its deadline
+      // passes, edits are rejected (not rolled into the following gameweek)
+      // until it is finished, and transfers count towards it.
+      const governingGameweek = await tx.gameweek.findFirst(NEXT_UNFINISHED_GAMEWEEK);
+      if (governingGameweek) {
+        await assertGameweeksOpen(tx, [governingGameweek.id]);
+      }
+
+      // Fetch players for validation
+      const playerIds = input.players.map((p) => p.playerId);
+      const dbPlayers: Array<{
+        id: number;
+        teamId: number;
+        position: Position;
+        price: any;
+        displayName: string;
+      }> = await tx.player.findMany({
+        where: { id: { in: playerIds } },
+        select: {
+          id: true,
+          teamId: true,
+          position: true,
+          price: true,
+          displayName: true,
+        },
+      });
+
+      // Selling price of every player currently owned
+      const owned = new Map<number, any>(
+        squad.players.map((sp: any) => [sp.playerId, sp])
+      );
+      const sellPrices = new Map<number, number>(
+        squad.players.map((sp: any) => [
+          sp.playerId,
+          SquadService.calculateSellingPrice(Number(sp.purchasePrice), Number(sp.player.price)),
+        ])
+      );
+
+      // Kept players are valued at their selling price, new signings at current price,
+      // so the budget check becomes: bank + sales >= purchases
+      const playersForValidation: PlayerForValidation[] = dbPlayers.map((p) => ({
+        id: p.id,
+        teamId: p.teamId,
+        position: p.position,
+        price: owned.has(p.id) ? sellPrices.get(p.id)! : Number(p.price),
+        displayName: p.displayName,
+      }));
+
+      const totalSellValue = [...sellPrices.values()].reduce((sum, v) => sum + v, 0);
+      const availableFunds =
+        Math.round((Number(squad.budgetRemaining) + totalSellValue) * 10) / 10;
+
+      const validated = SquadValidator.validateSquad(
+        input.players,
+        playersForValidation,
+        availableFunds
+      );
+
+      const budgetRemaining = Math.round((availableFunds - validated.totalCost) * 10) / 10;
+      const playerMap = new Map(dbPlayers.map((p) => [p.id, p]));
+
+      // Work out transfers against the currently owned players
+      const newIds = new Set(playerIds);
+      const outgoing = squad.players
+        .filter((sp: any) => !newIds.has(sp.playerId))
+        .map((sp: any) => ({ id: sp.playerId, position: sp.player.position }));
+      const incoming = dbPlayers
+        .filter((p) => !owned.has(p.id))
+        .map((p) => ({ id: p.id, position: p.position }));
+      const transfers = SquadService.pairTransfers(outgoing, incoming);
+
+      let transferGameweek: { id: number; fplId: number } | null = null;
+      let transferCosts: number[] = [];
+      let freeTransfersLeft = squad.freeTransfers;
+
+      if (transfers.length > 0) {
+        const targetGameweek = governingGameweek;
+        if (!targetGameweek) {
+          throw new SquadValidationError("Transfers are closed: no upcoming gameweek");
+        }
+
+        let available = squad.freeTransfers;
+        if (
+          squad.freeTransfersGameweekId !== null &&
+          squad.freeTransfersGameweekId !== targetGameweek.id
+        ) {
+          const savedGameweek = await tx.gameweek.findUnique({
+            where: { id: squad.freeTransfersGameweekId },
+          });
+          const elapsed = savedGameweek ? targetGameweek.fplId - savedGameweek.fplId : 1;
+          available = SquadService.rollFreeTransfers(squad.freeTransfers, elapsed);
+        }
+
+        transferGameweek = targetGameweek;
+        transferCosts = SquadService.calculateTransferCosts(transfers.length, available);
+        freeTransfersLeft = Math.max(0, available - transfers.length);
+      }
+
+      // 2. Update squad metadata, bank and free transfer balance
       await tx.squad.update({
         where: { id: squadId },
         data: {
-          name: input.name ? input.name.trim() : existing.name,
+          name: input.name ? input.name.trim() : squad.name,
           budgetRemaining,
           ...(transferGameweek && {
             freeTransfers: freeTransfersLeft,
@@ -354,12 +400,12 @@ export class SquadService {
         },
       });
 
-      // 2. Remove sold players
+      // 3. Remove sold players
       await tx.squadPlayer.deleteMany({
         where: { squadId, playerId: { in: outgoing.map((p: { id: number }) => p.id) } },
       });
 
-      // 3. Update lineup of kept players, preserving their purchase price
+      // 4. Update lineup of kept players, preserving their purchase price
       for (const sel of input.players.filter((p) => owned.has(p.playerId))) {
         await tx.squadPlayer.update({
           where: { squadId_playerId: { squadId, playerId: sel.playerId } },
@@ -372,7 +418,7 @@ export class SquadService {
         });
       }
 
-      // 4. Insert new signings at their current price
+      // 5. Insert new signings at their current price
       await tx.squadPlayer.createMany({
         data: input.players
           .filter((sel) => !owned.has(sel.playerId))
@@ -387,7 +433,7 @@ export class SquadService {
           })),
       });
 
-      // 5. Transfer audit history
+      // 6. Transfer audit history
       if (transferGameweek) {
         await tx.squadTransfer.createMany({
           data: transfers.map((t, i) => ({
@@ -402,8 +448,7 @@ export class SquadService {
         });
       }
 
-      // Return updated squad with players
-      return tx.squad.findUnique({
+      const updated = await tx.squad.findUnique({
         where: { id: squadId },
         include: {
           players: {
@@ -416,7 +461,23 @@ export class SquadService {
           },
         },
       });
-    });
+
+      // 7. Authoritative deadline check, last before commit: late requests roll back
+      const stillLocked = await tx.gameweek.findFirst({
+        where: { isLocked: true, settledAt: null },
+      });
+      if (stillLocked) {
+        throw new SquadLockedError(stillLocked.deadline);
+      }
+      await assertGameweeksOpen(
+        tx,
+        [currentGameweek?.id, governingGameweek?.id].filter(
+          (id): id is number => typeof id === "number"
+        )
+      );
+
+      return updated;
+    }, DEADLINE_TRANSACTION_OPTIONS);
   }
 
   /**
@@ -500,15 +561,20 @@ export class SquadService {
     }
 
     try {
-      return await this.db.squadChipUsage.create({
-        data: {
-          squadId,
-          gameweekId,
-          chipType,
-          season: gameweek.season,
-          previousLineup,
-        },
-      });
+      return await this.db.$transaction(async (tx: any) => {
+        const usage = await tx.squadChipUsage.create({
+          data: {
+            squadId,
+            gameweekId,
+            chipType,
+            season: gameweek.season,
+            previousLineup,
+          },
+        });
+        // Authoritative deadline check at commit time: a chip that raced the deadline is rolled back
+        await assertGameweeksOpen(tx, [gameweekId]);
+        return usage;
+      }, DEADLINE_TRANSACTION_OPTIONS);
     } catch (error: any) {
       // Unique constraints enforce the chip rules under concurrent requests
       if (error?.code === "P2002") {
