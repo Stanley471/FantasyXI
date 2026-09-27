@@ -259,6 +259,9 @@ export default function LeaguesPage() {
           <p className="text-xs text-slate-400 mt-1">
             Compete in classic fantasy leagues. Prize pools are secured in Stellar Soroban escrow.
           </p>
+          <Link href="/leaderboard" className="mt-2 inline-block text-xs font-semibold text-emerald-400 hover:text-emerald-300">
+            See the global leaderboard &rarr;
+          </Link>
         </div>
 
         <div className="flex items-center gap-3">
