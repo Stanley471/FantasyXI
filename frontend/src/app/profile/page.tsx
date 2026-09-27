@@ -7,6 +7,7 @@ import { useAuth } from "@/context/AuthContext";
 import { api } from "@/lib/api";
 import { Squad, League, GameweekHistoryEntry } from "@/types";
 import { Button } from "@/components/ui/Button";
+import { SignInMethods } from "@/components/auth/SignInMethods";
 import {
   IconUser,
   IconFootball,
@@ -220,6 +221,9 @@ export default function ProfilePage() {
           </>
         )}
       </section>
+
+      {/* Email/password and Google sign-in management */}
+      <SignInMethods />
 
       {/* Account & Security Information */}
       <div className="bg-pitch-surface border border-pitch-border rounded-xl p-6 shadow-md space-y-4">

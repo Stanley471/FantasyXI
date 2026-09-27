@@ -24,6 +24,9 @@ import {
   UserRole,
 } from "@prisma/client";
 
+export { Role, Permission } from "../config/permissions.js";
+import type { Role } from "../config/permissions.js";
+
 export {
   Position,
   LeagueStatus,
@@ -86,7 +89,8 @@ export interface AuthUser {
   email: string;
   username: string;
   name?: string | null;
-  role: UserRole;
+  /** USER / MODERATOR / ADMIN for accounts, SERVICE for API-key callers */
+  role: Role;
 }
 
 /** Safe user representation returned across public and auth endpoints */
@@ -96,6 +100,11 @@ export interface SafeUser {
   username: string;
   name?: string | null;
   role: UserRole;
+  /** Sign-in methods available to the account (email/password and/or Google) */
+  authProviders: {
+    password: boolean;
+    google: boolean;
+  };
   createdAt: Date;
   updatedAt: Date;
 }

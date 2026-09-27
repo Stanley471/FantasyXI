@@ -949,6 +949,95 @@ mod test {
     }
 
     #[test]
+    fn test_partial_refund_multi_party_league() {
+        // 4 participants deposit into a league that is later cancelled. The
+        // admin refunds them in two separate batches (mirroring the
+        // backend's batched mass-refund job), and unrefunded participants
+        // must keep their deposit recorded until their own batch runs.
+        let (env, admin, token_addr, client) = setup_test();
+        let token_admin_client = token::StellarAssetClient::new(&env, &token_addr);
+        let token_client = token::Client::new(&env, &token_addr);
+
+        let u1 = Address::generate(&env);
+        let u2 = Address::generate(&env);
+        let u3 = Address::generate(&env);
+        let u4 = Address::generate(&env);
+
+        for user in [&u1, &u2, &u3, &u4] {
+            token_admin_client.mint(user, &50_000_000);
+        }
+
+        client.create_league(&admin, &1000, &50_000_000, &token_addr);
+        for user in [&u1, &u2, &u3, &u4] {
+            client.deposit(user, &1000);
+        }
+
+        let league = client.get_league(&1000).unwrap();
+        assert_eq!(league.total_deposited, 200_000_000);
+        assert_eq!(league.participant_count, 4);
+
+        // First batch: refund only u1 and u2.
+        let first_batch = vec![&env, u1.clone(), u2.clone()];
+        client.refund(&admin, &1000, &first_batch);
+
+        assert_eq!(token_client.balance(&u1), 50_000_000);
+        assert_eq!(token_client.balance(&u2), 50_000_000);
+        // Not yet refunded participants keep zero balance and their deposit
+        // record is still readable (a follow-up batch can still find them).
+        assert_eq!(token_client.balance(&u3), 0);
+        assert_eq!(token_client.balance(&u4), 0);
+        assert_eq!(client.get_deposit(&1000, &u3), 50_000_000);
+        assert_eq!(client.get_deposit(&1000, &u4), 50_000_000);
+
+        // The league is already flagged Cancelled after the first partial batch.
+        let mid_state = client.get_league(&1000).unwrap();
+        assert_eq!(mid_state.status, LeagueStatus::Cancelled);
+
+        // Re-running the first batch must be a no-op (deposit already removed).
+        client.refund(&admin, &1000, &first_batch);
+        assert_eq!(token_client.balance(&u1), 50_000_000);
+        assert_eq!(token_client.balance(&u2), 50_000_000);
+
+        // Second batch: refund the remaining participants.
+        let second_batch = vec![&env, u3.clone(), u4.clone()];
+        client.refund(&admin, &1000, &second_batch);
+
+        assert_eq!(token_client.balance(&u3), 50_000_000);
+        assert_eq!(token_client.balance(&u4), 50_000_000);
+        assert_eq!(client.get_deposit(&1000, &u3), 0);
+        assert_eq!(client.get_deposit(&1000, &u4), 0);
+    }
+
+    #[test]
+    fn test_refund_rejected_after_settlement() {
+        // Once a league has been settled, it must never be refundable -
+        // otherwise winners could be paid twice (settlement payouts plus a
+        // stray refund of already-cleared deposits).
+        let (env, admin, token_addr, client) = setup_test();
+        let token_admin_client = token::StellarAssetClient::new(&env, &token_addr);
+
+        let user1 = Address::generate(&env);
+        let treasury = Address::generate(&env);
+
+        token_admin_client.mint(&user1, &50_000_000);
+        client.create_league(&admin, &1001, &50_000_000, &token_addr);
+        client.deposit(&user1, &1001);
+
+        let winners = vec![
+            &env,
+            WinnerPayout {
+                winner: user1.clone(),
+                amount: 47_500_000,
+            },
+        ];
+        client.settle(&admin, &1001, &winners, &treasury, &2_500_000);
+
+        let participants = vec![&env, user1.clone()];
+        let result = client.try_refund(&admin, &1001, &participants);
+        assert_eq!(result, Err(Ok(EscrowError::AlreadySettled)));
+    }
+
+    #[test]
     fn test_multiple_assets_parallel_leagues() {
         let (env, admin, usdc_addr, client) = setup_test();
         let usdc_admin_client = token::StellarAssetClient::new(&env, &usdc_addr);

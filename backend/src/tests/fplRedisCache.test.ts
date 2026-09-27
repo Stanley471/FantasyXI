@@ -112,7 +112,7 @@ describe("FPL Redis Caching Layer (#42)", () => {
     globalThis.fetch = originalFetch;
   });
 
-  it("populates Redis cache on initial fetch with sensible TTL (5-15 mins)", async () => {
+  it("populates Redis cache on initial fetch with a 24-hour TTL for static player data", async () => {
     const client = new FplClient({ redis: mockRedis });
 
     const data = await client.getBootstrapStatic();
@@ -126,14 +126,11 @@ describe("FPL Redis Caching Layer (#42)", () => {
     const parsed = JSON.parse(cachedEntry);
     assert.equal(parsed.teams[0].name, "Arsenal");
 
-    // Verify TTL was set between 5 and 15 minutes (300 to 900 seconds)
+    // Verify TTL was set to 24 hours (86400 seconds) per issue #139
     const setCall = mockRedis.setCalls.find((c) => c.key === "fpl:cache:/bootstrap-static/");
     assert.ok(setCall, "Redis set should have been called");
     assert.equal(setCall.mode, "EX");
-    assert.ok(
-      setCall.ttl && setCall.ttl >= 300 && setCall.ttl <= 900,
-      `TTL should be between 300s and 900s, got ${setCall.ttl}`
-    );
+    assert.equal(setCall.ttl, 86400);
     assert.equal(setCall.ttl, FPL_CACHE_TTL.BOOTSTRAP_STATIC_SECONDS);
   });
 
@@ -162,8 +159,8 @@ describe("FPL Redis Caching Layer (#42)", () => {
     await client.getBootstrapStatic();
     assert.equal(fetchCallCount, 1);
 
-    // 2. Advance time past TTL (901 seconds) and clear client in-memory cache to test Redis expiry
-    mockRedis.advanceTime(901);
+    // 2. Advance time past the 24-hour TTL and clear client in-memory cache to test Redis expiry
+    mockRedis.advanceTime(86401);
     await client.clearCache(); // Clears memory cache, but redis keys will be tested for expiration
 
     // In mock redis, key has now expired
@@ -175,7 +172,7 @@ describe("FPL Redis Caching Layer (#42)", () => {
     assert.equal(fetchCallCount, 2, "External API should be called again after TTL expiration");
   });
 
-  it("caches fixtures with sensible TTL (10 minutes) and serves from cache", async () => {
+  it("caches fixtures with a 24-hour TTL and serves from cache", async () => {
     const client = new FplClient({ redis: mockRedis });
 
     const fixtures1 = await client.getFixtures();
@@ -191,7 +188,7 @@ describe("FPL Redis Caching Layer (#42)", () => {
     assert.equal(setCall.ttl, FPL_CACHE_TTL.FIXTURES_SECONDS);
   });
 
-  it("caches gameweek live stats with sensible TTL (5 minutes)", async () => {
+  it("caches gameweek live scores with a 60-second TTL per issue #139", async () => {
     const client = new FplClient({ redis: mockRedis });
 
     const live1 = await client.getGameweekLive(1);
@@ -204,7 +201,23 @@ describe("FPL Redis Caching Layer (#42)", () => {
 
     const setCall = mockRedis.setCalls.find((c) => c.key === "fpl:cache:/event/1/live/");
     assert.ok(setCall);
+    assert.equal(setCall.ttl, 60);
     assert.equal(setCall.ttl, FPL_CACHE_TTL.GAMEWEEK_LIVE_SECONDS);
+  });
+
+  it("expires live scores after 60 seconds and refetches", async () => {
+    const client = new FplClient({ redis: mockRedis });
+
+    await client.getGameweekLive(1);
+    assert.equal(fetchCallCount, 1);
+
+    mockRedis.advanceTime(61);
+    await client.clearCache();
+
+    assert.equal(await mockRedis.get("fpl:cache:/event/1/live/"), null);
+
+    await client.getGameweekLive(1);
+    assert.equal(fetchCallCount, 2, "Live scores should refetch once the 60s TTL has elapsed");
   });
 
   it("clearCache() deletes Redis keys and in-memory cache", async () => {

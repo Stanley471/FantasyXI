@@ -61,7 +61,7 @@ export const PlayerCard: React.FC<PlayerCardProps> = ({
   // Empty slot (when building or drafting)
   if (!player) {
     return (
-      <div ref={setNodeRef} className="relative flex flex-col items-center">
+      <div ref={setNodeRef} className="relative flex flex-col items-center" data-testid={`empty-slot-${dropId}`}>
         <button
           type="button"
           onClick={onClick}
@@ -106,7 +106,12 @@ export const PlayerCard: React.FC<PlayerCardProps> = ({
   const jerseyStyle = getJerseyStyle(player.position);
 
   return (
-    <div ref={setNodeRef} className={`relative flex flex-col items-center ${isDragging && !isOverlay ? 'opacity-30' : ''}`}>
+    <div
+      ref={setNodeRef}
+      className={`relative flex flex-col items-center ${isDragging && !isOverlay ? 'opacity-30' : ''}`}
+      data-testid={`player-card-${player.id}`}
+      data-starter={isStarter ? "true" : "false"}
+    >
       <button
         type="button"
         onClick={onClick}

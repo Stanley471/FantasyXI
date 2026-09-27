@@ -377,10 +377,16 @@ export class ScoringService {
 
     const statsMap = new Map<number, { minutes: number; totalPoints: number }>();
     for (const st of statsList) {
-      statsMap.set(st.playerId, {
-        minutes: st.minutes,
-        totalPoints: st.totalPoints,
-      });
+      const existing = statsMap.get(st.playerId);
+      if (existing) {
+        existing.minutes += st.minutes;
+        existing.totalPoints += st.totalPoints;
+      } else {
+        statsMap.set(st.playerId, {
+          minutes: st.minutes,
+          totalPoints: st.totalPoints,
+        });
+      }
     }
 
     const formattedPlayers = squad.players.map((sp) => ({

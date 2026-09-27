@@ -20,6 +20,7 @@ import { prisma } from "../config/db.js";
 import { stellarConfig } from "../config/stellar.js";
 import { StellarService, stellarService } from "../services/financial/stellarService.js";
 import { leagueIdPrefixFromContractId } from "../services/financial/contractLeagueId.js";
+import { EmailService, emailService } from "../services/email/emailService.js";
 import {
   FinancialAuditAction,
   FinancialAuditRecorder,
@@ -39,6 +40,7 @@ export interface EventIndexerOptions {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   db?: any;
   stellar?: StellarService;
+  email?: EmailService;
   audit?: FinancialAuditRecorder;
   pollIntervalMs?: number;
   baseBackoffMs?: number;
@@ -52,6 +54,7 @@ export class EscrowEventIndexer {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly db: any;
   private readonly stellar: StellarService;
+  private readonly email: EmailService;
   private readonly audit: FinancialAuditRecorder;
   private readonly pollIntervalMs: number;
   private readonly baseBackoffMs: number;
@@ -65,6 +68,7 @@ export class EscrowEventIndexer {
   constructor(options: EventIndexerOptions = {}) {
     this.db = options.db ?? prisma;
     this.stellar = options.stellar ?? stellarService;
+    this.email = options.email ?? emailService;
     this.audit = options.audit ?? financialAuditLog;
     this.pollIntervalMs = options.pollIntervalMs ?? 5_000;
     this.baseBackoffMs = options.baseBackoffMs ?? 1_000;
@@ -208,6 +212,9 @@ export class EscrowEventIndexer {
               { user: { wallet: { stellarAddress: participant } } },
             ],
           },
+          include: {
+            user: true,
+          },
         });
         if (!member) {
           console.warn(
@@ -224,6 +231,8 @@ export class EscrowEventIndexer {
           return false;
         }
         const wasConfirmed = member.paymentStatus === PaymentStatus.PAYMENT_CONFIRMED;
+
+        const isAlreadyConfirmed = member.paymentStatus === PaymentStatus.PAYMENT_CONFIRMED;
 
         await this.db.$transaction([
           this.db.leagueMember.update({
@@ -259,6 +268,19 @@ export class EscrowEventIndexer {
           }),
         ]);
 
+        if (!isAlreadyConfirmed && member.user?.email) {
+          try {
+            await this.email.sendDepositConfirmation({
+              to: member.user.email,
+              username: member.user.username || member.user.name || "Manager",
+              leagueName: league.name,
+              amount: Number(amountStroops) / 10_000_000,
+              txHash: event.txHash,
+            });
+          } catch (err) {
+            console.error("[indexer] Failed to send deposit email:", err);
+          }
+        }
         // Replayed events re-apply the same state; only audit the first confirmation
         if (!wasConfirmed) {
           this.audit.record({

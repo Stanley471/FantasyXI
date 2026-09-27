@@ -32,6 +32,7 @@ describe("Background Job Queue & Matchday Lifecycle", () => {
     assert.equal(byName.get("deadline-lock"), "* * * * *");
     assert.ok(byName.has("gameweek-settlement"));
     assert.ok(byName.has("league-refunds"));
+    assert.equal(byName.get("price-sync"), "0 3 * * *");
   });
 
   it("records success, failure and retry metrics", async () => {

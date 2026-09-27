@@ -340,9 +340,12 @@ npm run build && npm start
 ## Security & Regulatory Compliance
 
 - **Non-Custodial Architecture**: FantasyXI never takes possession or custody of user stablecoins. Funds reside exclusively in the open-source Soroban smart contract escrow partition until settlement.
+- **Google Sign-In & Account Linking**: Managers can sign in with email/password or Google (OAuth 2.0 / OpenID Connect); both open the same account. A verified Google email matching an existing account is linked automatically, and signed-in managers can link or unlink Google (and add a password to a Google-only account) from their profile. The OAuth state is HMAC-signed and bound to the initiating browser with an HttpOnly nonce cookie, return paths are restricted to same-site paths, and the issued JWT is handed to the frontend in the URL fragment so it never reaches server logs.
 - **Envelope XDR Verification**: Payments are verified on-chain by decoding `invokeHostFunction` transaction envelopes, matching contract ID, function call, sender public key, and league ID.
 - **SQL & Injection Protection**: Database interactions are performed using Prisma ORM with parameterized queries.
 - **Rate Limiting & Authentication**: Endpoints requiring user context are guarded by JWT authorization middleware with CSRF-protected OAuth state tokens.
+- **Role-Based Access Control**: Every protected endpoint declares the permission it needs via `requirePermission`; the role-to-permission matrix lives in [`backend/src/config/permissions.ts`](backend/src/config/permissions.ts). Roles are `USER` (managers), `MODERATOR`, `ADMIN` and `SERVICE` (automated callers). Elevated permissions are re-checked against the database on each request, so demoting an account takes effect immediately. A route audit test fails the build if a non-public endpoint is added without a permission guard.
+- **Service Credentials**: Schedulers and monitoring authenticate with the `X-Service-Key` header using keys from `SERVICE_API_KEYS` (`name:key` pairs, keys of at least 32 characters). The `SERVICE` role can run syncs, score calculation, reconciliation and queue health checks, but cannot act as a manager, and it can never be claimed through a user JWT.
 - Consult [`REGULATORY_CONSIDERATIONS.md`](file:///c:/ReactApps/FantasyXI/REGULATORY_CONSIDERATIONS.md) for legal classifications, skill-game exemptions, and AML operational considerations.
 
 ---

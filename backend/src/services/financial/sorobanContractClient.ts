@@ -18,8 +18,10 @@ import dotenv from "dotenv";
 import {
   Account,
   Address,
+  authorizeEntry,
   BASE_FEE,
   Contract,
+  inspectAuthEntry,
   Keypair,
   Networks,
   Operation,
@@ -271,6 +273,24 @@ export class SorobanContractClient {
     return new Address(value).toScVal();
   }
 
+  /** WinnerPayout struct -> ScMap with keys in lexicographic order. */
+  private static winnersScVal(winners: WinnerPayoutParam[]): xdr.ScVal {
+    return xdr.ScVal.scvVec(
+      winners.map((w) =>
+        xdr.ScVal.scvMap([
+          new xdr.ScMapEntry({
+            key: xdr.ScVal.scvSymbol("amount"),
+            val: SorobanContractClient.i128(w.amount),
+          }),
+          new xdr.ScMapEntry({
+            key: xdr.ScVal.scvSymbol("winner"),
+            val: SorobanContractClient.address(w.winner),
+          }),
+        ])
+      )
+    );
+  }
+
   /**
    * One-time contract initialization with admin and USDC token.
    */
@@ -326,21 +346,7 @@ export class SorobanContractClient {
     platformTreasury: string,
     platformFeeStroops: bigint
   ): Promise<InvocationResult> {
-    // WinnerPayout struct -> ScMap with keys in lexicographic order
-    const winnersScVal = xdr.ScVal.scvVec(
-      winners.map((w) =>
-        xdr.ScVal.scvMap([
-          new xdr.ScMapEntry({
-            key: xdr.ScVal.scvSymbol("amount"),
-            val: SorobanContractClient.i128(w.amount),
-          }),
-          new xdr.ScMapEntry({
-            key: xdr.ScVal.scvSymbol("winner"),
-            val: SorobanContractClient.address(w.winner),
-          }),
-        ])
-      )
-    );
+    const winnersScVal = SorobanContractClient.winnersScVal(winners);
 
     return this.invoke(adminSecret, this.escrowContractId, "settle", [
       SorobanContractClient.address(adminPublic),
@@ -364,14 +370,7 @@ export class SorobanContractClient {
     if (!/^[0-9a-f]{64}$/i.test(proofHash)) {
       return this.failure("Settlement proof must be a 32-byte hexadecimal hash");
     }
-    const winnersScVal = xdr.ScVal.scvVec(
-      winners.map((w) =>
-        xdr.ScVal.scvMap([
-          new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("amount"), val: SorobanContractClient.i128(w.amount) }),
-          new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("winner"), val: SorobanContractClient.address(w.winner) }),
-        ])
-      )
-    );
+    const winnersScVal = SorobanContractClient.winnersScVal(winners);
     return this.invoke(adminSecret, this.escrowContractId, "settle_with_proof", [
       SorobanContractClient.address(adminPublic),
       SorobanContractClient.u64(leagueId),
@@ -380,6 +379,127 @@ export class SorobanContractClient {
       SorobanContractClient.i128(platformFeeStroops),
       nativeToScVal(Buffer.from(proofHash, "hex"), { type: "bytes" }),
     ]);
+  }
+
+  /**
+   * Settles a league and routes the platform fee to the treasury through the
+   * contract's M-of-N multi-sig gate (`settle_with_multisig`), instead of the
+   * single-admin-secret `settle` path.
+   *
+   * Every address in `approverSecrets` is required to authorize the invocation
+   * (the contract itself calls `require_auth()` per approved signer, see
+   * `authorize_signers` in contracts/src/lib.rs), so this method collects a
+   * signed Soroban authorization entry per configured signer before the
+   * transaction is assembled and submitted. `requiredThreshold` mirrors the
+   * on-chain `AdminConfig.threshold` and is checked locally first so an
+   * under-signed withdrawal never reaches the network - the contract enforces
+   * the same rule independently as the source of truth.
+   *
+   * The first entry in `approverSecrets` also pays the transaction fee and
+   * submits it (one of the M signers proposes the withdrawal once every
+   * required approval has been collected out of band).
+   */
+  public async settleWithMultisig(
+    approverSecrets: string[],
+    leagueId: number | bigint,
+    winners: WinnerPayoutParam[],
+    platformTreasury: string,
+    platformFeeStroops: bigint,
+    requiredThreshold: number
+  ): Promise<InvocationResult> {
+    if (requiredThreshold < 1) {
+      return this.failure("Treasury multisig threshold must be at least 1");
+    }
+    if (approverSecrets.length < requiredThreshold) {
+      return this.failure(
+        `Insufficient signatures for treasury withdrawal: ${approverSecrets.length} of ${requiredThreshold} required signer(s) provided`
+      );
+    }
+
+    try {
+      const approverKeypairs = approverSecrets.map((secret) => Keypair.fromSecret(secret));
+      const submitterKeypair = approverKeypairs[0];
+      const approvalsScVal = xdr.ScVal.scvVec(
+        approverKeypairs.map((kp) => SorobanContractClient.address(kp.publicKey()))
+      );
+      const winnersScVal = SorobanContractClient.winnersScVal(winners);
+      const args = [
+        approvalsScVal,
+        SorobanContractClient.u64(leagueId),
+        winnersScVal,
+        SorobanContractClient.address(platformTreasury),
+        SorobanContractClient.i128(platformFeeStroops),
+      ];
+
+      let account = await this.server.getAccount(submitterKeypair.publicKey());
+      let tx = this.buildInvocation(account, this.escrowContractId, "settle_with_multisig", args);
+      let simulation = await this.server.simulateTransaction(tx);
+
+      if (rpc.Api.isSimulationError(simulation)) {
+        return this.failure(`Simulation failed: ${simulation.error}`);
+      }
+
+      if (rpc.Api.isSimulationRestore(simulation)) {
+        const restored = await this.restoreFootprint(submitterKeypair, simulation.restorePreamble);
+        if (!restored.success) {
+          return this.failure(`Footprint restoration failed: ${restored.error}`, restored.txHash);
+        }
+        account = await this.server.getAccount(submitterKeypair.publicKey());
+        tx = this.buildInvocation(account, this.escrowContractId, "settle_with_multisig", args);
+        simulation = await this.server.simulateTransaction(tx);
+        if (rpc.Api.isSimulationError(simulation)) {
+          return this.failure(`Simulation failed: ${simulation.error}`);
+        }
+      }
+
+      const successSim = simulation as rpc.Api.SimulateTransactionSuccessResponse;
+      const rawAuthEntries = successSim.result?.auth ?? [];
+      const latestLedger = await this.server.getLatestLedger();
+      const validUntilLedgerSeq = latestLedger.sequence + 100;
+
+      const signedAuthEntries = await Promise.all(
+        rawAuthEntries.map(async (entry) => {
+          const info = inspectAuthEntry(entry);
+          if (!info.address) {
+            // Source-account credentials carry no separate signature.
+            return entry;
+          }
+          const keypair = approverKeypairs.find((kp) => kp.publicKey() === info.address);
+          if (!keypair) {
+            throw new Error(
+              `No approving signer secret was supplied for required treasury signer ${info.address}`
+            );
+          }
+          return authorizeEntry(entry, keypair, validUntilLedgerSeq, this.networkPassphrase);
+        })
+      );
+
+      const invokeOp = tx.operations[0] as Operation.InvokeHostFunction;
+      const freshAccount = await this.server.getAccount(submitterKeypair.publicKey());
+      const rebuiltTx = new TransactionBuilder(freshAccount, {
+        fee: tx.fee,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          Operation.invokeHostFunction({
+            func: invokeOp.func,
+            auth: signedAuthEntries,
+          })
+        )
+        .setTimeout(30)
+        .build();
+
+      const resimulated = await this.server.simulateTransaction(rebuiltTx);
+      if (rpc.Api.isSimulationError(resimulated)) {
+        return this.failure(`Simulation failed after attaching signatures: ${resimulated.error}`);
+      }
+
+      const prepared = rpc.assembleTransaction(rebuiltTx, resimulated).build();
+      prepared.sign(submitterKeypair);
+      return await this.sendAndPoll(prepared);
+    } catch (error) {
+      return this.failure((error as Error).message);
+    }
   }
 
   /**

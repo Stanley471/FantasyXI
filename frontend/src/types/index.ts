@@ -61,6 +61,12 @@ export interface User {
   email: string;
   username: string;
   name?: string | null;
+  role?: "USER" | "MODERATOR" | "ADMIN";
+  /** Sign-in methods linked to the account; the same user whichever one is used */
+  authProviders?: {
+    password: boolean;
+    google: boolean;
+  };
   createdAt: string;
   updatedAt?: string;
 }

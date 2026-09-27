@@ -14,7 +14,8 @@ import {
   IconChevronDown,
   IconChevronUp,
 } from "@/components/ui/Icons";
-import { depositToSorobanEscrow } from "@/lib/stellar/sorobanDeposit";
+import { depositToSorobanEscrow, SorobanDepositTimeoutError } from "@/lib/stellar/sorobanDeposit";
+import { mapDepositErrorToMessage } from "@/lib/stellar/depositErrorMessage";
 
 export interface PaymentModalProps {
   isOpen: boolean;
@@ -70,6 +71,10 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const [connectedAccount, setConnectedAccount] = useState<string | null>(null);
   const [confirmedTxHash, setConfirmedTxHash] = useState<string | null>(null);
   const [showWalletPicker, setShowWalletPicker] = useState<boolean>(false);
+  // A deposit that was signed and submitted but whose confirmation we lost track of
+  // (network drop / RPC timeout). Retrying must re-check this hash, never resubmit.
+  const [pendingTxHash, setPendingTxHash] = useState<string | null>(null);
+  const [isReconciling, setIsReconciling] = useState<boolean>(false);
   const {
     wallets,
     selectedWallet,
@@ -95,6 +100,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       setIsLoadingReq(true);
       setErrorMsg(null);
       setStep("idle");
+      setPendingTxHash(null);
       try {
         const res = await api.get<{ success: boolean; data: PaymentRequirementData }>(
           `/api/v1/leagues/${leagueId}/payment-requirement?squadId=${squadId}`
@@ -139,6 +145,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     }
 
     setErrorMsg(null);
+    setPendingTxHash(null);
     setStep("connecting");
     setStatusMessage("Preparing wallet transaction...");
 
@@ -193,16 +200,55 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       }
     } catch (err: unknown) {
       setStep("idle");
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("User declined") || msg.includes("rejected")) {
-        setErrorMsg("Signature request was rejected in the selected wallet.");
-      } else if (msg.includes("trustline") || msg.includes("balance")) {
-        setErrorMsg(
-          "Insufficient Testnet USDC balance or missing trustline in Freighter."
-        );
-      } else {
-        setErrorMsg(msg);
+
+      if (err instanceof SorobanDepositTimeoutError) {
+        // The deposit may have actually succeeded on-chain; keep the hash around so
+        // "retry" re-checks it via the backend instead of signing a brand new payment.
+        setPendingTxHash(err.txHash);
+        setErrorMsg(err.message);
+        return;
       }
+
+      setErrorMsg(mapDepositErrorToMessage(err));
+    }
+  };
+
+  /**
+   * Retry path for a deposit whose confirmation timed out client-side. Re-checks the
+   * Soroban escrow contract for this member's deposit instead of signing a new
+   * transaction, so a slow confirmation can never result in a double payment.
+   */
+  const handleReconcileRetry = async () => {
+    setErrorMsg(null);
+    setIsReconciling(true);
+    try {
+      const res = await api.post<{
+        success: boolean;
+        message: string;
+        data?: { txHash?: string };
+      }>(`/api/v1/leagues/${leagueId}/reconcile-deposit`);
+
+      if (res?.success) {
+        setStep("success");
+        setConfirmedTxHash(pendingTxHash);
+        setTimeout(() => {
+          onPaymentSuccess?.({ txHash: pendingTxHash || "" });
+          onClose();
+        }, 2200);
+      } else {
+        setErrorMsg(
+          res?.message ||
+            "No confirmed deposit was found yet. If you just submitted the transaction, wait a few seconds and retry."
+        );
+      }
+    } catch (err: unknown) {
+      if (err instanceof ApiError) {
+        setErrorMsg(err.message || "Could not verify your deposit. Please retry.");
+      } else {
+        setErrorMsg("Could not reach the FantasyXI backend to reconcile your deposit.");
+      }
+    } finally {
+      setIsReconciling(false);
     }
   };
 
@@ -404,8 +450,32 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                 </div>
               )}
 
+              {/* Retry state: a deposit whose confirmation timed out. Never resubmits a
+                  new payment — only re-checks the escrow contract for the same deposit. */}
+              {!isWorking && pendingTxHash && (
+                <div className="p-4 rounded-xl bg-amber-950/20 border border-amber-500/30 space-y-3">
+                  <p className="text-xs text-amber-300 font-semibold">
+                    Your transaction may still be confirming on-chain.
+                  </p>
+                  <div className="p-2.5 rounded-lg bg-slate-950/80 border border-slate-800 text-[11px] font-mono text-slate-400 break-all">
+                    Tx: {pendingTxHash}
+                  </div>
+                  <Button
+                    type="button"
+                    variant="primary"
+                    size="lg"
+                    onClick={handleReconcileRetry}
+                    isLoading={isReconciling}
+                    disabled={isReconciling}
+                    className="w-full justify-center uppercase font-bold tracking-wide text-xs py-3.5"
+                  >
+                    Retry: Check Deposit Status
+                  </Button>
+                </div>
+              )}
+
               {/* Unified wallet connection and deposit action */}
-              {!isWorking && (
+              {!isWorking && !pendingTxHash && (
                 <div className="space-y-2.5 pt-1">
                   {selectedWallet && publicKey ? (
                     <div className="flex items-center justify-between gap-3 p-3 rounded-lg bg-emerald-950/20 border border-emerald-500/30">

@@ -1,9 +1,11 @@
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import apiV1Router from "./routes/index.js";
+import app from "./app.js";
 import { startJobQueue, stopJobQueue, getQueueHealth } from "./queues/jobQueue.js";
 import { apiRateLimiter } from "./middleware/rateLimiter.js";
+import { requireAuth, requirePermission } from "./middleware/authMiddleware.js";
+import { Permission } from "./types/index.js";
 import { ApolloServer } from "@apollo/server";
 import { expressMiddleware } from "@as-integrations/express5";
 import DataLoader from "dataloader";
@@ -16,7 +18,6 @@ import { typeDefs } from "./graphql/schema.js";
 
 dotenv.config();
 
-const app = express();
 const apolloServer = new ApolloServer({ typeDefs, resolvers });
 
 // Trust reverse proxies (Cloudflare, Nginx, ALB) for accurate client IP rate limiting
@@ -55,62 +56,43 @@ app.get("/api/health", (_req: Request, res: Response) => {
   });
 });
 
-app.get("/api/health/queues", async (_req: Request, res: Response, next: NextFunction) => {
-  try {
-    const health = await getQueueHealth();
-    res.status(health.running ? 200 : 503).json({
-      success: health.running,
-      data: health,
+// Queue internals are operational data: staff and SERVICE (e.g. monitoring) only
+app.get(
+  "/api/health/queues",
+  requireAuth,
+  requirePermission(Permission.SYSTEM_HEALTH_READ),
+  async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+      const health = await getQueueHealth();
+      res.status(health.running ? 200 : 503).json({
+        success: health.running,
+        data: health,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// Replica topology and lag are operational data, like queue health
+app.get(
+  "/api/health/replicas",
+  requireAuth,
+  requirePermission(Permission.SYSTEM_HEALTH_READ),
+  (_req: Request, res: Response) => {
+    const replicas = getReadReplicaStatus();
+    res.json({
+      success: true,
+      data: {
+        enabled: replicas.length > 0,
+        appRegion: process.env.APP_REGION ?? null,
+        replicas,
+      },
       timestamp: new Date().toISOString(),
     });
-  } catch (error) {
-    next(error);
   }
-});
-
-app.get("/api/health/replicas", (_req: Request, res: Response) => {
-  const replicas = getReadReplicaStatus();
-  res.json({
-    success: true,
-    data: {
-      enabled: replicas.length > 0,
-      appRegion: process.env.APP_REGION ?? null,
-      replicas,
-    },
-    timestamp: new Date().toISOString(),
-  });
-});
-
-// API v1 Routes
-app.use("/api/v1", apiV1Router);
-app.use("/api", apiV1Router);
-
-
-// ============================================================
-// Global error handler
-// ============================================================
-
-/**
- * Express error-handling middleware.
- *
- * Laravel equivalent: This is like your app/Exceptions/Handler.php —
- * a single place that catches all unhandled errors and returns a
- * consistent JSON response.
- *
- * The 4-parameter signature (err, req, res, next) tells Express
- * this is an error handler, not a regular middleware.
- */
-app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
-  console.error("Unhandled error:", err);
-
-  res.status(500).json({
-    success: false,
-    message:
-      process.env.NODE_ENV === "production"
-        ? "Internal server error"
-        : err.message,
-  });
-});
+);
 
 // ============================================================
 // Start server

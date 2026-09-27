@@ -47,6 +47,28 @@ export interface DepositResult {
   ledgerSeq?: number;
 }
 
+/**
+ * Raised when a deposit was signed and submitted to the network but its final
+ * status could not be confirmed before we stopped polling (RPC latency or a
+ * dropped connection). The transaction may still succeed on-chain, so callers
+ * must not treat this the same as a rejected or failed transaction: retrying
+ * the deposit from scratch could double-spend. `txHash` lets the caller check
+ * status again later (e.g. via a backend reconciliation endpoint) instead of
+ * resubmitting.
+ */
+export class SorobanDepositTimeoutError extends Error {
+  public readonly txHash: string;
+
+  constructor(txHash: string) {
+    super(
+      "Your transaction was submitted but we could not confirm its status before timing out. " +
+        "It may still succeed on-chain — click retry to check its status again."
+    );
+    this.name = "SorobanDepositTimeoutError";
+    this.txHash = txHash;
+  }
+}
+
 const DEFAULT_SOROBAN_RPC =
   process.env.NEXT_PUBLIC_STELLAR_SOROBAN_RPC_URL ||
   "https://soroban-testnet.stellar.org";
@@ -200,6 +222,13 @@ export async function depositToSorobanEscrow(
       }
       // Network hiccup during poll - continue
     }
+  }
+
+  if (confirmedLedgerSeq === undefined) {
+    // Exhausted every poll attempt without a SUCCESS or FAILED status. The transaction
+    // is still "in flight" from our perspective — do not report success, and do not let
+    // the caller silently treat this as a confirmed deposit.
+    throw new SorobanDepositTimeoutError(txHash);
   }
 
   onProgress?.("Transaction confirmed on-chain!");

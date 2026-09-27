@@ -146,15 +146,29 @@ describe("FPL Normalizer", () => {
         bonus: 3,
         total_points: 13,
       },
+      explain: [
+        {
+          fixture: 12,
+          stats: [
+            { identifier: "minutes", points: 2, value: 90 },
+            { identifier: "goals_scored", points: 8, value: 2 },
+            { identifier: "assists", points: 3, value: 1 },
+            { identifier: "bonus", points: 3, value: 3 }
+          ]
+        }
+      ]
     };
 
-    const stats = normalizePlayerStats(raw);
+    const statsArray = normalizePlayerStats(raw);
+    assert.equal(statsArray.length, 1);
+    const stats = statsArray[0];
     assert.equal(stats.playerFplId, 254);
+    assert.equal(stats.fixtureFplId, 12);
     assert.equal(stats.minutes, 90);
     assert.equal(stats.goals, 2);
     assert.equal(stats.assists, 1);
     assert.equal(stats.cleanSheet, false);
     assert.equal(stats.bonus, 3);
-    assert.equal(stats.totalPoints, 13);
+    assert.equal(stats.totalPoints, 16); // 2 + 8 + 3 + 3 = 16 (test logic is just sum of points)
   });
 });

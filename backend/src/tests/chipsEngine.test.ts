@@ -124,6 +124,13 @@ describe("Chips Engine — Activation & Deadline Locking", () => {
       ],
       budgetRemaining: 1.5,
     };
+    const gameweek5 = () => ({
+      id: 5,
+      name: "Gameweek 5",
+      season: "2026/27",
+      deadline: options.deadline ?? future,
+      isLocked: options.isLocked ?? false,
+    });
     const db: any = {
       state,
       squad: {
@@ -136,16 +143,8 @@ describe("Chips Engine — Activation & Deadline Locking", () => {
         },
       },
       gameweek: {
-        findUnique: async ({ where }: any) =>
-          where.id === 5
-            ? {
-                id: 5,
-                name: "Gameweek 5",
-                season: "2026/27",
-                deadline: options.deadline ?? future,
-                isLocked: options.isLocked ?? false,
-              }
-            : null,
+        findUnique: async ({ where }: any) => (where.id === 5 ? gameweek5() : null),
+        findMany: async ({ where }: any) => (where.id.in.includes(5) ? [gameweek5()] : []),
       },
       squadChipUsage: {
         findUnique: async ({ where }: any) => {
@@ -177,6 +176,8 @@ describe("Chips Engine — Activation & Deadline Locking", () => {
           state.squadPlayers = data.map(({ squadId: _s, ...p }: any) => p);
         },
       },
+      // Row locks are no-ops here; clock_timestamp() reads the real clock
+      $queryRaw: async () => [{ now: new Date() }],
       $transaction: async (fn: any) => fn(db),
     };
     return db;

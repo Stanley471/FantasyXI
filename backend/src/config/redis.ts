@@ -1,4 +1,4 @@
-import Redis, { Redis as RedisType } from "ioredis";
+import { Redis, type Redis as RedisType, type RedisOptions } from "ioredis";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -48,7 +48,7 @@ export function createRedisClient(configOverride?: Partial<RedisConfig>): RedisT
     return null;
   }
 
-  const clientOptions: import("ioredis").RedisOptions = {
+  const clientOptions: RedisOptions = {
     lazyConnect: true,
     maxRetriesPerRequest: 1,
     connectTimeout: 2000,
