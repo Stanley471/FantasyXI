@@ -5,7 +5,10 @@ import {
   MembershipStatus,
   PaymentStatus,
   ScoringType,
+  LeagueTierMovement,
   CreateLeagueInput,
+  CreateLeagueTierGroupInput,
+  CreateLeagueTierInput,
   LeagueStandingsEntry,
   H2HStandingsEntry,
   LeagueSearchFilters,
@@ -75,13 +78,315 @@ export interface LeagueSearchResult<T> {
 
 export class LeagueService {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  constructor(private readonly db: any = prisma) {}
+  constructor(private readonly db: any = prisma) { }
 
   /**
    * Generates a unique, URL-safe 6-character alphanumeric invite code.
    */
   public static generateInviteCode(): string {
     return crypto.randomBytes(4).toString("hex").toUpperCase().slice(0, 6);
+  }
+
+  public static slugify(value: string): string {
+    return value
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 60) || "tier";
+  }
+
+  public static nextSeasonKey(currentSeason: string): string {
+    const compact = currentSeason.trim();
+    const match = compact.match(/^(\d{4})(?:\/(\d{2}))?$/);
+    if (!match) {
+      return compact;
+    }
+    const startYear = Number(match[1]);
+    if (match[2]) {
+      const endYear = Number(`20${match[2]}`);
+      return `${startYear + 1}/${String((endYear + 1) % 100).padStart(2, "0")}`;
+    }
+    return `${startYear + 1}`;
+  }
+
+  public async createLeagueTierGroup(input: CreateLeagueTierGroupInput) {
+    const season = input.season?.trim();
+    if (!season) {
+      throw new LeagueValidationError("Tier group season is required");
+    }
+
+    const name = input.name?.trim();
+    if (!name) {
+      throw new LeagueValidationError("Tier group name is required");
+    }
+
+    const slug = (input.slug ?? LeagueService.slugify(name)).trim();
+    if (!slug) {
+      throw new LeagueValidationError("Tier group slug is required");
+    }
+
+    return this.db.leagueTierGroup.create({
+      data: {
+        name,
+        season,
+        slug,
+        description: input.description?.trim() || null,
+        isActive: input.isActive ?? true,
+      },
+    });
+  }
+
+  public async createLeagueTier(input: CreateLeagueTierInput) {
+    const group = await this.db.leagueTierGroup.findUnique({
+      where: { id: input.groupId },
+    });
+    if (!group) {
+      throw new LeagueValidationError("Tier group not found");
+    }
+
+    const name = input.name?.trim();
+    if (!name) {
+      throw new LeagueValidationError("Tier name is required");
+    }
+
+    const rank = Number(input.rank);
+    if (!Number.isInteger(rank) || rank <= 0) {
+      throw new LeagueValidationError("Tier rank must be a positive integer");
+    }
+
+    const slug = (input.slug ?? LeagueService.slugify(name)).trim();
+    if (!slug) {
+      throw new LeagueValidationError("Tier slug is required");
+    }
+
+    if (input.promotionTargetTierId) {
+      const target = await this.db.leagueTier.findFirst({
+        where: { id: input.promotionTargetTierId, groupId: input.groupId },
+      });
+      if (!target) {
+        throw new LeagueValidationError("Promotion target tier does not belong to this group");
+      }
+    }
+
+    if (input.relegationTargetTierId) {
+      const target = await this.db.leagueTier.findFirst({
+        where: { id: input.relegationTargetTierId, groupId: input.groupId },
+      });
+      if (!target) {
+        throw new LeagueValidationError("Relegation target tier does not belong to this group");
+      }
+    }
+
+    if (input.promotionTargetTierId === input.relegationTargetTierId) {
+      throw new LeagueValidationError("A tier cannot promote to and be relegated to the same target");
+    }
+
+    return this.db.leagueTier.create({
+      data: {
+        groupId: input.groupId,
+        name,
+        slug,
+        rank,
+        description: input.description?.trim() || null,
+        promotionTargetTierId: input.promotionTargetTierId || null,
+        relegationTargetTierId: input.relegationTargetTierId || null,
+      },
+    });
+  }
+
+  public async ensureLeagueSeason(
+    leagueId: string,
+    season: string,
+    tierGroupId?: string | null,
+    tierId?: string | null,
+    previousSeasonId?: string | null
+  ) {
+    const existing = await this.db.leagueSeason.findUnique({
+      where: { leagueId_season: { leagueId, season } },
+    });
+
+    if (existing) {
+      if (tierGroupId || tierId || previousSeasonId) {
+        return this.db.leagueSeason.update({
+          where: { id: existing.id },
+          data: {
+            tierGroupId: tierGroupId ?? existing.tierGroupId,
+            tierId: tierId ?? existing.tierId,
+            previousSeasonId: previousSeasonId ?? existing.previousSeasonId,
+          },
+        });
+      }
+      return existing;
+    }
+
+    return this.db.leagueSeason.create({
+      data: {
+        leagueId,
+        season,
+        tierGroupId: tierGroupId ?? null,
+        tierId: tierId ?? null,
+        previousSeasonId: previousSeasonId ?? null,
+      },
+    });
+  }
+
+  public async applySeasonEndTierTransitions(
+    season: string,
+    tierGroupId: string
+  ): Promise<{ processed: number; promotions: number; relegations: number; }> {
+    const tierGroup = await this.db.leagueTierGroup.findUnique({
+      where: { id: tierGroupId },
+      include: { tiers: { orderBy: { rank: "asc" } } },
+    });
+    if (!tierGroup) {
+      throw new LeagueValidationError("Tier group not found");
+    }
+
+    const leagueSeasons = await this.db.leagueSeason.findMany({
+      where: { season, tierGroupId },
+      include: {
+        league: { include: { members: true } },
+        tier: true,
+      },
+    });
+
+    if (leagueSeasons.length === 0) {
+      return { processed: 0, promotions: 0, relegations: 0 };
+    }
+
+    let promotions = 0;
+    let relegations = 0;
+
+    for (const tier of tierGroup.tiers) {
+      const entries = leagueSeasons.filter((entry) => entry.tierId === tier.id);
+      if (entries.length === 0) {
+        continue;
+      }
+
+      const ordered = [...entries].sort((a, b) => {
+        const aLeader = [...a.league.members].sort((x, y) => (y.totalPoints ?? 0) - (x.totalPoints ?? 0))[0];
+        const bLeader = [...b.league.members].sort((x, y) => (y.totalPoints ?? 0) - (x.totalPoints ?? 0))[0];
+        const aScore = aLeader?.totalPoints ?? 0;
+        const bScore = bLeader?.totalPoints ?? 0;
+        if (bScore !== aScore) {
+          return bScore - aScore;
+        }
+        return (a.league.createdAt?.getTime?.() ?? 0) - (b.league.createdAt?.getTime?.() ?? 0);
+      });
+
+      for (let index = 0; index < ordered.length; index++) {
+        const seasonEntry = ordered[index];
+        const isTopRanked = index === 0;
+        const isBottomRanked = index === ordered.length - 1;
+        let movement: LeagueTierMovement = LeagueTierMovement.STAY;
+        let targetTierId: string | null = null;
+
+        if (tier.promotionTargetTierId && isTopRanked) {
+          movement = LeagueTierMovement.PROMOTE;
+          targetTierId = tier.promotionTargetTierId;
+        } else if (tier.relegationTargetTierId && isBottomRanked) {
+          movement = LeagueTierMovement.RELEGATE;
+          targetTierId = tier.relegationTargetTierId;
+        }
+
+        await this.db.leagueTierPlacement.upsert({
+          where: {
+            leagueSeasonId_groupId: {
+              leagueSeasonId: seasonEntry.id,
+              groupId: tierGroupId,
+            },
+          },
+          update: {
+            tierId: tier.id,
+            groupId: tierGroupId,
+            rank: index + 1,
+            movement,
+            promotedToSeasonId: movement === LeagueTierMovement.PROMOTE ? null : null,
+            relegatedToSeasonId: movement === LeagueTierMovement.RELEGATE ? null : null,
+          },
+          create: {
+            leagueSeasonId: seasonEntry.id,
+            tierId: tier.id,
+            groupId: tierGroupId,
+            rank: index + 1,
+            movement,
+          },
+        });
+
+        if (movement === LeagueTierMovement.PROMOTE && targetTierId) {
+          const nextSeason = LeagueService.nextSeasonKey(season);
+          const nextSeasonRecord = await this.ensureLeagueSeason(
+            seasonEntry.leagueId,
+            nextSeason,
+            tierGroupId,
+            targetTierId,
+            seasonEntry.id
+          );
+          await this.db.leagueTierPlacement.upsert({
+            where: {
+              leagueSeasonId_groupId: {
+                leagueSeasonId: nextSeasonRecord.id,
+                groupId: tierGroupId,
+              },
+            },
+            update: {
+              tierId: targetTierId,
+              groupId: tierGroupId,
+              movement: LeagueTierMovement.PROMOTE,
+              rank: 1,
+            },
+            create: {
+              leagueSeasonId: nextSeasonRecord.id,
+              tierId: targetTierId,
+              groupId: tierGroupId,
+              movement: LeagueTierMovement.PROMOTE,
+              rank: 1,
+            },
+          });
+          promotions++;
+        }
+
+        if (movement === LeagueTierMovement.RELEGATE && targetTierId) {
+          const nextSeason = LeagueService.nextSeasonKey(season);
+          const nextSeasonRecord = await this.ensureLeagueSeason(
+            seasonEntry.leagueId,
+            nextSeason,
+            tierGroupId,
+            targetTierId,
+            seasonEntry.id
+          );
+          await this.db.leagueTierPlacement.upsert({
+            where: {
+              leagueSeasonId_groupId: {
+                leagueSeasonId: nextSeasonRecord.id,
+                groupId: tierGroupId,
+              },
+            },
+            update: {
+              tierId: targetTierId,
+              groupId: tierGroupId,
+              movement: LeagueTierMovement.RELEGATE,
+              rank: 1,
+            },
+            create: {
+              leagueSeasonId: nextSeasonRecord.id,
+              tierId: targetTierId,
+              groupId: tierGroupId,
+              movement: LeagueTierMovement.RELEGATE,
+              rank: 1,
+            },
+          });
+          relegations++;
+        }
+      }
+    }
+
+    return {
+      processed: leagueSeasons.length,
+      promotions,
+      relegations,
+    };
   }
 
   /**

@@ -44,6 +44,8 @@ export enum Permission {
   LEAGUE_CANCEL_OWN = "league:cancel:own",
   /** Creator-only league administration such as private invitations */
   LEAGUE_MANAGE_OWN = "league:manage:own",
+  /** Admin-only group management for season-over-season tier ladders */
+  LEAGUE_TIER_MANAGE = "league:tier:manage",
 
   // Entry-fee payments and financial views scoped to the caller
   PAYMENT_MANAGE_OWN = "payment:manage:own",
@@ -86,6 +88,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<Role, ReadonlySet<Permission>>> =
     Permission.FINANCIAL_RECONCILE,
     Permission.SYSTEM_HEALTH_READ,
     Permission.PAYOUT_READ,
+    Permission.LEAGUE_TIER_MANAGE,
   ]),
   [Role.ADMIN]: new Set([
     ...USER_PERMISSIONS,
@@ -94,6 +97,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<Role, ReadonlySet<Permission>>> =
     Permission.FINANCIAL_RECONCILE,
     Permission.SYSTEM_HEALTH_READ,
     Permission.PAYOUT_READ,
+    Permission.LEAGUE_TIER_MANAGE,
     // Moving or writing off funds and reading every user's ledger stay ADMIN-only
     Permission.PAYOUT_MANAGE,
     Permission.FINANCIAL_AUDIT_READ,
