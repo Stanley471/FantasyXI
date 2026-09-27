@@ -54,6 +54,13 @@ enum ScoringType {
   HEAD_TO_HEAD
 }
 
+/// The season-end movement applied to a league across tier ladder boundaries.
+enum LeagueTierMovement {
+  STAY
+  PROMOTE
+  RELEGATE
+}
+
 /// FPL chips a squad can play once per season
 enum ChipType {
   TRIPLE_CAPTAIN
@@ -369,11 +376,100 @@ model League {
   transactions  Transaction[]
   fixtures      LeagueFixture[]
   invitations   LeagueInvitation[]
+  seasons       LeagueSeason[]
 
   @@index([status, isPrivate])
   @@index([entryFee])
   @@index([maxMembers])
   @@map("leagues")
+}
+
+/// A ladder of leagues for a single season. Groups leagues into competitive tiers
+/// so promotions and relegations can be tracked across seasons.
+model LeagueTierGroup {
+  id          String   @id @default(uuid())
+  name        String
+  slug        String   @unique
+  description String?
+  season      String
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  tiers       LeagueTier[]
+  leagueSeasons LeagueSeason[]
+  placements  LeagueTierPlacement[]
+
+  @@map("league_tier_groups")
+}
+
+/// A named tier inside a league ladder such as "Premier", "Championship" or "Division 2".
+model LeagueTier {
+  id                       String   @id @default(uuid())
+  groupId                  String   @map("group_id")
+  name                     String
+  slug                     String
+  rank                     Int
+  description              String?
+  promotionTargetTierId    String?  @map("promotion_target_tier_id")
+  relegationTargetTierId   String?  @map("relegation_target_tier_id")
+  createdAt                DateTime @default(now()) @map("created_at")
+  updatedAt                DateTime @updatedAt @map("updated_at")
+
+  group                   LeagueTierGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  promotionTarget         LeagueTier? @relation("PromotionTarget", fields: [promotionTargetTierId], references: [id], onDelete: SetNull)
+  relegationTarget       LeagueTier? @relation("RelegationTarget", fields: [relegationTargetTierId], references: [id], onDelete: SetNull)
+  promotedFrom            LeagueTier[] @relation("PromotionTarget")
+  relegatedFrom          LeagueTier[] @relation("RelegationTarget")
+  leagueSeasons           LeagueSeason[]
+  placements              LeagueTierPlacement[]
+
+  @@unique([groupId, slug])
+  @@unique([groupId, rank])
+  @@map("league_tiers")
+}
+
+/// A league's participation in a single season, including the tier it occupies.
+model LeagueSeason {
+  id              String   @id @default(uuid())
+  leagueId        String   @map("league_id")
+  season          String
+  tierGroupId     String?  @map("tier_group_id")
+  tierId          String?  @map("tier_id")
+  previousSeasonId String?  @map("previous_season_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  league          League           @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+  tierGroup       LeagueTierGroup? @relation(fields: [tierGroupId], references: [id], onDelete: SetNull)
+  tier            LeagueTier?      @relation(fields: [tierId], references: [id], onDelete: SetNull)
+  previousSeason  LeagueSeason?    @relation("LeagueSeasonHistory", fields: [previousSeasonId], references: [id], onDelete: SetNull)
+  nextSeason      LeagueSeason[]   @relation("LeagueSeasonHistory")
+  placements      LeagueTierPlacement[]
+
+  @@unique([leagueId, season])
+  @@map("league_seasons")
+}
+
+/// Final standings snapshot used to determine a promotion or relegation event.
+model LeagueTierPlacement {
+  id               String            @id @default(uuid())
+  leagueSeasonId    String            @map("league_season_id")
+  tierId            String            @map("tier_id")
+  groupId           String            @map("group_id")
+  rank              Int               @default(0)
+  movement          LeagueTierMovement @default(STAY)
+  promotedToSeasonId String?           @map("promoted_to_season_id")
+  relegatedToSeasonId String?          @map("relegated_to_season_id")
+  createdAt         DateTime          @default(now()) @map("created_at")
+  updatedAt         DateTime          @updatedAt @map("updated_at")
+
+  leagueSeason      LeagueSeason      @relation(fields: [leagueSeasonId], references: [id], onDelete: Cascade)
+  tier              LeagueTier        @relation(fields: [tierId], references: [id], onDelete: Cascade)
+  group             LeagueTierGroup   @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@unique([leagueSeasonId, groupId])
+  @@map("league_tier_placements")
 }
 
 /// A user's membership in a league — links user, squad, and league together.

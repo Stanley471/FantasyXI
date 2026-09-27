@@ -18,6 +18,7 @@ import {
   MembershipStatus,
   PaymentStatus,
   ScoringType,
+  LeagueTierMovement,
   TransactionType,
   TransactionStatus,
   ChipType,
@@ -33,6 +34,7 @@ export {
   MembershipStatus,
   PaymentStatus,
   ScoringType,
+  LeagueTierMovement,
   TransactionType,
   TransactionStatus,
   ChipType,
@@ -230,6 +232,32 @@ export interface CreateLeagueInput {
   squadId: string; // Creator's initial squad
   scoringType?: ScoringType; // default CLASSIC
   isPrivate?: boolean; // default false: private leagues are invitation-only
+}
+
+export interface CreateLeagueTierGroupInput {
+  name: string;
+  season: string;
+  slug?: string;
+  description?: string;
+  isActive?: boolean;
+}
+
+export interface CreateLeagueTierInput {
+  groupId: string;
+  name: string;
+  rank: number;
+  slug?: string;
+  description?: string;
+  promotionTargetTierId?: string | null;
+  relegationTargetTierId?: string | null;
+}
+
+export interface LeagueTierTransitionInput {
+  leagueId: string;
+  season: string;
+  rank: number;
+  movement?: LeagueTierMovement;
+  targetTierId?: string | null;
 }
 
 export type LeagueSortField = "newest" | "entryFee" | "size" | "prizePool" | "members";

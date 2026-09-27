@@ -6,7 +6,12 @@ import {
   discardFailedPayout,
   listFinancialAuditLog,
 } from "../controllers/payoutAdmin.controller.js";
-import { recalculateStandings } from "../controllers/leagueAdmin.controller.js";
+import {
+  recalculateStandings,
+  createTierGroup,
+  createTier,
+  applyTierTransitions,
+} from "../controllers/leagueAdmin.controller.js";
 import { listSecurityAnomalies } from "../controllers/securityAdmin.controller.js";
 import { requireAuth, requirePermission } from "../middleware/authMiddleware.js";
 import { Permission } from "../types/index.js";
@@ -42,5 +47,18 @@ router.get("/security/anomalies", listSecurityAnomalies);
 // POST /api/v1/admin/leagues/recalculate-standings { gameweekId }
 // Bulk-recalculates every CLASSIC league's standings; see leagueAdmin.controller.ts.
 router.post("/leagues/recalculate-standings", recalculateStandings);
+
+// POST /api/v1/admin/leagues/tier-groups
+router.post("/leagues/tier-groups", requirePermission(Permission.LEAGUE_TIER_MANAGE), createTierGroup);
+
+// POST /api/v1/admin/leagues/tier-groups/:groupId/tiers
+router.post("/leagues/tier-groups/:groupId/tiers", requirePermission(Permission.LEAGUE_TIER_MANAGE), createTier);
+
+// POST /api/v1/admin/leagues/tier-groups/:groupId/season-end-transitions { season }
+router.post(
+  "/leagues/tier-groups/:groupId/season-end-transitions",
+  requirePermission(Permission.LEAGUE_TIER_MANAGE),
+  applyTierTransitions
+);
 
 export default router;
