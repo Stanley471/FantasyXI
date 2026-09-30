@@ -15,6 +15,7 @@ import { preferReplicaReads } from "./middleware/readConsistency.js";
 import { financialAuditLog } from "./services/audit/financialAuditLog.js";
 import { resolvers } from "./graphql/resolvers.js";
 import { typeDefs } from "./graphql/schema.js";
+import { attachChatSocketServer } from "./realtime/chatSocketServer.js";
 
 dotenv.config();
 
@@ -99,6 +100,7 @@ app.get(
 // ============================================================
 
 const PORT = process.env.PORT || 5000;
+let chatSocketServer: ReturnType<typeof attachChatSocketServer> | null = null;
 
 async function startServer(): Promise<void> {
   await apolloServer.start();
@@ -131,7 +133,7 @@ async function startServer(): Promise<void> {
     }),
   );
 
-  app.listen(PORT, () => {
+  const httpServer = app.listen(PORT, () => {
   console.log(`
   ⚽ FantasyXI API Server
   ────────────────────────
@@ -148,6 +150,9 @@ async function startServer(): Promise<void> {
     );
   }
   });
+
+  // Real-time league chat shares the HTTP server's port
+  chatSocketServer = attachChatSocketServer(httpServer);
 }
 
 startServer().catch((error) => {
@@ -158,6 +163,7 @@ startServer().catch((error) => {
 process.on("SIGTERM", () => {
   // Persist buffered financial audit entries before exiting
   stopJobQueue()
+    .finally(() => chatSocketServer?.close())
     .finally(() => financialAuditLog.close())
     .finally(() => closeRedisClient())
     .finally(() => process.exit(0));
