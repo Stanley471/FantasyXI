@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { LiveService, rankLiveStandings } from "../services/live/liveService.js";
 import { MembershipStatus, Position } from "../types/index.js";
+import leagueRoutes from "../routes/league.routes.js";
 
 function squadPlayers(prefix: number) {
   const positions = [Position.GKP, Position.DEF, Position.DEF, Position.DEF, Position.MID, Position.MID, Position.MID, Position.MID, Position.FWD, Position.FWD, Position.FWD];
@@ -16,6 +17,14 @@ function squadPlayers(prefix: number) {
 }
 
 describe("Live Matchday Feed", () => {
+  it("registers the league live SSE endpoint", () => {
+    const routes = (leagueRoutes as any).stack
+      .map((layer: any) => layer.route?.path)
+      .filter(Boolean);
+
+    assert.ok(routes.includes("/:id/live"));
+  });
+
   it("ranks by total points, then live points, then join time", () => {
     const base = { username: "", squadId: "", squadName: "", membershipStatus: MembershipStatus.ACTIVE, lineup: [] };
     const ranked = rankLiveStandings([
