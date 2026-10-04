@@ -6,6 +6,13 @@ import { PlayerCard } from "./PlayerCard";
 
 import { useTeamStore } from "@/store/teamStore";
 
+interface BenchProps {
+  isLoading?: boolean;
+}
+
+export const Bench: React.FC<BenchProps> = ({ isLoading = false }) => {
+  const benchPlayers = useTeamStore((state) => 
+    state.players.filter((p) => !p.isStarter).sort((a, b) => a.positionOrder - b.positionOrder)
 export const Bench: React.FC = () => {
   // See Pitch.tsx: derive with useMemo, not inside the selector, to avoid an
   // infinite re-render loop from useSyncExternalStore reference-equality checks.
@@ -44,12 +51,13 @@ export const Bench: React.FC = () => {
           return (
             <PlayerCard
               key={idx}
-              player={item?.player}
+              player={isLoading ? null : item?.player}
               positionSlot={slotPos}
               isStarter={false}
               isCaptain={item?.isCaptain}
               isViceCaptain={item?.isViceCaptain}
               benchIndex={idx}
+              isLoading={isLoading}
             />
           );
         })}

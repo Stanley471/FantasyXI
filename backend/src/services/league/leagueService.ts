@@ -5,7 +5,10 @@ import {
   MembershipStatus,
   PaymentStatus,
   ScoringType,
+  LeagueTierMovement,
   CreateLeagueInput,
+  CreateLeagueTierGroupInput,
+  CreateLeagueTierInput,
   LeagueStandingsEntry,
   H2HStandingsEntry,
   LeagueSearchFilters,
@@ -19,6 +22,17 @@ export interface H2HPairing {
   gameweekId: number;
   homeMemberId: string;
   awayMemberId: string | null;
+}
+
+export interface H2HAnomalyReport {
+  memberIds: [string, string];
+  suspiciousGameweeks: Array<{
+    gameweekId: number;
+    underperformingMemberId: string;
+    actualPoints: number;
+    expectedPoints: number;
+    opponentPoints: number;
+  }>;
 }
 
 export const MAX_LEAGUE_MEMBERS = 100_000;
@@ -75,13 +89,315 @@ export interface LeagueSearchResult<T> {
 
 export class LeagueService {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  constructor(private readonly db: any = prisma) {}
+  constructor(private readonly db: any = prisma) { }
 
   /**
    * Generates a unique, URL-safe 6-character alphanumeric invite code.
    */
   public static generateInviteCode(): string {
     return crypto.randomBytes(4).toString("hex").toUpperCase().slice(0, 6);
+  }
+
+  public static slugify(value: string): string {
+    return value
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 60) || "tier";
+  }
+
+  public static nextSeasonKey(currentSeason: string): string {
+    const compact = currentSeason.trim();
+    const match = compact.match(/^(\d{4})(?:\/(\d{2}))?$/);
+    if (!match) {
+      return compact;
+    }
+    const startYear = Number(match[1]);
+    if (match[2]) {
+      const endYear = Number(`20${match[2]}`);
+      return `${startYear + 1}/${String((endYear + 1) % 100).padStart(2, "0")}`;
+    }
+    return `${startYear + 1}`;
+  }
+
+  public async createLeagueTierGroup(input: CreateLeagueTierGroupInput) {
+    const season = input.season?.trim();
+    if (!season) {
+      throw new LeagueValidationError("Tier group season is required");
+    }
+
+    const name = input.name?.trim();
+    if (!name) {
+      throw new LeagueValidationError("Tier group name is required");
+    }
+
+    const slug = (input.slug ?? LeagueService.slugify(name)).trim();
+    if (!slug) {
+      throw new LeagueValidationError("Tier group slug is required");
+    }
+
+    return this.db.leagueTierGroup.create({
+      data: {
+        name,
+        season,
+        slug,
+        description: input.description?.trim() || null,
+        isActive: input.isActive ?? true,
+      },
+    });
+  }
+
+  public async createLeagueTier(input: CreateLeagueTierInput) {
+    const group = await this.db.leagueTierGroup.findUnique({
+      where: { id: input.groupId },
+    });
+    if (!group) {
+      throw new LeagueValidationError("Tier group not found");
+    }
+
+    const name = input.name?.trim();
+    if (!name) {
+      throw new LeagueValidationError("Tier name is required");
+    }
+
+    const rank = Number(input.rank);
+    if (!Number.isInteger(rank) || rank <= 0) {
+      throw new LeagueValidationError("Tier rank must be a positive integer");
+    }
+
+    const slug = (input.slug ?? LeagueService.slugify(name)).trim();
+    if (!slug) {
+      throw new LeagueValidationError("Tier slug is required");
+    }
+
+    if (input.promotionTargetTierId) {
+      const target = await this.db.leagueTier.findFirst({
+        where: { id: input.promotionTargetTierId, groupId: input.groupId },
+      });
+      if (!target) {
+        throw new LeagueValidationError("Promotion target tier does not belong to this group");
+      }
+    }
+
+    if (input.relegationTargetTierId) {
+      const target = await this.db.leagueTier.findFirst({
+        where: { id: input.relegationTargetTierId, groupId: input.groupId },
+      });
+      if (!target) {
+        throw new LeagueValidationError("Relegation target tier does not belong to this group");
+      }
+    }
+
+    if (input.promotionTargetTierId === input.relegationTargetTierId) {
+      throw new LeagueValidationError("A tier cannot promote to and be relegated to the same target");
+    }
+
+    return this.db.leagueTier.create({
+      data: {
+        groupId: input.groupId,
+        name,
+        slug,
+        rank,
+        description: input.description?.trim() || null,
+        promotionTargetTierId: input.promotionTargetTierId || null,
+        relegationTargetTierId: input.relegationTargetTierId || null,
+      },
+    });
+  }
+
+  public async ensureLeagueSeason(
+    leagueId: string,
+    season: string,
+    tierGroupId?: string | null,
+    tierId?: string | null,
+    previousSeasonId?: string | null
+  ) {
+    const existing = await this.db.leagueSeason.findUnique({
+      where: { leagueId_season: { leagueId, season } },
+    });
+
+    if (existing) {
+      if (tierGroupId || tierId || previousSeasonId) {
+        return this.db.leagueSeason.update({
+          where: { id: existing.id },
+          data: {
+            tierGroupId: tierGroupId ?? existing.tierGroupId,
+            tierId: tierId ?? existing.tierId,
+            previousSeasonId: previousSeasonId ?? existing.previousSeasonId,
+          },
+        });
+      }
+      return existing;
+    }
+
+    return this.db.leagueSeason.create({
+      data: {
+        leagueId,
+        season,
+        tierGroupId: tierGroupId ?? null,
+        tierId: tierId ?? null,
+        previousSeasonId: previousSeasonId ?? null,
+      },
+    });
+  }
+
+  public async applySeasonEndTierTransitions(
+    season: string,
+    tierGroupId: string
+  ): Promise<{ processed: number; promotions: number; relegations: number; }> {
+    const tierGroup = await this.db.leagueTierGroup.findUnique({
+      where: { id: tierGroupId },
+      include: { tiers: { orderBy: { rank: "asc" } } },
+    });
+    if (!tierGroup) {
+      throw new LeagueValidationError("Tier group not found");
+    }
+
+    const leagueSeasons = await this.db.leagueSeason.findMany({
+      where: { season, tierGroupId },
+      include: {
+        league: { include: { members: true } },
+        tier: true,
+      },
+    });
+
+    if (leagueSeasons.length === 0) {
+      return { processed: 0, promotions: 0, relegations: 0 };
+    }
+
+    let promotions = 0;
+    let relegations = 0;
+
+    for (const tier of tierGroup.tiers) {
+      const entries = leagueSeasons.filter((entry) => entry.tierId === tier.id);
+      if (entries.length === 0) {
+        continue;
+      }
+
+      const ordered = [...entries].sort((a, b) => {
+        const aLeader = [...a.league.members].sort((x, y) => (y.totalPoints ?? 0) - (x.totalPoints ?? 0))[0];
+        const bLeader = [...b.league.members].sort((x, y) => (y.totalPoints ?? 0) - (x.totalPoints ?? 0))[0];
+        const aScore = aLeader?.totalPoints ?? 0;
+        const bScore = bLeader?.totalPoints ?? 0;
+        if (bScore !== aScore) {
+          return bScore - aScore;
+        }
+        return (a.league.createdAt?.getTime?.() ?? 0) - (b.league.createdAt?.getTime?.() ?? 0);
+      });
+
+      for (let index = 0; index < ordered.length; index++) {
+        const seasonEntry = ordered[index];
+        const isTopRanked = index === 0;
+        const isBottomRanked = index === ordered.length - 1;
+        let movement: LeagueTierMovement = LeagueTierMovement.STAY;
+        let targetTierId: string | null = null;
+
+        if (tier.promotionTargetTierId && isTopRanked) {
+          movement = LeagueTierMovement.PROMOTE;
+          targetTierId = tier.promotionTargetTierId;
+        } else if (tier.relegationTargetTierId && isBottomRanked) {
+          movement = LeagueTierMovement.RELEGATE;
+          targetTierId = tier.relegationTargetTierId;
+        }
+
+        await this.db.leagueTierPlacement.upsert({
+          where: {
+            leagueSeasonId_groupId: {
+              leagueSeasonId: seasonEntry.id,
+              groupId: tierGroupId,
+            },
+          },
+          update: {
+            tierId: tier.id,
+            groupId: tierGroupId,
+            rank: index + 1,
+            movement,
+            promotedToSeasonId: movement === LeagueTierMovement.PROMOTE ? null : null,
+            relegatedToSeasonId: movement === LeagueTierMovement.RELEGATE ? null : null,
+          },
+          create: {
+            leagueSeasonId: seasonEntry.id,
+            tierId: tier.id,
+            groupId: tierGroupId,
+            rank: index + 1,
+            movement,
+          },
+        });
+
+        if (movement === LeagueTierMovement.PROMOTE && targetTierId) {
+          const nextSeason = LeagueService.nextSeasonKey(season);
+          const nextSeasonRecord = await this.ensureLeagueSeason(
+            seasonEntry.leagueId,
+            nextSeason,
+            tierGroupId,
+            targetTierId,
+            seasonEntry.id
+          );
+          await this.db.leagueTierPlacement.upsert({
+            where: {
+              leagueSeasonId_groupId: {
+                leagueSeasonId: nextSeasonRecord.id,
+                groupId: tierGroupId,
+              },
+            },
+            update: {
+              tierId: targetTierId,
+              groupId: tierGroupId,
+              movement: LeagueTierMovement.PROMOTE,
+              rank: 1,
+            },
+            create: {
+              leagueSeasonId: nextSeasonRecord.id,
+              tierId: targetTierId,
+              groupId: tierGroupId,
+              movement: LeagueTierMovement.PROMOTE,
+              rank: 1,
+            },
+          });
+          promotions++;
+        }
+
+        if (movement === LeagueTierMovement.RELEGATE && targetTierId) {
+          const nextSeason = LeagueService.nextSeasonKey(season);
+          const nextSeasonRecord = await this.ensureLeagueSeason(
+            seasonEntry.leagueId,
+            nextSeason,
+            tierGroupId,
+            targetTierId,
+            seasonEntry.id
+          );
+          await this.db.leagueTierPlacement.upsert({
+            where: {
+              leagueSeasonId_groupId: {
+                leagueSeasonId: nextSeasonRecord.id,
+                groupId: tierGroupId,
+              },
+            },
+            update: {
+              tierId: targetTierId,
+              groupId: tierGroupId,
+              movement: LeagueTierMovement.RELEGATE,
+              rank: 1,
+            },
+            create: {
+              leagueSeasonId: nextSeasonRecord.id,
+              tierId: targetTierId,
+              groupId: tierGroupId,
+              movement: LeagueTierMovement.RELEGATE,
+              rank: 1,
+            },
+          });
+          relegations++;
+        }
+      }
+    }
+
+    return {
+      processed: leagueSeasons.length,
+      promotions,
+      relegations,
+    };
   }
 
   /**
@@ -922,6 +1238,103 @@ export class LeagueService {
   }
 
   /**
+   * Flags repeated H2H matchups where one member scores far below their own
+   * other-gameweek average while the opponent performs near their baseline.
+   * These are review signals only; they do not affect scores or standings.
+   */
+  public async detectH2HAnomalies(leagueId: string): Promise<H2HAnomalyReport[]> {
+    const [fixtures, members] = await Promise.all([
+      this.db.leagueFixture.findMany({
+        where: { leagueId, isFinished: true, isPlayoff: false, awayMemberId: { not: null } },
+      }),
+      this.db.leagueMember.findMany({ where: { leagueId } }),
+    ]);
+    if (fixtures.length < 2 || members.length < 2) return [];
+
+    const membersById = new Map<string, any>(members.map((member: any) => [member.id, member]));
+    const scores = await this.db.squadGameweekScore.findMany({
+      where: { squadId: { in: members.map((member: any) => member.squadId) } },
+    });
+    const scoresBySquad = new Map<string, any[]>();
+    for (const score of scores) {
+      const entries = scoresBySquad.get(score.squadId) ?? [];
+      entries.push(score);
+      scoresBySquad.set(score.squadId, entries);
+    }
+
+    const averageBeforeGameweek = (memberId: string, gameweekId: number) => {
+      const member = membersById.get(memberId);
+      if (!member) return null;
+      const priorScores = (scoresBySquad.get(member.squadId) ?? [])
+        .filter((score) => score.gameweekId !== gameweekId)
+        .map((score) => Number(score.points));
+      if (priorScores.length < 2) return null;
+      return priorScores.reduce((sum, points) => sum + points, 0) / priorScores.length;
+    };
+
+    const reportsByPair = new Map<string, H2HAnomalyReport>();
+    for (const fixture of fixtures) {
+      if (
+        fixture.awayMemberId === null ||
+        fixture.homeScore === null ||
+        fixture.awayScore === null
+      ) {
+        continue;
+      }
+
+      const pairIds = [fixture.homeMemberId, fixture.awayMemberId].sort();
+      const pairKey = pairIds.join("|");
+      let underperformingMemberId: string;
+      let actualPoints: number;
+      let opponentPoints: number;
+      let expectedPoints: number | null;
+      let opponentExpected: number | null;
+
+      if (fixture.homeScore < fixture.awayScore) {
+        underperformingMemberId = fixture.homeMemberId;
+        actualPoints = fixture.homeScore;
+        opponentPoints = fixture.awayScore;
+        expectedPoints = averageBeforeGameweek(fixture.homeMemberId, fixture.gameweekId);
+        opponentExpected = averageBeforeGameweek(fixture.awayMemberId, fixture.gameweekId);
+      } else if (fixture.awayScore < fixture.homeScore) {
+        underperformingMemberId = fixture.awayMemberId;
+        actualPoints = fixture.awayScore;
+        opponentPoints = fixture.homeScore;
+        expectedPoints = averageBeforeGameweek(fixture.awayMemberId, fixture.gameweekId);
+        opponentExpected = averageBeforeGameweek(fixture.homeMemberId, fixture.gameweekId);
+      } else {
+        continue;
+      }
+
+      if (
+        expectedPoints === null ||
+        opponentExpected === null ||
+        expectedPoints < 40 ||
+        expectedPoints - actualPoints < 20 ||
+        actualPoints > expectedPoints * 0.5 ||
+        opponentPoints < opponentExpected * 0.75
+      ) {
+        continue;
+      }
+
+      let report = reportsByPair.get(pairKey);
+      if (!report) {
+        report = { memberIds: pairIds as [string, string], suspiciousGameweeks: [] };
+        reportsByPair.set(pairKey, report);
+      }
+      report.suspiciousGameweeks.push({
+        gameweekId: fixture.gameweekId,
+        underperformingMemberId,
+        actualPoints,
+        expectedPoints,
+        opponentPoints,
+      });
+    }
+
+    return [...reportsByPair.values()].filter((report) => report.suspiciousGameweeks.length >= 2);
+  }
+
+  /**
    * Resolves all unfinished H2H fixtures of a league for a completed gameweek,
    * updates member H2H statistics and refreshes table ranks.
    * The 'Average' team scores the rounded mean of all active members that gameweek.
@@ -1086,6 +1499,37 @@ export class LeagueService {
     return pairings;
   }
 
+  /** Resolves equal-score playoff fixtures by regular-season performance. */
+  public static resolvePlayoffWinner(
+    fixture: {
+      homeMemberId: string;
+      awayMemberId: string;
+      homeScore: number | null;
+      awayScore: number | null;
+    },
+    members: Map<string, { h2hPoints: number; pointsFor: number; pointsAgainst: number; matchesWon: number }>
+  ): string {
+    const homeScore = fixture.homeScore ?? 0;
+    const awayScore = fixture.awayScore ?? 0;
+    if (homeScore !== awayScore) {
+      return homeScore > awayScore ? fixture.homeMemberId : fixture.awayMemberId;
+    }
+
+    const home = members.get(fixture.homeMemberId);
+    const away = members.get(fixture.awayMemberId);
+    if (home && away) {
+      const homeMetrics = [home.h2hPoints, home.pointsFor, home.pointsFor - home.pointsAgainst, home.matchesWon];
+      const awayMetrics = [away.h2hPoints, away.pointsFor, away.pointsFor - away.pointsAgainst, away.matchesWon];
+      for (let index = 0; index < homeMetrics.length; index++) {
+        if (homeMetrics[index] !== awayMetrics[index]) {
+          return homeMetrics[index] > awayMetrics[index] ? fixture.homeMemberId : fixture.awayMemberId;
+        }
+      }
+    }
+
+    return fixture.homeMemberId;
+  }
+
   /**
    * Generates the first round of an end-of-season H2H playoff bracket from the
    * current regular-season standings. Qualifies the top 2/4/8 members (whichever
@@ -1146,11 +1590,11 @@ export class LeagueService {
   }
 
   /**
-   * Advances the bracket once every fixture of a completed playoff round has
-   * been settled (via `settleH2HGameweek`). Winners of adjacent slots (0 & 1,
-   * 2 & 3, ...) are paired for the next round on the following gameweek. A
-   * drawn match is won by its home slot, which is always the better original
-   * seed — see `seedPlayoffPairings`. Returns the crowned champion once only
+    * Advances the bracket once every fixture of a completed playoff round has
+  * been settled (via `settleH2HGameweek`). Winners of adjacent slots (0 & 1,
+  * 2 & 3, ...) are paired for the next round on the following gameweek. A
+  * drawn match is resolved by regular-season standings, with the better seed
+  * as the final fallback. Returns the crowned champion once only
    * the final's winner remains.
    */
   public async advancePlayoffRound(
@@ -1178,8 +1622,18 @@ export class LeagueService {
     const bySlot = [...fixtures].sort(
       (a: any, b: any) => (a.playoffSlot ?? 0) - (b.playoffSlot ?? 0)
     );
-    const winners = bySlot.map((f: any) =>
-      (f.homeScore ?? 0) >= (f.awayScore ?? 0) ? f.homeMemberId : f.awayMemberId
+    const tiedMemberIds = [...new Set(bySlot
+      .filter((f: any) => (f.homeScore ?? 0) === (f.awayScore ?? 0))
+      .flatMap((f: any) => [f.homeMemberId, f.awayMemberId]))];
+    const tiedMembers = tiedMemberIds.length > 0
+      ? await this.db.leagueMember.findMany({
+          where: { id: { in: tiedMemberIds } },
+          select: { id: true, h2hPoints: true, pointsFor: true, pointsAgainst: true, matchesWon: true },
+        })
+      : [];
+    const membersById = new Map<string, any>(tiedMembers.map((member: any) => [member.id, member]));
+    const winners = bySlot.map((fixture: any) =>
+      LeagueService.resolvePlayoffWinner(fixture, membersById)
     );
 
     if (winners.length === 1) {

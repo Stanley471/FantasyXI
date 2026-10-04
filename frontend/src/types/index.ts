@@ -52,6 +52,13 @@ export enum TransactionStatus {
   FAILED = "FAILED",
 }
 
+export enum ChipType {
+  TRIPLE_CAPTAIN = "TRIPLE_CAPTAIN",
+  BENCH_BOOST = "BENCH_BOOST",
+  FREE_HIT = "FREE_HIT",
+  WILDCARD = "WILDCARD",
+}
+
 // ============================================================
 // API response types
 // ============================================================
@@ -165,6 +172,7 @@ export interface Squad {
   budgetRemaining: number;
   totalPoints: number;
   players?: SquadPlayer[];
+  chipUsages?: SquadChipUsage[];
   createdAt: string;
 }
 
@@ -178,6 +186,16 @@ export interface SquadPlayer {
   isStarter: boolean;
   positionOrder: number;
   purchasePrice: number;
+}
+
+export interface SquadChipUsage {
+  id: number;
+  squadId: string;
+  gameweekId: number;
+  chipType: ChipType;
+  season: string;
+  usedAt: string;
+  revertedAt?: string | null;
 }
 
 export interface League {
@@ -276,6 +294,84 @@ export interface LeagueStandingsEntry {
 }
 
 // ============================================================
+// League Chat (REST history + WebSocket /api/v1/leagues/:id/chat/ws)
+// ============================================================
+
+export interface ChatMessage {
+  id: string;
+  leagueId: string;
+  userId: string;
+  username: string;
+  body: string;
+  createdAt: string;
+}
+
+/** A message in the UI, including the sender's own messages that are still in flight */
+export interface ChatEntry extends ChatMessage {
+  /** Correlates an optimistic message with the server's acknowledgement */
+  clientId?: string;
+  status?: "sending" | "failed";
+  error?: string;
+  /** Transport used for the latest send attempt */
+  via?: "socket" | "http";
+  /** The socket dropped before an ack arrived, so the server may still have saved it */
+  lostInFlight?: boolean;
+}
+
+export type ChatConnectionState = "connecting" | "open" | "reconnecting" | "unavailable";
+
+// Historical Performance Analytics (GET /api/v1/analytics/me/performance)
+// ============================================================
+
+export type ChipType = "TRIPLE_CAPTAIN" | "BENCH_BOOST" | "FREE_HIT" | "WILDCARD";
+
+export interface GameweekPerformance {
+  gameweekId: number;
+  gameweekFplId: number;
+  gameweekName: string;
+  deadline: string;
+  points: number;
+  benchPoints: number;
+  captainPoints: number;
+  transferCost: number;
+  cumulativePoints: number;
+  rollingAverage: number;
+  /** Mean score of every squad on the platform that gameweek */
+  averagePoints: number | null;
+  cumulativeAveragePoints: number | null;
+  highestPoints: number | null;
+  differenceVsAverage: number | null;
+  chip: ChipType | null;
+}
+
+export interface GameweekHighlight {
+  gameweekId: number;
+  gameweekName: string;
+  points: number;
+}
+
+export interface PerformanceSummary {
+  gameweeksPlayed: number;
+  totalPoints: number;
+  averagePoints: number;
+  medianPoints: number;
+  standardDeviation: number;
+  bestGameweek: GameweekHighlight | null;
+  worstGameweek: GameweekHighlight | null;
+  recentForm: number;
+  gameweeksAboveAverage: number;
+  totalBenchPoints: number;
+  totalCaptainPoints: number;
+  totalTransferCost: number;
+  captainShare: number;
+}
+
+export interface PerformanceAnalytics {
+  squads: Array<{ id: string; name: string }>;
+  squadId: string | null;
+  summary: PerformanceSummary;
+  history: GameweekPerformance[];
+  chips: Array<{ chipType: ChipType; gameweekId: number; gameweekName: string }>;
 // Global Leaderboard (GET /api/v1/leaderboard)
 // ============================================================
 

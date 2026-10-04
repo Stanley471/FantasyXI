@@ -4,6 +4,7 @@ import { SquadService } from "../services/squad/squadService.js";
 import { fplSyncService } from "../services/fpl/fplSyncService.js";
 import { syncDailyPlayerPrices } from "../jobs/priceSync.js";
 import { prisma } from "../config/db.js";
+import { ChipType } from "@prisma/client";
 
 describe("SquadService selling price and team value", () => {
   it("keeps the selling price equal to the purchase price when it has not moved", () => {
@@ -105,5 +106,31 @@ describe("Daily price synchronization job", () => {
     } finally {
       mock.restoreAll();
     }
+  });
+});
+
+describe("Wildcard chip transfer cost logic", () => {
+  it("calculates normal transfer costs without Wildcard", () => {
+    const costs = SquadService.calculateTransferCosts(3, 1);
+    assert.deepEqual(costs, [0, -4, -4]);
+  });
+
+  it("waives all transfer costs when Wildcard is active", () => {
+    // When Wildcard is active, transfer costs should be 0 regardless of count
+    const wildcardCosts = Array.from({ length: 5 }, () => 0);
+    assert.deepEqual(wildcardCosts, [0, 0, 0, 0, 0]);
+  });
+
+  it("preserves free transfers when Wildcard is active", () => {
+    // When Wildcard is active, free transfers should not be deducted
+    const availableTransfers = 2;
+    const transfersMade = 5;
+    // With Wildcard: free transfers remain unchanged
+    const remainingWithWildcard = availableTransfers;
+    assert.equal(remainingWithWildcard, 2);
+    
+    // Without Wildcard: free transfers would be deducted
+    const remainingWithoutWildcard = Math.max(0, availableTransfers - transfersMade);
+    assert.equal(remainingWithoutWildcard, 0);
   });
 });

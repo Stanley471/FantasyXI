@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import app from "./app.js";
 import { startJobQueue, stopJobQueue, getQueueHealth } from "./queues/jobQueue.js";
 import { apiRateLimiter } from "./middleware/rateLimiter.js";
+import { errorHandler } from "./middleware/error.middleware.js";
 import { requireAuth, requirePermission } from "./middleware/authMiddleware.js";
 import { Permission } from "./types/index.js";
 import { ApolloServer } from "@apollo/server";
@@ -15,6 +16,7 @@ import { preferReplicaReads } from "./middleware/readConsistency.js";
 import { financialAuditLog } from "./services/audit/financialAuditLog.js";
 import { resolvers } from "./graphql/resolvers.js";
 import { typeDefs } from "./graphql/schema.js";
+import { attachChatSocketServer } from "./realtime/chatSocketServer.js";
 
 dotenv.config();
 
@@ -95,10 +97,17 @@ app.get(
 );
 
 // ============================================================
+// Global error handler
+// ============================================================
+
+app.use(errorHandler);
+
+// ============================================================
 // Start server
 // ============================================================
 
 const PORT = process.env.PORT || 5000;
+let chatSocketServer: ReturnType<typeof attachChatSocketServer> | null = null;
 
 async function startServer(): Promise<void> {
   await apolloServer.start();
@@ -131,7 +140,7 @@ async function startServer(): Promise<void> {
     }),
   );
 
-  app.listen(PORT, () => {
+  const httpServer = app.listen(PORT, () => {
   console.log(`
   ⚽ FantasyXI API Server
   ────────────────────────
@@ -148,6 +157,9 @@ async function startServer(): Promise<void> {
     );
   }
   });
+
+  // Real-time league chat shares the HTTP server's port
+  chatSocketServer = attachChatSocketServer(httpServer);
 }
 
 startServer().catch((error) => {
@@ -158,6 +170,7 @@ startServer().catch((error) => {
 process.on("SIGTERM", () => {
   // Persist buffered financial audit entries before exiting
   stopJobQueue()
+    .finally(() => chatSocketServer?.close())
     .finally(() => financialAuditLog.close())
     .finally(() => closeRedisClient())
     .finally(() => process.exit(0));

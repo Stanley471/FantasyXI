@@ -45,12 +45,13 @@ jobs:
           cargo build --verbose
           RUSTFLAGS="-C target-feature=-reference-types" cargo build --target wasm32-unknown-unknown --release --verbose
 
-      - name: Post-process wasm to remove reference-types encoding
+      - name: Post-process wasm
         run: |
           WASM=target/wasm32-unknown-unknown/release/fantasyxi_escrow.wasm
           wasm-opt -O --strip-producers \
             --enable-bulk-memory \
-            --enable-reference-types --disable-reference-types \
+            --enable-sign-ext \
+            --disable-reference-types \
             "$WASM" -o "$WASM"
 
       - name: Run cargo test

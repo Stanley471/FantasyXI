@@ -228,6 +228,44 @@ describe("FPL Injury, Suspension, and Price Tracking Daemon", () => {
     assert.equal(result.injuryUpdates[0].chanceOfPlayingNextRound, 75);
   });
 
+  it("records history when only injury news or chance changes", async () => {
+    const db = createMockDb([
+      {
+        id: 7,
+        fplId: 107,
+        displayName: "Rice",
+        price: 6.5,
+        status: "a",
+        news: "",
+        chanceOfPlayingNextRound: 100,
+        isAvailable: true,
+      },
+    ]);
+    const daemon = new FplTrackingDaemon({
+      db,
+      fplClient: createMockFplClient([
+        {
+          id: 107,
+          web_name: "Rice",
+          now_cost: 65,
+          status: "a",
+          news: "Managed minutes",
+          chance_of_playing_next_round: 75,
+        },
+      ]),
+    });
+
+    const result = await daemon.pollOnce();
+
+    assert.equal(result.statusChanges.length, 0);
+    assert.equal(result.injuryUpdates.length, 1);
+    assert.equal(db.state.statusHistory.length, 1);
+    assert.equal(db.state.statusHistory[0].oldStatus, "a");
+    assert.equal(db.state.statusHistory[0].newStatus, "a");
+    assert.equal(db.state.statusHistory[0].news, "Managed minutes");
+    assert.equal(db.state.statusHistory[0].chanceOfPlayingNextRound, 75);
+  });
+
   it("handles player recovery back to available ('a')", async () => {
     const db = createMockDb([
       {

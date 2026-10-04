@@ -13,6 +13,7 @@ import {
   UserIcon,
   LogOutIcon,
   ShieldIcon,
+  ChartIcon,
   MedalIcon,
 } from "@/components/ui/Icons";
 
@@ -27,6 +28,7 @@ export const Sidebar: React.FC = () => {
     { label: "Leaderboard", href: "/leaderboard", icon: MedalIcon },
     { label: "Fixtures", href: "/fixtures", icon: CalendarIcon },
     { label: "Players", href: "/players", icon: UsersIcon },
+    { label: "Analytics", href: "/analytics", icon: ChartIcon },
     { label: "Profile", href: "/profile", icon: UserIcon },
   ];
 

@@ -88,6 +88,43 @@ describe("H2H League Engine — Match Resolution & Standings", () => {
     assert.equal(table[2].pointsDifference, 30);
   });
 
+  it("flags repeated losses far below a member's baseline against a near-baseline opponent", async () => {
+    const fixtures = [
+      { gameweekId: 3, homeMemberId: "a", awayMemberId: "b", homeScore: 25, awayScore: 70 },
+      { gameweekId: 4, homeMemberId: "b", awayMemberId: "a", homeScore: 72, awayScore: 25 },
+    ];
+    const service = new LeagueService({
+      leagueFixture: { findMany: async () => fixtures },
+      leagueMember: {
+        findMany: async () => [
+          { id: "a", squadId: "sa" },
+          { id: "b", squadId: "sb" },
+        ],
+      },
+      squadGameweekScore: {
+        findMany: async () => [
+          { squadId: "sa", gameweekId: 1, points: 70 },
+          { squadId: "sa", gameweekId: 2, points: 70 },
+          { squadId: "sa", gameweekId: 3, points: 25 },
+          { squadId: "sa", gameweekId: 4, points: 25 },
+          { squadId: "sb", gameweekId: 1, points: 68 },
+          { squadId: "sb", gameweekId: 2, points: 72 },
+          { squadId: "sb", gameweekId: 3, points: 70 },
+          { squadId: "sb", gameweekId: 4, points: 72 },
+        ],
+      },
+    });
+
+    const reports = await service.detectH2HAnomalies("league");
+
+    assert.equal(reports.length, 1);
+    assert.deepEqual(reports[0].memberIds, ["a", "b"]);
+    assert.deepEqual(
+      reports[0].suspiciousGameweeks.map((match) => match.gameweekId),
+      [3, 4]
+    );
+  });
+
   it("settles a gameweek: updates member stats, fixture scores and ranks", async () => {
     const members = new Map<string, any>(
       [
