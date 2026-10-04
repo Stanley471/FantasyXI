@@ -7,6 +7,14 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "test": "vitest run",
+    "test:e2e": "playwright test"
+    "type-check": "tsc --noEmit",
+    "test": "tsx --test src/tests/toast.test.ts src/tests/leagueChat.test.tsx"
+    "test": "tsx --test src/tests/toast.test.ts src/tests/leaderboard.test.tsx"
+    "test": "tsx --test src/tests/toast.test.ts src/tests/leaderboard.test.tsx",
+    "test:e2e": "playwright test",
+    "type-check": "tsc --noEmit"
     "test": "tsx --test src/tests/dragAndDropSubstitutions.test.ts"
   },
   "dependencies": {

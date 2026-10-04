@@ -19,6 +19,7 @@ import { requireAuth, requirePermission, optionalAuth } from "../middleware/auth
 import { Permission } from "../types/index.js";
 import { authenticatedRateLimiter, mutationRateLimiter } from "../middleware/rateLimiter.js";
 import { primaryReads } from "../middleware/readConsistency.js";
+import { getChatMessages, postChatMessage } from "../controllers/chat.controller.js";
 
 const router = Router();
 
@@ -80,6 +81,12 @@ router.delete(
   requirePermission(Permission.LEAGUE_MANAGE_OWN),
   revokeLeagueInvitation
 );
+
+// League chat (Protected: creator and members only). History is read from the
+// primary so a message is never missing right after it was posted.
+// Real-time delivery: WebSocket at /api/v1/leagues/:leagueId/chat/ws (see realtime/chatSocketServer.ts)
+router.get("/:leagueId/chat/messages", primaryReads, requireAuth, getChatMessages);
+router.post("/:leagueId/chat/messages", requireAuth, postChatMessage);
 
 // ============================================================
 // Financial & Stellar Escrow Routes
