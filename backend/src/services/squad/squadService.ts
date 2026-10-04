@@ -12,6 +12,7 @@ import {
   SquadLockedError,
   PlayerForValidation,
 } from "./squadValidator.js";
+import { acquireLock } from "./lockManager.js";
 import {
   DEADLINE_TRANSACTION_OPTIONS,
   assertGameweeksOpen,
@@ -161,7 +162,7 @@ export class SquadService {
       },
     });
 
-    const playersForValidation: PlayerForValidation[] = dbPlayers.map((p) => ({
+    const playersForValidation: PlayerForValidation[] = dbPlayers.map((p: any) => ({
       id: p.id,
       teamId: p.teamId,
       position: p.position,
@@ -178,7 +179,7 @@ export class SquadService {
     const budgetRemaining = Math.round((100.0 - validated.totalCost) * 10) / 10;
 
     // Persist in transaction
-    const squad = await prisma.$transaction(async (tx) => {
+    const squad = await prisma.$transaction(async (tx: any) => {
       const created = await tx.squad.create({
         data: {
           userId: input.userId,
@@ -187,7 +188,7 @@ export class SquadService {
         },
       });
 
-      const playerMap = new Map(dbPlayers.map((p) => [p.id, p]));
+      const playerMap = new Map(dbPlayers.map((p: any) => [p.id, p]));
 
       await tx.squadPlayer.createMany({
         data: input.players.map((sel) => {
@@ -199,7 +200,7 @@ export class SquadService {
             isCaptain: sel.isCaptain,
             isViceCaptain: sel.isViceCaptain,
             positionOrder: sel.positionOrder,
-            purchasePrice: p.price,
+            purchasePrice: (p as any).price,
           };
         }),
       });
@@ -297,6 +298,30 @@ export class SquadService {
         await assertGameweeksOpen(tx, [governingGameweek.id]);
       }
 
+    const budgetRemaining = Math.round((availableFunds - validated.totalCost) * 10) / 10;
+    const playerMap = new Map(dbPlayers.map((p) => [p.id, p]));
+
+    // Work out transfers against the currently owned players
+    const newIds = new Set(playerIds);
+    const outgoing = existing.players
+      .filter((sp: any) => !newIds.has(sp.playerId))
+      .map((sp: any) => ({ id: sp.playerId, position: sp.player.position }));
+    const incoming = dbPlayers
+      .filter((p) => !owned.has(p.id))
+      .map((p) => ({ id: p.id, position: p.position }));
+    const transfers = SquadService.pairTransfers(outgoing, incoming);
+
+    const lockResource = `squad:${squadId}`;
+    const releaseLock = await acquireLock(lockResource, { ttlMs: 5_000, retryCount: 3, retryDelayMs: 200 });
+
+    let transferGameweek: { id: number } | null = null;
+    let transferCosts: number[] = [];
+    let freeTransfersLeft = existing.freeTransfers;
+
+    if (transfers.length > 0) {
+      const targetGameweek = await prisma.gameweek.findFirst({
+        where: { deadline: { gt: new Date() } },
+        orderBy: { deadline: "asc" },
       // Fetch players for validation
       const playerIds = input.players.map((p) => p.playerId);
       const dbPlayers: Array<{
@@ -370,6 +395,14 @@ export class SquadService {
           throw new SquadValidationError("Transfers are closed: no upcoming gameweek");
         }
 
+        // Check if Wildcard is active for this gameweek
+        const wildcardUsage = await tx.squadChipUsage.findUnique({
+          where: {
+            squadId_gameweekId: { squadId, gameweekId: targetGameweek.id },
+          },
+        });
+        const isWildcardActive = wildcardUsage?.chipType === ChipType.WILDCARD;
+
         let available = squad.freeTransfers;
         if (
           squad.freeTransfersGameweekId !== null &&
@@ -383,10 +416,28 @@ export class SquadService {
         }
 
         transferGameweek = targetGameweek;
-        transferCosts = SquadService.calculateTransferCosts(transfers.length, available);
-        freeTransfersLeft = Math.max(0, available - transfers.length);
+        
+        // If Wildcard is active, all transfers are free (0 points cost)
+        if (isWildcardActive) {
+          transferCosts = Array.from({ length: transfers.length }, () => 0);
+          // Don't deduct from free transfers when Wildcard is active
+          freeTransfersLeft = available;
+        } else {
+          transferCosts = SquadService.calculateTransferCosts(transfers.length, available);
+          freeTransfersLeft = Math.max(0, available - transfers.length);
+        }
       }
 
+      transferGameweek = targetGameweek;
+      transferCosts = SquadService.calculateTransferCosts(transfers.length, available);
+      freeTransfersLeft = Math.max(0, available - transfers.length);
+    }
+
+    try {
+      return await prisma.$transaction(async (tx) => {
+        // 1. Update squad metadata, bank and free transfer balance
+        await tx.squad.update({
+          where: { id: squadId },
       // 2. Update squad metadata, bank and free transfer balance
       await tx.squad.update({
         where: { id: squadId },
@@ -410,14 +461,46 @@ export class SquadService {
         await tx.squadPlayer.update({
           where: { squadId_playerId: { squadId, playerId: sel.playerId } },
           data: {
-            isStarter: sel.isStarter,
-            isCaptain: sel.isCaptain,
-            isViceCaptain: sel.isViceCaptain,
-            positionOrder: sel.positionOrder,
+            name: input.name ? input.name.trim() : existing.name,
+            budgetRemaining,
+            ...(transferGameweek && {
+              freeTransfers: freeTransfersLeft,
+              freeTransfersGameweekId: transferGameweek.id,
+            }),
           },
         });
-      }
 
+        // 2. Remove sold players
+        await tx.squadPlayer.deleteMany({
+          where: { squadId, playerId: { in: outgoing.map((p: { id: number }) => p.id) } },
+        });
+
+        // 3. Update lineup of kept players, preserving their purchase price
+        for (const sel of input.players.filter((p) => owned.has(p.playerId))) {
+          await tx.squadPlayer.update({
+            where: { squadId_playerId: { squadId, playerId: sel.playerId } },
+            data: {
+              isStarter: sel.isStarter,
+              isCaptain: sel.isCaptain,
+              isViceCaptain: sel.isViceCaptain,
+              positionOrder: sel.positionOrder,
+            },
+          });
+        }
+
+        // 4. Insert new signings at their current price
+        await tx.squadPlayer.createMany({
+          data: input.players
+            .filter((sel) => !owned.has(sel.playerId))
+            .map((sel) => ({
+              squadId,
+              playerId: sel.playerId,
+              isStarter: sel.isStarter,
+              isCaptain: sel.isCaptain,
+              isViceCaptain: sel.isViceCaptain,
+              positionOrder: sel.positionOrder,
+              purchasePrice: playerMap.get(sel.playerId)!.price,
+            })),
       // 5. Insert new signings at their current price
       await tx.squadPlayer.createMany({
         data: input.players
@@ -446,8 +529,31 @@ export class SquadService {
             pointsCost: transferCosts[i],
           })),
         });
-      }
 
+        // 5. Transfer audit history
+        if (transferGameweek) {
+          await tx.squadTransfer.createMany({
+            data: transfers.map((t, i) => ({
+              squadId,
+              gameweekId: transferGameweek!.id,
+              playerInId: t.playerInId,
+              playerOutId: t.playerOutId,
+              inPrice: playerMap.get(t.playerInId)!.price,
+              outPrice: sellPrices.get(t.playerOutId)!,
+              pointsCost: transferCosts[i],
+            })),
+          });
+        }
+
+        // Return updated squad with players
+        return tx.squad.findUnique({
+          where: { id: squadId },
+          include: {
+            players: {
+              include: {
+                player: {
+                  include: { team: true },
+                },
       const updated = await tx.squad.findUnique({
         where: { id: squadId },
         include: {
@@ -456,11 +562,16 @@ export class SquadService {
               player: {
                 include: { team: true },
               },
+              orderBy: { positionOrder: "asc" },
             },
-            orderBy: { positionOrder: "asc" },
           },
-        },
+        });
       });
+    } finally {
+      if (releaseLock) {
+        await releaseLock();
+      }
+    }
 
       // 7. Authoritative deadline check, last before commit: late requests roll back
       const stillLocked = await tx.gameweek.findFirst({
@@ -642,6 +753,7 @@ export class SquadService {
           include: { gameweek: true },
           orderBy: { gameweekId: "desc" },
         },
+        chipUsages: true,
       },
     });
 
@@ -667,6 +779,7 @@ export class SquadService {
           },
           orderBy: { positionOrder: "asc" },
         },
+        chipUsages: true,
       },
     });
   }

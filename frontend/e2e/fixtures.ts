@@ -238,6 +238,17 @@ export interface MockBackendOptions {
   squad?: FixtureSquadPlayer[];
   /** Player pool returned by GET /api/v1/players (auto-pick and the picker modal both use it). */
   playerPool?: FixturePlayer[];
+  /** Current gameweek returned by GET /api/v1/gameweeks/current. */
+  currentGameweek?: { id: number; name: string; deadline: string };
+  /** Chip usages to include in squad response. */
+  chipUsages?: Array<{
+    id: number;
+    squadId: string;
+    gameweekId: number;
+    chipType: string;
+    season: string;
+    usedAt: string;
+  }>;
 }
 
 /**
@@ -245,7 +256,7 @@ export interface MockBackendOptions {
  * page touches. Call before `page.goto("/team")`.
  */
 export async function mockBackend(page: Page, options: MockBackendOptions = {}): Promise<void> {
-  const { squad = [], playerPool = AUTO_PICK_POOL } = options;
+  const { squad = [], playerPool = AUTO_PICK_POOL, currentGameweek, chipUsages = [] } = options;
 
   await page.addInitScript(() => {
     window.localStorage.setItem("token", "e2e-fake-jwt");
@@ -284,6 +295,7 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}):
                   budgetRemaining: 1000,
                   totalPoints: 0,
                   players: squad,
+                  chipUsages,
                   createdAt: new Date().toISOString(),
                 },
               ]
@@ -327,6 +339,39 @@ export async function mockBackend(page: Page, options: MockBackendOptions = {}):
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({ success: true, data: { id: "squad-1" } }),
+    });
+  });
+
+  await page.route("**/api/v1/gameweeks/current", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        success: true,
+        data: currentGameweek || null,
+      }),
+    });
+  });
+
+  await page.route("**/api/v1/squads/squad-1/chip", async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        success: true,
+        data: {
+          id: 1,
+          squadId: "squad-1",
+          gameweekId: currentGameweek?.id || 1,
+          chipType: "WILDCARD",
+          season: "2024",
+          usedAt: new Date().toISOString(),
+        },
+      }),
     });
   });
 }

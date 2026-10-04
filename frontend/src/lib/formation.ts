@@ -161,3 +161,101 @@ export function validateCompleteSquad(players: Array<{
     errors,
   };
 }
+
+export interface SubstitutionValidationResult {
+  valid: boolean;
+  reason?: string;
+}
+
+/**
+ * Validates whether substituting player A with player B would produce a valid squad & formation.
+ */
+export function validateSubstitution(
+  playerA: { playerId: number; isStarter: boolean; player: Player },
+  playerB: { playerId: number; isStarter: boolean; player: Player },
+  allPlayers: Array<{ playerId: number; isStarter: boolean; player: Player }>
+): SubstitutionValidationResult {
+  if (playerA.playerId === playerB.playerId) {
+    return { valid: false, reason: "Cannot substitute a player with themselves." };
+  }
+
+  const aIsGkp = playerA.player.position === Position.GKP;
+  const bIsGkp = playerB.player.position === Position.GKP;
+
+  // Goalkeepers can only be swapped with other Goalkeepers
+  if (aIsGkp !== bIsGkp) {
+    return {
+      valid: false,
+      reason: "Goalkeepers can only be swapped with another Goalkeeper.",
+    };
+  }
+
+  // Swapping two starters or two bench players is always valid for outfielders
+  if (playerA.isStarter === playerB.isStarter) {
+    return { valid: true };
+  }
+
+  // Tactical substitution: 1 Starter <-> 1 Bench
+  const starter = playerA.isStarter ? playerA : playerB;
+  const sub = playerA.isStarter ? playerB : playerA;
+
+  // Same position swap doesn't alter formation
+  if (starter.player.position === sub.player.position) {
+    return { valid: true };
+  }
+
+  // Count current starters
+  const currentStarters = allPlayers.filter((p) => p.isStarter);
+  let def = currentStarters.filter((p) => p.player.position === Position.DEF).length;
+  let mid = currentStarters.filter((p) => p.player.position === Position.MID).length;
+  let fwd = currentStarters.filter((p) => p.player.position === Position.FWD).length;
+
+  // Outgoing starter
+  if (starter.player.position === Position.DEF) def--;
+  else if (starter.player.position === Position.MID) mid--;
+  else if (starter.player.position === Position.FWD) fwd--;
+
+  // Incoming substitute
+  if (sub.player.position === Position.DEF) def++;
+  else if (sub.player.position === Position.MID) mid++;
+  else if (sub.player.position === Position.FWD) fwd++;
+
+  if (def < 3) {
+    return {
+      valid: false,
+      reason: `Formation invalid: Minimum 3 Defenders required (would leave ${def}).`,
+    };
+  }
+  if (def > 5) {
+    return {
+      valid: false,
+      reason: `Formation invalid: Maximum 5 Defenders allowed (would have ${def}).`,
+    };
+  }
+  if (mid < 2) {
+    return {
+      valid: false,
+      reason: `Formation invalid: Minimum 2 Midfielders required (would leave ${mid}).`,
+    };
+  }
+  if (mid > 5) {
+    return {
+      valid: false,
+      reason: `Formation invalid: Maximum 5 Midfielders allowed (would have ${mid}).`,
+    };
+  }
+  if (fwd < 1) {
+    return {
+      valid: false,
+      reason: `Formation invalid: Minimum 1 Forward required (would leave ${fwd}).`,
+    };
+  }
+  if (fwd > 3) {
+    return {
+      valid: false,
+      reason: `Formation invalid: Maximum 3 Forwards allowed (would have ${fwd}).`,
+    };
+  }
+
+  return { valid: true };
+}

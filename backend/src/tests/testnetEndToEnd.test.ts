@@ -25,23 +25,18 @@ if (fs.existsSync(envTestnetPath)) {
   dotenv.config({ path: envTestnetPath });
 }
 
-// This suite spends testnet funds and must only run with an explicit deployment.
-// Keep the regular test command runnable for contributors and CI environments
-// that do not have the private testnet credentials.
-const testnetConfigured = [
-  "STELLAR_ESCROW_CONTRACT_ID",
-  "STELLAR_USDC_TOKEN_CONTRACT_ID",
-  "TESTNET_ADMIN_PUBLIC",
-  "TESTNET_ADMIN_SECRET",
-  "TESTNET_MANAGER_A_PUBLIC",
-  "TESTNET_MANAGER_A_SECRET",
-  "TESTNET_MANAGER_B_PUBLIC",
-  "TESTNET_MANAGER_B_SECRET",
-  "TESTNET_MANAGER_C_PUBLIC",
-  "TESTNET_MANAGER_C_SECRET",
-].every((name) => Boolean(process.env[name]));
+const configured = Boolean(
+  process.env.TESTNET_ADMIN_PUBLIC &&
+  process.env.TESTNET_ADMIN_SECRET &&
+  process.env.TESTNET_MANAGER_A_PUBLIC &&
+  process.env.TESTNET_MANAGER_A_SECRET &&
+  process.env.TESTNET_MANAGER_B_PUBLIC &&
+  process.env.TESTNET_MANAGER_B_SECRET &&
+  process.env.TESTNET_MANAGER_C_PUBLIC &&
+  process.env.TESTNET_MANAGER_C_SECRET
+);
 
-describe("Stellar Testnet Live Soroban Escrow Lifecycle", { skip: !testnetConfigured && "testnet env not configured" }, () => {
+describe("Stellar Testnet Live Soroban Escrow Lifecycle", { skip: !configured && "testnet env not configured" }, () => {
   let client: SorobanContractClient;
 
   // Keypairs from Testnet deployer
@@ -61,6 +56,7 @@ describe("Stellar Testnet Live Soroban Escrow Lifecycle", { skip: !testnetConfig
   const ENTRY_FEE_10_USDC = 100_000_000n;
 
   before(() => {
+    if (!configured) return;
     client = new SorobanContractClient();
   });
 

@@ -4,6 +4,7 @@ import { fplSyncService } from "../services/fpl/fplSyncService.js";
 import { leagueService, LeagueService } from "../services/league/leagueService.js";
 import { eventBus, publishOrThrow } from "../services/events/eventBus.js";
 import { GAMEWEEK_UPDATED_EVENT } from "../services/events/domainEvents.js";
+import { gameweekOracleService } from "../services/financial/gameweekOracleService.js";
 // Imported for its side effect: subscribes the scoring, free-hit and league
 // settlement handlers to GAMEWEEK_UPDATED_EVENT (issue #118). This job no
 // longer needs to know which services react to a gameweek update.
@@ -126,6 +127,14 @@ export async function settleGameweek(gameweekId: number): Promise<void> {
   // whole platform (see recalculateClassicStandings for why this replaced a
   // per-league loop).
   await leagueService.recalculateClassicStandings(gameweekId);
+
+  const oracleSigningKey = process.env.STELLAR_ORACLE_SIGNING_KEY;
+  if (oracleSigningKey) {
+    const result = await gameweekOracleService.publishFinalGameweek(gameweekId, oracleSigningKey);
+    if (!result.success) {
+      throw new Error(`Failed to publish gameweek ${gameweekId} result to Soroban: ${result.error}`);
+    }
+  }
 
   await prisma.gameweek.update({
     where: { id: gameweekId },

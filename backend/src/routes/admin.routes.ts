@@ -12,6 +12,7 @@ import {
   createTier,
   applyTierTransitions,
 } from "../controllers/leagueAdmin.controller.js";
+import { listH2HAnomalies, recalculateStandings } from "../controllers/leagueAdmin.controller.js";
 import { listSecurityAnomalies } from "../controllers/securityAdmin.controller.js";
 import { requireAuth, requirePermission } from "../middleware/authMiddleware.js";
 import { Permission } from "../types/index.js";
@@ -43,6 +44,9 @@ router.get("/audit/financial", requirePermission(Permission.FINANCIAL_AUDIT_READ
 // GET /api/v1/admin/security/anomalies (issue #117): failed-login spikes and
 // new-device/new-IP logins detected across all accounts, for admin review.
 router.get("/security/anomalies", listSecurityAnomalies);
+
+// GET /api/v1/admin/leagues/:leagueId/h2h-anomalies
+router.get("/leagues/:leagueId/h2h-anomalies", listH2HAnomalies);
 
 // POST /api/v1/admin/leagues/recalculate-standings { gameweekId }
 // Bulk-recalculates every CLASSIC league's standings; see leagueAdmin.controller.ts.

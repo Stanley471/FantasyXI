@@ -13,6 +13,7 @@ import {
   authenticateServiceKey,
 } from "../config/serviceAuth.js";
 import { AuthUser, UserRole } from "../types/index.js";
+import { setRlsContext } from "../config/db.js";
 
 /**
  * Global declaration merging to extend Express Request with authenticated user.
@@ -99,6 +100,11 @@ export function requireAuth(
       username: payload.username || "",
       role: asUserRole(payload.role),
     };
+
+    // Set PostgreSQL RLS context for multi-tenant data isolation
+    setRlsContext(payload.userId).catch(() => {
+      // RLS may not be enabled in all environments; fail silently
+    });
 
     next();
   } catch (error) {
@@ -291,6 +297,7 @@ export function optionalAuth(
           username: payload.username || "",
           role: asUserRole(payload.role),
         };
+        setRlsContext(payload.userId).catch(() => {});
       }
     } catch {
       // Ignore errors for optional authentication

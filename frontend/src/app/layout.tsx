@@ -5,6 +5,7 @@ import { AuthProvider } from "@/context/AuthContext";
 import { WalletProvider } from "@/context/WalletContext";
 import { ToastProvider } from "@/context/ToastContext";
 import { AppShell } from "@/components/layout/AppShell";
+import { TelemetryProvider } from "@/components/layout/TelemetryProvider";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -53,7 +54,9 @@ export default function RootLayout({
         <AuthProvider>
           <WalletProvider>
             <ToastProvider>
-              <AppShell>{children}</AppShell>
+              <TelemetryProvider>
+                <AppShell>{children}</AppShell>
+              </TelemetryProvider>
             </ToastProvider>
           </WalletProvider>
         </AuthProvider>

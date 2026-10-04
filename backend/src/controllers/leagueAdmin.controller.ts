@@ -113,3 +113,16 @@ export async function recalculateStandings(
     next(error);
   }
 }
+
+export async function listH2HAnomalies(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const reports = await leagueService.detectH2HAnomalies(req.params.leagueId as string);
+    res.json({ success: true, data: reports });
+  } catch (error) {
+    next(error);
+  }
+}

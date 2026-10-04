@@ -190,25 +190,25 @@ export class FplTrackingDaemon {
           };
           statusChanges.push(statusPayload);
 
-          if (this.db.playerStatusHistory) {
-            try {
-              await this.db.playerStatusHistory.create({
-                data: {
-                  playerId: local.id,
-                  fplId: local.fplId,
-                  oldStatus,
-                  newStatus,
-                  news: newNews || null,
-                  chanceOfPlayingNextRound: newChance,
-                  changedAt: now,
-                },
-              });
-            } catch (err) {
-              console.warn(`[fpl-daemon] Failed to log status history:`, (err as Error).message);
-            }
-          }
-
           this.events.emit("player:status_change", statusPayload);
+        }
+
+        if ((statusChanged || newsChanged) && this.db.playerStatusHistory) {
+          try {
+            await this.db.playerStatusHistory.create({
+              data: {
+                playerId: local.id,
+                fplId: local.fplId,
+                oldStatus,
+                newStatus,
+                news: newNews || null,
+                chanceOfPlayingNextRound: newChance,
+                changedAt: now,
+              },
+            });
+          } catch (err) {
+            console.warn(`[fpl-daemon] Failed to log status history:`, (err as Error).message);
+          }
         }
 
         // 3. Emit injury update if player is injured ('i'), doubtful ('d'), suspended ('s'), or news was updated

@@ -24,6 +24,17 @@ export interface H2HPairing {
   awayMemberId: string | null;
 }
 
+export interface H2HAnomalyReport {
+  memberIds: [string, string];
+  suspiciousGameweeks: Array<{
+    gameweekId: number;
+    underperformingMemberId: string;
+    actualPoints: number;
+    expectedPoints: number;
+    opponentPoints: number;
+  }>;
+}
+
 export const MAX_LEAGUE_MEMBERS = 100_000;
 
 export class LeagueValidationError extends Error {
@@ -1227,6 +1238,103 @@ export class LeagueService {
   }
 
   /**
+   * Flags repeated H2H matchups where one member scores far below their own
+   * other-gameweek average while the opponent performs near their baseline.
+   * These are review signals only; they do not affect scores or standings.
+   */
+  public async detectH2HAnomalies(leagueId: string): Promise<H2HAnomalyReport[]> {
+    const [fixtures, members] = await Promise.all([
+      this.db.leagueFixture.findMany({
+        where: { leagueId, isFinished: true, isPlayoff: false, awayMemberId: { not: null } },
+      }),
+      this.db.leagueMember.findMany({ where: { leagueId } }),
+    ]);
+    if (fixtures.length < 2 || members.length < 2) return [];
+
+    const membersById = new Map<string, any>(members.map((member: any) => [member.id, member]));
+    const scores = await this.db.squadGameweekScore.findMany({
+      where: { squadId: { in: members.map((member: any) => member.squadId) } },
+    });
+    const scoresBySquad = new Map<string, any[]>();
+    for (const score of scores) {
+      const entries = scoresBySquad.get(score.squadId) ?? [];
+      entries.push(score);
+      scoresBySquad.set(score.squadId, entries);
+    }
+
+    const averageBeforeGameweek = (memberId: string, gameweekId: number) => {
+      const member = membersById.get(memberId);
+      if (!member) return null;
+      const priorScores = (scoresBySquad.get(member.squadId) ?? [])
+        .filter((score) => score.gameweekId !== gameweekId)
+        .map((score) => Number(score.points));
+      if (priorScores.length < 2) return null;
+      return priorScores.reduce((sum, points) => sum + points, 0) / priorScores.length;
+    };
+
+    const reportsByPair = new Map<string, H2HAnomalyReport>();
+    for (const fixture of fixtures) {
+      if (
+        fixture.awayMemberId === null ||
+        fixture.homeScore === null ||
+        fixture.awayScore === null
+      ) {
+        continue;
+      }
+
+      const pairIds = [fixture.homeMemberId, fixture.awayMemberId].sort();
+      const pairKey = pairIds.join("|");
+      let underperformingMemberId: string;
+      let actualPoints: number;
+      let opponentPoints: number;
+      let expectedPoints: number | null;
+      let opponentExpected: number | null;
+
+      if (fixture.homeScore < fixture.awayScore) {
+        underperformingMemberId = fixture.homeMemberId;
+        actualPoints = fixture.homeScore;
+        opponentPoints = fixture.awayScore;
+        expectedPoints = averageBeforeGameweek(fixture.homeMemberId, fixture.gameweekId);
+        opponentExpected = averageBeforeGameweek(fixture.awayMemberId, fixture.gameweekId);
+      } else if (fixture.awayScore < fixture.homeScore) {
+        underperformingMemberId = fixture.awayMemberId;
+        actualPoints = fixture.awayScore;
+        opponentPoints = fixture.homeScore;
+        expectedPoints = averageBeforeGameweek(fixture.awayMemberId, fixture.gameweekId);
+        opponentExpected = averageBeforeGameweek(fixture.homeMemberId, fixture.gameweekId);
+      } else {
+        continue;
+      }
+
+      if (
+        expectedPoints === null ||
+        opponentExpected === null ||
+        expectedPoints < 40 ||
+        expectedPoints - actualPoints < 20 ||
+        actualPoints > expectedPoints * 0.5 ||
+        opponentPoints < opponentExpected * 0.75
+      ) {
+        continue;
+      }
+
+      let report = reportsByPair.get(pairKey);
+      if (!report) {
+        report = { memberIds: pairIds as [string, string], suspiciousGameweeks: [] };
+        reportsByPair.set(pairKey, report);
+      }
+      report.suspiciousGameweeks.push({
+        gameweekId: fixture.gameweekId,
+        underperformingMemberId,
+        actualPoints,
+        expectedPoints,
+        opponentPoints,
+      });
+    }
+
+    return [...reportsByPair.values()].filter((report) => report.suspiciousGameweeks.length >= 2);
+  }
+
+  /**
    * Resolves all unfinished H2H fixtures of a league for a completed gameweek,
    * updates member H2H statistics and refreshes table ranks.
    * The 'Average' team scores the rounded mean of all active members that gameweek.
@@ -1391,6 +1499,37 @@ export class LeagueService {
     return pairings;
   }
 
+  /** Resolves equal-score playoff fixtures by regular-season performance. */
+  public static resolvePlayoffWinner(
+    fixture: {
+      homeMemberId: string;
+      awayMemberId: string;
+      homeScore: number | null;
+      awayScore: number | null;
+    },
+    members: Map<string, { h2hPoints: number; pointsFor: number; pointsAgainst: number; matchesWon: number }>
+  ): string {
+    const homeScore = fixture.homeScore ?? 0;
+    const awayScore = fixture.awayScore ?? 0;
+    if (homeScore !== awayScore) {
+      return homeScore > awayScore ? fixture.homeMemberId : fixture.awayMemberId;
+    }
+
+    const home = members.get(fixture.homeMemberId);
+    const away = members.get(fixture.awayMemberId);
+    if (home && away) {
+      const homeMetrics = [home.h2hPoints, home.pointsFor, home.pointsFor - home.pointsAgainst, home.matchesWon];
+      const awayMetrics = [away.h2hPoints, away.pointsFor, away.pointsFor - away.pointsAgainst, away.matchesWon];
+      for (let index = 0; index < homeMetrics.length; index++) {
+        if (homeMetrics[index] !== awayMetrics[index]) {
+          return homeMetrics[index] > awayMetrics[index] ? fixture.homeMemberId : fixture.awayMemberId;
+        }
+      }
+    }
+
+    return fixture.homeMemberId;
+  }
+
   /**
    * Generates the first round of an end-of-season H2H playoff bracket from the
    * current regular-season standings. Qualifies the top 2/4/8 members (whichever
@@ -1451,11 +1590,11 @@ export class LeagueService {
   }
 
   /**
-   * Advances the bracket once every fixture of a completed playoff round has
-   * been settled (via `settleH2HGameweek`). Winners of adjacent slots (0 & 1,
-   * 2 & 3, ...) are paired for the next round on the following gameweek. A
-   * drawn match is won by its home slot, which is always the better original
-   * seed — see `seedPlayoffPairings`. Returns the crowned champion once only
+    * Advances the bracket once every fixture of a completed playoff round has
+  * been settled (via `settleH2HGameweek`). Winners of adjacent slots (0 & 1,
+  * 2 & 3, ...) are paired for the next round on the following gameweek. A
+  * drawn match is resolved by regular-season standings, with the better seed
+  * as the final fallback. Returns the crowned champion once only
    * the final's winner remains.
    */
   public async advancePlayoffRound(
@@ -1483,8 +1622,18 @@ export class LeagueService {
     const bySlot = [...fixtures].sort(
       (a: any, b: any) => (a.playoffSlot ?? 0) - (b.playoffSlot ?? 0)
     );
-    const winners = bySlot.map((f: any) =>
-      (f.homeScore ?? 0) >= (f.awayScore ?? 0) ? f.homeMemberId : f.awayMemberId
+    const tiedMemberIds = [...new Set(bySlot
+      .filter((f: any) => (f.homeScore ?? 0) === (f.awayScore ?? 0))
+      .flatMap((f: any) => [f.homeMemberId, f.awayMemberId]))];
+    const tiedMembers = tiedMemberIds.length > 0
+      ? await this.db.leagueMember.findMany({
+          where: { id: { in: tiedMemberIds } },
+          select: { id: true, h2hPoints: true, pointsFor: true, pointsAgainst: true, matchesWon: true },
+        })
+      : [];
+    const membersById = new Map<string, any>(tiedMembers.map((member: any) => [member.id, member]));
+    const winners = bySlot.map((fixture: any) =>
+      LeagueService.resolvePlayoffWinner(fixture, membersById)
     );
 
     if (winners.length === 1) {

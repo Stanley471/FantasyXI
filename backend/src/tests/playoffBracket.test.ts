@@ -183,6 +183,19 @@ describe("H2H Playoffs — advancePlayoffRound", () => {
     assert.deepEqual(result, { champion: "m1" });
   });
 
+  it("uses regular-season H2H points to resolve a playoff draw before the seed fallback", async () => {
+    const fixtures = [
+      { id: "final", leagueId: "L", gameweekId: 38, homeMemberId: "m1", awayMemberId: "m3", homeScore: 50, awayScore: 50, isFinished: true, isPlayoff: true, playoffRound: 2, playoffSlot: 0 },
+    ];
+    const members = [member("m1", 18), member("m3", 21)];
+    const db = createMockDb({ fixtures, members });
+    const service = new LeagueService(db);
+
+    const result: any = await service.advancePlayoffRound("L", 38);
+
+    assert.deepEqual(result, { champion: "m3" });
+  });
+
   it("refuses to advance while a fixture in the round is still unsettled", async () => {
     const fixtures = [
       { id: "f1", leagueId: "L", gameweekId: 37, homeMemberId: "m1", awayMemberId: "m4", homeScore: 60, awayScore: 40, isFinished: true, isPlayoff: true, playoffRound: 1, playoffSlot: 0 },
