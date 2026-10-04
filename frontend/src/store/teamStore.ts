@@ -1,5 +1,10 @@
 import { create } from "zustand";
 import { Player, Position } from "@/types";
+<<<<<<< HEAD
+import { emitToast } from "@/context/ToastContext";
+=======
+import { validateSubstitution } from "@/lib/formation";
+>>>>>>> 720c408 (feat: complete deposit verification, soroban error recovery, e2e payment settlement, and interactive pitch dnd (closes #90, #96, #95, #92))
 
 export interface LocalSquadPlayer {
   id?: number | string;
@@ -9,6 +14,11 @@ export interface LocalSquadPlayer {
   isCaptain: boolean;
   isViceCaptain: boolean;
   positionOrder: number;
+}
+
+export interface SubstitutionFeedback {
+  type: "success" | "error";
+  message: string;
 }
 
 interface TeamState {
@@ -21,6 +31,12 @@ interface TeamState {
   
   selectedPlayerId: number | null;
   setSelectedPlayerId: (id: number | null) => void;
+
+  activeDragPlayer: LocalSquadPlayer | null;
+  setActiveDragPlayer: (player: LocalSquadPlayer | null) => void;
+
+  substitutionFeedback: SubstitutionFeedback | null;
+  setSubstitutionFeedback: (feedback: SubstitutionFeedback | null) => void;
   
   activeModalState: {
     isOpen: boolean;
@@ -30,7 +46,7 @@ interface TeamState {
   setActiveModalState: (state: { isOpen: boolean; requiredPosition: Position | null; replacingPlayer: Player | null }) => void;
   
   // Actions
-  handleSwap: (playerAId: number, playerBId: number) => void;
+  handleSwap: (playerAId: number, playerBId: number) => boolean;
   handleSetCaptain: (playerId: number) => void;
   handleSetViceCaptain: (playerId: number) => void;
   handlePlayerClick: (clickedPlayer: Player | null, position?: Position) => void;
@@ -50,6 +66,12 @@ export const useTeamStore = create<TeamState>((set, get) => ({
   
   selectedPlayerId: null,
   setSelectedPlayerId: (id) => set({ selectedPlayerId: id }),
+
+  activeDragPlayer: null,
+  setActiveDragPlayer: (player) => set({ activeDragPlayer: player }),
+
+  substitutionFeedback: null,
+  setSubstitutionFeedback: (feedback) => set({ substitutionFeedback: feedback }),
   
   activeModalState: {
     isOpen: false,
@@ -79,55 +101,84 @@ export const useTeamStore = create<TeamState>((set, get) => ({
   },
 
   handleSwap: (playerAId, playerBId) => {
-    set((state) => {
-      const prev = state.players;
-      const idxA = prev.findIndex((p) => p.playerId === playerAId);
-      const idxB = prev.findIndex((p) => p.playerId === playerBId);
-      if (idxA === -1 || idxB === -1) return { players: prev };
+    const state = get();
+    const prev = state.players;
+    const idxA = prev.findIndex((p) => p.playerId === playerAId);
+    const idxB = prev.findIndex((p) => p.playerId === playerBId);
+    if (idxA === -1 || idxB === -1) return false;
 
-      const clone = [...prev];
-      const a = { ...clone[idxA] };
-      const b = { ...clone[idxB] };
+    const a = prev[idxA];
+    const b = prev[idxB];
 
+<<<<<<< HEAD
       // GKP can only swap with GKP
       const aIsGkp = a.player.position === Position.GKP;
       const bIsGkp = b.player.position === Position.GKP;
       if (aIsGkp !== bIsGkp) {
-        alert("Goalkeepers can only be swapped with other Goalkeepers.");
+        emitToast.warning("Goalkeepers can only be swapped with other Goalkeepers.");
         return { players: prev };
       }
 
-      const tempStarter = a.isStarter;
+      // Capture both original starter flags before mutating either player —
+      // comparing against a mutated value here previously made the "did this
+      // cross the starter/bench boundary?" check below always false, since
+      // b.isStarter is reassigned to a's original value in the very next lines.
+      const aWasStarter = a.isStarter;
+      const bWasStarter = b.isStarter;
       const tempOrder = a.positionOrder;
+=======
+    // Validate substitution
+    const validation = validateSubstitution(a, b, prev);
+    if (!validation.valid) {
+      set({
+        substitutionFeedback: {
+          type: "error",
+          message: validation.reason || "Invalid substitution move.",
+        },
+      });
+      return false;
+    }
 
-      a.isStarter = b.isStarter;
-      a.positionOrder = b.positionOrder;
+    const clone = [...prev];
+    const newA = { ...a };
+    const newB = { ...b };
+>>>>>>> 720c408 (feat: complete deposit verification, soroban error recovery, e2e payment settlement, and interactive pitch dnd (closes #90, #96, #95, #92))
 
-      b.isStarter = tempStarter;
+    const tempStarter = newA.isStarter;
+    const tempOrder = newA.positionOrder;
+
+<<<<<<< HEAD
+      b.isStarter = aWasStarter;
       b.positionOrder = tempOrder;
+=======
+    newA.isStarter = newB.isStarter;
+    newA.positionOrder = newB.positionOrder;
+>>>>>>> 720c408 (feat: complete deposit verification, soroban error recovery, e2e payment settlement, and interactive pitch dnd (closes #90, #96, #95, #92))
 
-      if (!a.isStarter && a.isCaptain) {
-        a.isCaptain = false;
-        b.isCaptain = true;
-      }
-      if (!a.isStarter && a.isViceCaptain) {
-        a.isViceCaptain = false;
-        b.isViceCaptain = true;
-      }
-      if (!b.isStarter && b.isCaptain) {
-        b.isCaptain = false;
-        a.isCaptain = true;
-      }
-      if (!b.isStarter && b.isViceCaptain) {
-        b.isViceCaptain = false;
-        a.isViceCaptain = true;
-      }
+    newB.isStarter = tempStarter;
+    newB.positionOrder = tempOrder;
 
-      clone[idxA] = a;
-      clone[idxB] = b;
+    // Preserve captain / vice-captain validity
+    if (!newA.isStarter && newA.isCaptain) {
+      newA.isCaptain = false;
+      newB.isCaptain = true;
+    }
+    if (!newA.isStarter && newA.isViceCaptain) {
+      newA.isViceCaptain = false;
+      newB.isViceCaptain = true;
+    }
+    if (!newB.isStarter && newB.isCaptain) {
+      newB.isCaptain = false;
+      newA.isCaptain = true;
+    }
+    if (!newB.isStarter && newB.isViceCaptain) {
+      newB.isViceCaptain = false;
+      newA.isViceCaptain = true;
+    }
 
+<<<<<<< HEAD
       // Validate new formation if we swapped a starter with a bench player
-      if (tempStarter !== b.isStarter) {
+      if (aWasStarter !== bWasStarter) {
         // Need to import validateFormation and count starters dynamically. 
         // We will inline the validation logic for Outfields here since we don't have access to validateFormation import easily inside the store without adding the import.
         const newStarters = clone.filter(p => p.isStarter);
@@ -136,13 +187,25 @@ export const useTeamStore = create<TeamState>((set, get) => ({
         const fwd = newStarters.filter(p => p.player.position === Position.FWD).length;
         
         if (def < 3 || def > 5 || mid < 2 || mid > 5 || fwd < 1 || fwd > 3) {
-          alert(`Invalid Formation: This substitution would result in an invalid formation (${def}-${mid}-${fwd}).`);
+          emitToast.warning(
+            `Invalid Formation: This substitution would result in an invalid formation (${def}-${mid}-${fwd}).`
+          );
           return { players: prev };
         }
       }
+=======
+    clone[idxA] = newA;
+    clone[idxB] = newB;
+>>>>>>> 720c408 (feat: complete deposit verification, soroban error recovery, e2e payment settlement, and interactive pitch dnd (closes #90, #96, #95, #92))
 
-      return { players: clone };
+    set({
+      players: clone,
+      substitutionFeedback: {
+        type: "success",
+        message: `Successfully substituted ${a.player.displayName || a.player.lastName} with ${b.player.displayName || b.player.lastName}.`,
+      },
     });
+    return true;
   },
 
   handleSetCaptain: (playerId) => {

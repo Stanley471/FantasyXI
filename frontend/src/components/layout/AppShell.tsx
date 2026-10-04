@@ -6,6 +6,7 @@ import { Sidebar } from "./Sidebar";
 import { MobileNav } from "./MobileNav";
 import { GameweekBanner } from "./GameweekBanner";
 import { OfflineIndicator } from "./OfflineIndicator";
+import { PushNotificationPrompt } from "./PushNotificationPrompt";
 import { FootballIcon } from "@/components/ui/Icons";
 
 export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -18,6 +19,9 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
       <div className="flex-1 flex flex-col min-w-0 pb-20 md:pb-8">
         {/* Offline Indicator Banner */}
         <OfflineIndicator />
+
+        {/* Push Notification Opt-in Prompt (Issue #151) */}
+        <PushNotificationPrompt />
 
         {/* Top Header Bar */}
         <header className="sticky top-0 z-30 flex items-center justify-between px-4 sm:px-8 py-3 bg-slate-950/80 backdrop-blur-md border-b border-slate-800/80">
@@ -42,7 +46,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
           <div className="flex items-center gap-2.5">
             <Link
               href="/team"
-              className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white transition-colors"
+              className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-700 hover:bg-emerald-800 text-white transition-colors"
             >
               My Pitch
             </Link>

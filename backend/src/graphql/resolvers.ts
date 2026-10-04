@@ -28,6 +28,8 @@ export const createResolvers = (database: typeof prisma = prisma) => ({
       context.loaders.players.load(Number(args.id)),
     leagues: (_parent: unknown, args: { limit?: number }) =>
       database.league.findMany({
+        // Private leagues are invitation-only and never listed publicly
+        where: { isPrivate: false },
         take: Math.min(args.limit ?? 50, 100),
         include: { creator: true, members: { include: { user: true, squad: true } } },
       }),

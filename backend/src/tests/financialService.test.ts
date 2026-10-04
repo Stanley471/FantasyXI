@@ -31,6 +31,7 @@ function createMockDb(overrides?: any) {
     squads: new Map<string, any>(),
     members: new Map<string, any>(),
     transactions: new Map<string, any>(),
+    users: new Map<string, any>(),
     ...overrides,
   };
 
@@ -60,6 +61,15 @@ function createMockDb(overrides?: any) {
           transactions,
         };
       },
+      update: async ({ where, data }: any) => {
+        const current = state.leagues.get(where.id);
+        const updated = { ...current, ...data };
+        state.leagues.set(where.id, updated);
+        return updated;
+      },
+    },
+    user: {
+      findUnique: async ({ where }: any) => state.users?.get(where.id) || null,
     },
     squad: {
       findUnique: async ({ where }: any) => state.squads.get(where.id) || null,
@@ -84,7 +94,8 @@ function createMockDb(overrides?: any) {
             );
           if (!m) return null;
           const league = state.leagues.get(m.leagueId);
-          return { ...m, league };
+          const user = m.user || { email: "user@example.com", username: "user1" };
+          return { ...m, league, user };
         }
         return null;
       },
@@ -483,6 +494,97 @@ describe("FinancialService State Machine & Accounting", () => {
       assert.equal(result.success, true);
       assert.equal(verifyCalled, false); // No redundant network call!
     });
+
+    it("should trigger email notification with deposit amount and league name upon confirmed USDC deposit", async () => {
+      const mockDb = createMockDb();
+      mockDb.state.leagues.set("league_email", {
+        id: "league_email",
+        name: "Premier Champions Cup",
+        entryFee: 25.5,
+        status: LeagueStatus.UPCOMING,
+      });
+      mockDb.state.members.set("league_email:user_email", {
+        id: "member_email",
+        leagueId: "league_email",
+        userId: "user_email",
+        status: MembershipStatus.PENDING,
+        paymentStatus: PaymentStatus.PAYMENT_SUBMITTED,
+        stellarAddress: testWallet1,
+        user: {
+          email: "player1@fantasyxi.com",
+          username: "PlayerOne",
+        },
+      });
+      mockDb.state.transactions.set("tx_email", {
+        id: "tx_email",
+        stellarTxHash: VALID_TX_HASH_1,
+        memberId: "member_email",
+        status: TransactionStatus.SUBMITTED,
+      });
+
+      const dispatchedEmails: any[] = [];
+      const mockEmailService = {
+        sendDepositConfirmation: async (payload: any) => {
+          dispatchedEmails.push(payload);
+          return { success: true, messageId: "msg_123" };
+        },
+      } as any;
+
+      const service = new FinancialService(
+        mockDb,
+        createMockStellar(),
+        mockEmailService
+      );
+
+      const result = await service.verifyAndConfirmPayment(
+        "user_email",
+        "league_email",
+        VALID_TX_HASH_1
+      );
+
+      assert.equal(result.success, true);
+      assert.equal(dispatchedEmails.length, 1);
+      assert.equal(dispatchedEmails[0].to, "player1@fantasyxi.com");
+      assert.equal(dispatchedEmails[0].leagueName, "Premier Champions Cup");
+      assert.equal(dispatchedEmails[0].amount, 25.5);
+      assert.equal(dispatchedEmails[0].txHash, VALID_TX_HASH_1);
+    });
+
+    it("should NOT trigger email notification if payment verification fails", async () => {
+      const mockDb = createMockDb();
+      mockDb.state.leagues.set("league_fail", {
+        id: "league_fail",
+        name: "Failed Cup",
+        entryFee: 10,
+        status: LeagueStatus.UPCOMING,
+      });
+      mockDb.state.members.set("league_fail:user_fail", {
+        id: "member_fail",
+        leagueId: "league_fail",
+        userId: "user_fail",
+        status: MembershipStatus.PENDING,
+        paymentStatus: PaymentStatus.PAYMENT_SUBMITTED,
+        stellarAddress: testWallet1,
+        user: { email: "fail@fantasyxi.com" },
+      });
+
+      const dispatchedEmails: any[] = [];
+      const mockEmailService = {
+        sendDepositConfirmation: async (payload: any) => {
+          dispatchedEmails.push(payload);
+          return { success: true };
+        },
+      } as any;
+
+      const mockStellar = createMockStellar({
+        verificationResult: { success: false, error: "Invalid ledger" },
+      });
+
+      const service = new FinancialService(mockDb, mockStellar, mockEmailService);
+      await service.verifyAndConfirmPayment("user_fail", "league_fail", VALID_TX_HASH_1);
+
+      assert.equal(dispatchedEmails.length, 0);
+    });
   });
 
   describe("prepareSettlement & Prize Allocation", () => {
@@ -560,6 +662,75 @@ describe("FinancialService State Machine & Accounting", () => {
           await service.prepareSettlement("league_1", "intruder_user");
         },
         FinancialForbiddenError
+      );
+    });
+
+    it("should split a first-place tie and dispatch confirmed transactions atomically", async () => {
+      const mockDb = createMockDb();
+      const members = [1, 2].map((i) => ({
+        id: `tie_member_${i}`,
+        userId: `tie_user_${i}`,
+        leagueId: "6e5f9a4c-8b21-70d3-1234-567890abcdef",
+        status: MembershipStatus.ACTIVE,
+        paymentStatus: PaymentStatus.PAYMENT_CONFIRMED,
+        stellarAddress: i === 1 ? testWallet1 : testWallet2,
+        joinedAt: new Date(2026, 0, i),
+        user: { username: `Tie Manager ${i}` },
+        squad: { name: `Tie Squad ${i}`, totalPoints: 100 },
+      }));
+      mockDb.state.leagues.set("6e5f9a4c-8b21-70d3-1234-567890abcdef", {
+        id: "6e5f9a4c-8b21-70d3-1234-567890abcdef",
+        name: "Tie League",
+        entryFee: 10,
+        status: LeagueStatus.ACTIVE,
+        creatorId: "creator_user",
+        endGameweek: { isFinished: true },
+        members,
+      });
+      mockDb.state.users.set("admin_user", { id: "admin_user", role: "ADMIN" });
+
+      let dispatch: any;
+      const service = new FinancialService(
+        mockDb,
+        createMockStellar({
+          settleLeague: async (...args: any[]) => {
+            dispatch = args;
+            return { success: true, txHash: VALID_TX_HASH_2, ledgerSeq: 991122 };
+          },
+        })
+      );
+
+      const result = await service.executeSettlement(
+        "6e5f9a4c-8b21-70d3-1234-567890abcdef",
+        "admin_user"
+      );
+
+      assert.equal(dispatch[0], 0x6e5f9a4c8b2170d3n);
+      assert.deepEqual(dispatch[1].map((winner: any) => winner.amount), ["95000000", "95000000"]);
+      assert.equal(dispatch[2], 10000000n);
+      assert.equal(result.stellarTxHash, VALID_TX_HASH_2);
+      assert.equal(result.ledgerSeq, 991122);
+      assert.equal(
+        mockDb.state.leagues.get("6e5f9a4c-8b21-70d3-1234-567890abcdef").status,
+        LeagueStatus.COMPLETED
+      );
+      assert.equal(mockDb.state.transactions.size, 3);
+    });
+
+    it("should reject settlement until the end gameweek is finished", async () => {
+      const mockDb = createMockDb();
+      mockDb.state.leagues.set("league_unfinished", {
+        id: "league_unfinished",
+        creatorId: "creator_user",
+        status: LeagueStatus.ACTIVE,
+        endGameweek: { isFinished: false },
+      });
+      mockDb.state.users.set("admin_user", { id: "admin_user", role: "ADMIN" });
+
+      const service = new FinancialService(mockDb, createMockStellar());
+      await assert.rejects(
+        async () => service.executeSettlement("league_unfinished", "admin_user"),
+        FinancialValidationError
       );
     });
   });

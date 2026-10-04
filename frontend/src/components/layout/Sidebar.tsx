@@ -13,6 +13,8 @@ import {
   UserIcon,
   LogOutIcon,
   ShieldIcon,
+  ChartIcon,
+  MedalIcon,
 } from "@/components/ui/Icons";
 
 export const Sidebar: React.FC = () => {
@@ -23,8 +25,10 @@ export const Sidebar: React.FC = () => {
     { label: "Home", href: "/", icon: FootballIcon },
     { label: "My Team", href: "/team", icon: PitchIcon },
     { label: "Leagues", href: "/leagues", icon: TrophyIcon },
+    { label: "Leaderboard", href: "/leaderboard", icon: MedalIcon },
     { label: "Fixtures", href: "/fixtures", icon: CalendarIcon },
     { label: "Players", href: "/players", icon: UsersIcon },
+    { label: "Analytics", href: "/analytics", icon: ChartIcon },
     { label: "Profile", href: "/profile", icon: UserIcon },
   ];
 
@@ -106,7 +110,7 @@ export const Sidebar: React.FC = () => {
           <div className="space-y-2">
             <Link
               href="/login"
-              className="flex items-center justify-center w-full py-2.5 px-3 rounded-lg text-sm font-semibold bg-emerald-600 hover:bg-emerald-500 text-white transition-colors text-center"
+              className="flex items-center justify-center w-full py-2.5 px-3 rounded-lg text-sm font-semibold bg-emerald-700 hover:bg-emerald-800 text-white transition-colors text-center"
             >
               Sign In
             </Link>

@@ -142,3 +142,29 @@ body {
   border-top-left-radius: 6px;
   border-top-right-radius: 6px;
 }
+
+/* Toast Animations */
+@keyframes toast-slide-in {
+  from {
+    opacity: 0;
+    transform: translate3d(100%, 0, 0) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes toast-progress {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
+.animate-toast-in {
+  animation: toast-slide-in 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+

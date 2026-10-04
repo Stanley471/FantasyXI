@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { api, ApiError } from "@/lib/api";
+import { describeGoogleAuthError, redirectToGoogleSignIn, safeReturnTo } from "@/lib/googleAuth";
 import { IconFootball, IconGoogle, IconAlertCircle, IconCheck } from "@/components/ui/Icons";
 import { Button } from "@/components/ui/Button";
 
@@ -13,15 +14,13 @@ function LoginForm() {
   const searchParams = useSearchParams();
   const { login, isAuthenticated } = useAuth();
 
-  const returnTo = searchParams.get("returnTo") || "/";
+  const returnTo = safeReturnTo(searchParams.get("returnTo"));
   const urlError = searchParams.get("error");
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const [errorMsg, setErrorMsg] = useState<string | null>(
-    urlError ? "Google sign-in was cancelled or encountered an issue. Please try again." : null
-  );
+  const [errorMsg, setErrorMsg] = useState<string | null>(describeGoogleAuthError(urlError));
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // If already authenticated, redirect immediately
@@ -81,12 +80,7 @@ function LoginForm() {
   };
 
   const handleGoogleLogin = () => {
-    const backendUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
-    const googleEndpoint = new URL("/api/v1/auth/google", backendUrl);
-    if (returnTo && returnTo !== "/") {
-      googleEndpoint.searchParams.set("returnTo", returnTo);
-    }
-    window.location.href = googleEndpoint.toString();
+    redirectToGoogleSignIn(returnTo);
   };
 
   return (

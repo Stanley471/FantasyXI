@@ -177,6 +177,30 @@ export async function getUserSquads(
   }
 }
 
+export async function getSquadValuation(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const { id } = req.params;
+    const valuation = await squadService.getSquadValuation(id as string);
+    res.json({
+      success: true,
+      data: valuation,
+    });
+  } catch (error) {
+    if (error instanceof SquadValidationError) {
+      res.status(404).json({
+        success: false,
+        message: error.message,
+      });
+      return;
+    }
+    next(error);
+  }
+}
+
 export async function calculateGameweekScore(
   req: Request,
   res: Response,

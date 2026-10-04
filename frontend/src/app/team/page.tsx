@@ -1,10 +1,12 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { api, ApiError } from "@/lib/api";
-import { Squad, Player, Position, SQUAD_RULES } from "@/types";
+import { isOfflineError, loadSquadSnapshot, saveSquadSnapshot } from "@/lib/offlineStore";
+import { useOnlineStatus } from "@/lib/useOnlineStatus";
+import { Squad, Player, Position, SQUAD_RULES, ChipType, SquadChipUsage } from "@/types";
 import { Pitch } from "@/components/pitch/Pitch";
 import { Bench } from "@/components/pitch/Bench";
 import { BudgetBar } from "@/components/team/BudgetBar";
@@ -19,6 +21,7 @@ import {
 } from "@/components/ui/Icons";
 import { Button } from "@/components/ui/Button";
 import { PositionBadge } from "@/components/ui/Badge";
+import { useToast } from "@/context/ToastContext";
 import {
   DndContext,
   MouseSensor,
@@ -36,12 +39,15 @@ import { PlayerCard } from "@/components/pitch/PlayerCard";
 export default function TeamPage() {
   const router = useRouter();
   const { user, isAuthenticated, isLoading: authLoading } = useAuth();
+  const { toast } = useToast();
 
   const { 
     squadId, setSquadId, 
     squadName, setSquadName, 
     players, setPlayers, 
     selectedPlayerId, setSelectedPlayerId,
+    activeDragPlayer, setActiveDragPlayer,
+    substitutionFeedback, setSubstitutionFeedback,
     activeModalState, setActiveModalState,
     handleSwap, handleSetCaptain, handleSetViceCaptain
   } = useTeamStore();
@@ -50,6 +56,17 @@ export default function TeamPage() {
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [saveSuccessMsg, setSaveSuccessMsg] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const isOnline = useOnlineStatus();
+  // When set, the pitch shows the squad saved on this device at that time
+  const [offlineSnapshotAt, setOfflineSnapshotAt] = useState<string | null>(null);
+  const showingSnapshot = useRef(false);
+  const userId = user?.id;
+  
+  // Wildcard chip state
+  const [isWildcardActive, setIsWildcardActive] = useState<boolean>(false);
+  const [currentGameweek, setCurrentGameweek] = useState<{ id: number; name: string; deadline: string } | null>(null);
+  const [chipUsages, setChipUsages] = useState<SquadChipUsage[]>([]);
+  const [isActivatingChip, setIsActivatingChip] = useState<boolean>(false);
 
   // Load existing squad
   useEffect(() => {
@@ -57,43 +74,93 @@ export default function TeamPage() {
       router.replace("/login?returnTo=/team");
       return;
     }
+    if (!isAuthenticated || !userId) return;
+
+    let cancelled = false;
+
+    const applySquads = (squads: Squad[]) => {
+      if (squads.length === 0) return;
+      const s = squads[0];
+      setSquadId(s.id);
+      setSquadName(s.name);
+
+      if (s.players && s.players.length > 0) {
+        const mapped: LocalSquadPlayer[] = s.players
+          .filter((sp) => sp.player)
+          .map((sp) => ({
+            id: sp.id,
+            playerId: sp.playerId,
+            player: sp.player!,
+            isStarter: sp.isStarter,
+            isCaptain: sp.isCaptain,
+            isViceCaptain: sp.isViceCaptain,
+            positionOrder: sp.positionOrder,
+          }));
+        setPlayers(mapped);
+      }
+    };
 
     async function loadSquad() {
-      if (!isAuthenticated) return;
       setIsLoading(true);
       try {
-        const res = await api.get<{ success: boolean; data: Squad[] }>("/api/v1/squads/me");
-        if (res?.data && res.data.length > 0) {
-          const s = res.data[0];
-          setSquadId(s.id);
-          setSquadName(s.name);
-
-          if (s.players && s.players.length > 0) {
-            const mapped: LocalSquadPlayer[] = s.players
-              .filter((sp) => sp.player)
-              .map((sp) => ({
-                id: sp.id,
-                playerId: sp.playerId,
-                player: sp.player!,
-                isStarter: sp.isStarter,
-                isCaptain: sp.isCaptain,
-                isViceCaptain: sp.isViceCaptain,
-                positionOrder: sp.positionOrder,
-              }));
-            setPlayers(mapped);
+        const [squadRes, gameweekRes] = await Promise.all([
+          api.get<{ success: boolean; data: Squad[] }>("/api/v1/squads/me"),
+          api.get<{ success: boolean; data: { id: number; name: string; deadline: string } | null }>("/api/v1/gameweeks/current"),
+        ]);
+        if (cancelled) return;
+        
+        if (squadRes?.data) {
+          saveSquadSnapshot(userId!, squadRes.data);
+          applySquads(squadRes.data);
+          
+          // Load chip usages if squad has them
+          if (squadRes.data[0]?.chipUsages) {
+            setChipUsages(squadRes.data[0].chipUsages);
           }
         }
+        
+        if (gameweekRes?.data) {
+          setCurrentGameweek({
+            id: gameweekRes.data.id,
+            name: gameweekRes.data.name,
+            deadline: gameweekRes.data.deadline,
+          });
+        }
+        
+        showingSnapshot.current = false;
+        setOfflineSnapshotAt(null);
       } catch (err) {
-        console.error("Failed to load user squad:", err);
+        if (cancelled) return;
+        const snapshot = isOfflineError(err) ? loadSquadSnapshot(userId!) : null;
+        if (snapshot) {
+          applySquads(snapshot.squads);
+          showingSnapshot.current = true;
+          setOfflineSnapshotAt(snapshot.savedAt);
+        } else if (isOfflineError(err)) {
+          setErrorMessage("You are offline and this device has no saved copy of your squad yet.");
+        } else {
+          console.error("Failed to load user squad:", err);
+        }
       } finally {
-        setIsLoading(false);
+        if (!cancelled) setIsLoading(false);
       }
     }
 
-    if (isAuthenticated) {
-      loadSquad();
-    }
-  }, [isAuthenticated, authLoading, router]);
+    loadSquad();
+
+    // Swap the saved copy for live data as soon as the connection returns
+    const handleOnline = () => {
+      if (showingSnapshot.current) {
+        setErrorMessage(null);
+        loadSquad();
+      }
+    };
+    window.addEventListener("online", handleOnline);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("online", handleOnline);
+    };
+  }, [isAuthenticated, authLoading, router, userId, setSquadId, setSquadName, setPlayers]);
 
   // Derived state
   const starters = players
@@ -123,8 +190,6 @@ export default function TeamPage() {
   const selectedPlayer = players.find((p) => p.playerId === selectedPlayerId);
 
   // DND Handlers
-  const [activeDragPlayer, setActiveDragPlayer] = useState<LocalSquadPlayer | null>(null);
-
   const sensors = useSensors(
     useSensor(MouseSensor, {
       activationConstraint: {
@@ -141,9 +206,10 @@ export default function TeamPage() {
 
   const handleDragStart = (event: DragStartEvent) => {
     const { active } = event;
-    const player = players.find((p) => p.playerId === active.id);
+    const player = players.find((p) => String(p.playerId) === String(active.id));
     if (player) {
       setActiveDragPlayer(player);
+      setSubstitutionFeedback(null);
     }
   };
 
@@ -173,9 +239,12 @@ export default function TeamPage() {
         data: { players: Player[] } | Player[];
       }>("/api/v1/players?limit=100&sortBy=totalPoints&sortOrder=desc");
 
-      const pool: Player[] = Array.isArray(res?.data)
-        ? res.data
-        : (res?.data as any)?.players || [];
+      const data = res?.data;
+      const pool: Player[] = Array.isArray(data)
+        ? data
+        : data && typeof data === "object" && "players" in data && Array.isArray((data as { players: Player[] }).players)
+          ? (data as { players: Player[] }).players
+          : [];
 
       if (pool.length < 15) {
         setErrorMessage("Not enough players in database to auto-draft a squad.");
@@ -294,10 +363,13 @@ export default function TeamPage() {
 
         setPlayers(newPlayers);
         setSelectedPlayerId(null);
+        toast.info("Auto-drafted a balanced squad! Review tactics before saving.");
       }
     } catch (err) {
       console.error("Auto-pick error:", err);
-      setErrorMessage("Failed to auto-generate squad. Please try picking manually.");
+      const msg = "Failed to auto-generate squad. Please try picking manually.";
+      setErrorMessage(msg);
+      toast.error(msg);
     } finally {
       setIsLoading(false);
     }
@@ -347,9 +419,13 @@ export default function TeamPage() {
     setSelectedPlayerId(null);
   };
 
-  // Save changes to backend
+  // Save changes to backend with optimistic rollback
   const handleSaveSquad = async () => {
     if (!canSave) return;
+    if (!isOnline) {
+      setErrorMessage("You are offline. Reconnect to save your squad or make transfers.");
+      return;
+    }
     setIsSaving(true);
     setErrorMessage(null);
     setSaveSuccessMsg(null);
@@ -365,48 +441,151 @@ export default function TeamPage() {
       })),
     };
 
+    // Snapshot current state for rollback
+    const previousPlayers = players.map((p) => ({ ...p, player: p.player ? { ...p.player } : undefined }));
+
     try {
       if (squadId) {
-        // Update existing squad
-        await api.put(`/api/v1/squads/${squadId}`, payload);
-        setSaveSuccessMsg("Squad lineup and tactics updated successfully!");
+        // Optimistic update: assume success, rollback on failure
+        let rollback = false;
+        try {
+          await api.put(`/api/v1/squads/${squadId}`, payload);
+          const msg = "Squad lineup and tactics updated successfully!";
+          setSaveSuccessMsg(msg);
+          toast.success(msg);
+        } catch (err: unknown) {
+          rollback = true;
+          const msg =
+            err instanceof ApiError
+              ? err.message || "Failed to save squad."
+              : err instanceof Error
+                ? err.message
+                : "An unexpected error occurred while saving squad.";
+          setPlayers(previousPlayers);
+          setErrorMessage(msg);
+          toast.error(msg);
+        }
       } else {
         // Create new squad
         const createPayload = {
           ...payload,
           userId: user?.id,
         };
-        const res = await api.post<{ success: boolean; data: Squad }>(
-          "/api/v1/squads",
-          createPayload
-        );
-        if (res?.data?.id) {
-          setSquadId(res.data.id);
+        try {
+          const res = await api.post<{ success: boolean; data: Squad }>(
+            "/api/v1/squads",
+            createPayload
+          );
+          if (res?.data?.id) {
+            setSquadId(res.data.id);
+          }
+          const msg = "Squad created and registered in FantasyXI!";
+          setSaveSuccessMsg(msg);
+          toast.success(msg);
+        } catch (err: unknown) {
+          const msg =
+            err instanceof ApiError
+              ? err.message || "Failed to create squad."
+              : err instanceof Error
+                ? err.message
+                : "An unexpected error occurred while creating squad.";
+          setPlayers(previousPlayers);
+          setErrorMessage(msg);
+          toast.error(msg);
         }
-        setSaveSuccessMsg("Squad created and registered in FantasyXI!");
-      }
-    } catch (err: unknown) {
-      if (err instanceof ApiError) {
-        setErrorMessage(err.message || "Failed to save squad.");
-      } else if (err instanceof Error) {
-        setErrorMessage(err.message);
-      } else {
-        setErrorMessage("An unexpected error occurred while saving squad.");
       }
     } finally {
       setIsSaving(false);
     }
   };
 
+  // Activate Wildcard chip
+  const handleActivateWildcard = async () => {
+    if (!squadId || !currentGameweek || !isOnline) {
+      setErrorMessage("Cannot activate Wildcard: squad ID or current gameweek not available, or you are offline.");
+      return;
+    }
+
+    setIsActivatingChip(true);
+    setErrorMessage(null);
+
+    try {
+      await api.post(`/api/v1/squads/${squadId}/chip`, {
+        chipType: ChipType.WILDCARD,
+        gameweekId: currentGameweek.id,
+      });
+
+      setIsWildcardActive(true);
+      const newUsage: SquadChipUsage = {
+        id: Date.now(),
+        squadId,
+        gameweekId: currentGameweek.id,
+        chipType: ChipType.WILDCARD,
+        season: new Date().getFullYear().toString(),
+        usedAt: new Date().toISOString(),
+      };
+      setChipUsages([...chipUsages, newUsage]);
+      
+      toast.success("Wildcard activated! All transfers this gameweek are free.");
+    } catch (err: unknown) {
+      const msg =
+        err instanceof ApiError
+          ? err.message || "Failed to activate Wildcard."
+          : err instanceof Error
+            ? err.message
+            : "An unexpected error occurred while activating Wildcard.";
+      setErrorMessage(msg);
+      toast.error(msg);
+    } finally {
+      setIsActivatingChip(false);
+    }
+  };
+
+  // Check if Wildcard is already active for current gameweek
+  useEffect(() => {
+    if (currentGameweek && chipUsages.length > 0) {
+      const wildcardForGameweek = chipUsages.find(
+        (usage) => usage.chipType === ChipType.WILDCARD && usage.gameweekId === currentGameweek.id
+      );
+      setIsWildcardActive(!!wildcardForGameweek);
+    }
+  }, [currentGameweek, chipUsages]);
+
   if (isLoading) {
     return (
-      <div className="py-24 text-center text-slate-400">
-        <div className="inline-block w-10 h-10 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin mb-4" />
-        <h2 className="text-base font-bold text-white uppercase tracking-tight">
-          Loading Dugout & Tactical Pitch...
-        </h2>
-        <p className="text-xs text-slate-500 mt-1">Retrieving squad lineup and FPL player telemetry</p>
-      </div>
+      <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
+        <div className="space-y-6 pb-12">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-pitch-surface border border-pitch-border p-5 rounded-xl shadow-md">
+            <div>
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">
+                  Tactical Pitch
+                </span>
+                <span className="text-xs font-mono text-slate-500">&bull; Gameweek Lineup</span>
+              </div>
+              <div className="h-8 w-40 rounded-md bg-slate-800/90 animate-pulse border border-slate-700" />
+            </div>
+            <div className="flex items-center gap-2 text-xs font-mono">
+              <span className="text-slate-400 uppercase tracking-wider text-[11px]">Formation</span>
+              <span className="h-5 w-14 rounded-md bg-slate-800 border border-slate-700 animate-pulse" />
+            </div>
+          </div>
+
+          <BudgetBar
+            onAutoPick={handleAutoPick}
+            onReset={() => {
+              setPlayers([]);
+              setSelectedPlayerId(null);
+            }}
+            isSaving={isSaving}
+            onSave={handleSaveSquad}
+            canSave={canSave}
+          />
+
+          <Pitch isLoading />
+          <Bench isLoading />
+        </div>
+      </DndContext>
     );
   }
 
@@ -434,26 +613,95 @@ export default function TeamPage() {
           </div>
 
           {/* Formation & Rules status */}
-          <div className="flex items-center gap-2 text-xs font-mono">
-            <span className="text-slate-400 uppercase tracking-wider text-[11px]">Formation</span>
-            <span className="text-emerald-400 font-bold text-sm">
-              {detectFormation(starters as any)}
-            </span>
+          <div className="flex items-center gap-4 text-xs font-mono">
+            <div className="flex items-center gap-2">
+              <span className="text-slate-400 uppercase tracking-wider text-[11px]">Formation</span>
+              <span className="text-emerald-400 font-bold text-sm">
+                {detectFormation(starters)}
+              </span>
+            </div>
+            
+            {/* Wildcard Chip Toggle */}
+            {currentGameweek && (
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleActivateWildcard}
+                  disabled={isWildcardActive || isActivatingChip || !isOnline}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${
+                    isWildcardActive
+                      ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/50 cursor-not-allowed"
+                      : "bg-amber-500/20 text-amber-400 border border-amber-500/50 hover:bg-amber-500/30"
+                  } disabled:opacity-50`}
+                  data-testid="wildcard-toggle"
+                >
+                  {isActivatingChip ? (
+                    "Activating..."
+                  ) : isWildcardActive ? (
+                    "Wildcard Active"
+                  ) : (
+                    "Activate Wildcard"
+                  )}
+                </button>
+              </div>
+            )}
           </div>
         </div>
 
+        {/* Offline mode: read-only view of the squad saved on this device */}
+        {(offlineSnapshotAt || !isOnline) && (
+          <div
+            role="status"
+            className="p-3.5 rounded-lg bg-amber-950/40 border border-amber-500/40 flex items-center gap-3 text-amber-200 text-xs"
+          >
+            <IconAlertCircle className="w-4 h-4 text-amber-400 flex-shrink-0" />
+            <span className="font-semibold">
+              {offlineSnapshotAt
+                ? `Offline mode: showing your squad as saved on this device ${new Date(offlineSnapshotAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}.`
+                : "You are offline."}{" "}
+              Saving and transfers need a connection.
+            </span>
+          </div>
+        )}
+
         {/* Notifications */}
         {saveSuccessMsg && (
-          <div className="p-3.5 rounded-lg bg-emerald-950/40 border border-emerald-500/40 flex items-center gap-3 text-emerald-300 text-xs animate-fadeIn">
+          <div data-testid="save-success" className="p-3.5 rounded-lg bg-emerald-950/40 border border-emerald-500/40 flex items-center gap-3 text-emerald-300 text-xs animate-fadeIn">
             <IconCheck className="w-4 h-4 text-emerald-400 flex-shrink-0" />
             <span className="font-semibold">{saveSuccessMsg}</span>
           </div>
         )}
 
         {errorMessage && (
-          <div className="p-3.5 rounded-lg bg-rose-950/40 border border-rose-500/40 flex items-center gap-3 text-rose-300 text-xs animate-shake">
+          <div data-testid="save-error" className="p-3.5 rounded-lg bg-rose-950/40 border border-rose-500/40 flex items-center gap-3 text-rose-300 text-xs animate-shake">
             <IconAlertCircle className="w-4 h-4 text-rose-400 flex-shrink-0" />
             <span className="font-semibold">{errorMessage}</span>
+          </div>
+        )}
+
+        {substitutionFeedback && (
+          <div
+            className={`p-3.5 rounded-lg flex items-center justify-between gap-3 text-xs animate-fadeIn ${
+              substitutionFeedback.type === "success"
+                ? "bg-emerald-950/50 border border-emerald-500/50 text-emerald-300"
+                : "bg-rose-950/50 border border-rose-500/50 text-rose-300"
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              {substitutionFeedback.type === "success" ? (
+                <IconCheck className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+              ) : (
+                <IconAlertCircle className="w-4 h-4 text-rose-400 flex-shrink-0" />
+              )}
+              <span className="font-semibold">{substitutionFeedback.message}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSubstitutionFeedback(null)}
+              className="text-[10px] text-slate-400 hover:text-white uppercase font-mono px-1.5 py-0.5 rounded hover:bg-white/10"
+            >
+              Dismiss
+            </button>
           </div>
         )}
 
@@ -466,12 +714,12 @@ export default function TeamPage() {
           }}
           isSaving={isSaving}
           onSave={handleSaveSquad}
-          canSave={canSave}
+          canSave={canSave && isOnline}
         />
 
         {/* Validation Errors Pill if invalid */}
         {!validation.valid && validation.errors.length > 0 && (
-          <div className="p-3 rounded-lg bg-amber-950/30 border border-amber-500/30 text-amber-300 text-xs space-y-1">
+          <div data-testid="formation-errors" className="p-3 rounded-lg bg-amber-950/30 border border-amber-500/30 text-amber-300 text-xs space-y-1">
             <div className="font-bold uppercase tracking-wider flex items-center gap-1.5 text-[11px]">
               <IconAlertCircle className="w-3.5 h-3.5" />
               <span>Lineup Constraints Checklist</span>
@@ -535,6 +783,7 @@ export default function TeamPage() {
                     setSelectedPlayerId(null);
                   }}
                   className="w-full justify-start text-sm"
+                  data-testid="transfer-out-button"
                 >
                   <IconSwap className="w-4 h-4 mr-2 opacity-70" /> Transfer Out
                 </Button>

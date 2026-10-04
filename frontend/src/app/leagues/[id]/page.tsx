@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, use } from "react";
+import React, { useState, useEffect, useCallback, use } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
@@ -13,23 +13,24 @@ import {
   LeagueStatus,
 } from "@/types";
 import { StandingsTable } from "@/components/leagues/StandingsTable";
+import { LeagueChat } from "@/components/chat/LeagueChat";
 import { PrizeCalculator } from "@/components/leagues/PrizeCalculator";
 import { PaymentModal } from "@/components/leagues/PaymentModal";
+import { InvitationManager } from "@/components/leagues/InvitationManager";
 import { getOnChainLeague, OnChainLeagueState } from "@/lib/stellar/sorobanAudit";
 import { LiveMatchdayBar } from "@/components/live/LiveMatchdayBar";
 import { LiveSquadModal } from "@/components/live/LiveSquadModal";
 import { useLiveLeague } from "@/components/live/useLiveLeague";
 import { LeagueStatusBadge, Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { useToast } from "@/context/ToastContext";
 import {
   IconTrophy,
-  IconUsers,
   IconCopy,
   IconCheck,
   IconAlertCircle,
   IconChevronLeft,
   IconShield,
-  IconPlus,
 } from "@/components/ui/Icons";
 
 export default function LeagueDetailPage({
@@ -42,6 +43,7 @@ export default function LeagueDetailPage({
 
   const router = useRouter();
   const { user, isAuthenticated } = useAuth();
+  const { toast } = useToast();
 
   const [league, setLeague] = useState<League | null>(null);
   const [standings, setStandings] = useState<LeagueStandingsEntry[]>([]);
@@ -77,7 +79,7 @@ export default function LeagueDetailPage({
   );
 
   // Load league data, standings, and user squads
-  const loadLeagueData = async () => {
+  const loadLeagueData = useCallback(async () => {
     try {
       // 1. Fetch league details
       const lgRes = await api.get<{ success: boolean; data: League }>(
@@ -116,10 +118,56 @@ export default function LeagueDetailPage({
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [leagueId, isAuthenticated]);
 
   useEffect(() => {
-    loadLeagueData();
+    let cancelled = false;
+
+    async function init() {
+      try {
+        const lgRes = await api.get<{ success: boolean; data: League }>(
+          `/api/v1/leagues/${leagueId}`
+        );
+        if (!cancelled && lgRes?.data) {
+          setLeague(lgRes.data);
+        }
+
+        const stdRes = await api.get<{
+          success: boolean;
+          data: LeagueStandingsEntry[] | { standings: LeagueStandingsEntry[] };
+        }>(`/api/v1/leagues/${leagueId}/standings`);
+        if (!cancelled && stdRes?.data) {
+          setStandings(Array.isArray(stdRes.data) ? stdRes.data : stdRes.data.standings);
+        }
+
+        if (isAuthenticated) {
+          const squadRes = await api.get<{ success: boolean; data: Squad[] }>(
+            "/api/v1/squads/me"
+          );
+          if (!cancelled && squadRes?.data && squadRes.data.length > 0) {
+            setUserSquads(squadRes.data);
+            setSelectedSquadId(squadRes.data[0].id);
+          }
+        }
+      } catch (err: unknown) {
+        if (!cancelled) {
+          if (err instanceof ApiError) {
+            setErrorMessage(err.message || "Failed to load league details.");
+          } else {
+            setErrorMessage("Could not load competition data.");
+          }
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
+      }
+    }
+
+    init();
+    return () => {
+      cancelled = true;
+    };
   }, [leagueId, isAuthenticated]);
 
   useEffect(() => {
@@ -146,6 +194,7 @@ export default function LeagueDetailPage({
     if (league?.inviteCode) {
       navigator.clipboard.writeText(league.inviteCode);
       setCopiedCode(true);
+      toast.success("League invite code copied to clipboard!");
       setTimeout(() => setCopiedCode(false), 2000);
     }
   };
@@ -158,7 +207,9 @@ export default function LeagueDetailPage({
     }
 
     if (!selectedSquadId) {
-      setErrorMessage("Please select a squad to enter this league.");
+      const msg = "Please select a squad to enter this league.";
+      setErrorMessage(msg);
+      toast.warning(msg);
       return;
     }
 
@@ -170,6 +221,8 @@ export default function LeagueDetailPage({
         squadId: selectedSquadId,
       });
 
+      toast.success(`Successfully joined ${league?.name || "league"}!`);
+
       // Reload standings
       await loadLeagueData();
 
@@ -178,13 +231,14 @@ export default function LeagueDetailPage({
         setShowPaymentModal(true);
       }
     } catch (err: unknown) {
-      if (err instanceof ApiError) {
-        setErrorMessage(err.message || "Failed to join league.");
-      } else if (err instanceof Error) {
-        setErrorMessage(err.message);
-      } else {
-        setErrorMessage("An unexpected error occurred.");
-      }
+      const msg =
+        err instanceof ApiError
+          ? err.message || "Failed to join league."
+          : err instanceof Error
+            ? err.message
+            : "An unexpected error occurred.";
+      setErrorMessage(msg);
+      toast.error(msg);
     } finally {
       setIsJoining(false);
     }
@@ -220,6 +274,7 @@ export default function LeagueDetailPage({
   const myEntry = user ? standings.find((s) => s.userId === user.id) : null;
   const isMember = !!myEntry;
   const hasPaid = myEntry?.membershipStatus === MembershipStatus.ACTIVE || league?.entryFee === 0;
+  const isCreator = !!user && league?.creatorId === user.id;
 
   if (isLoading) {
     return (
@@ -268,6 +323,12 @@ export default function LeagueDetailPage({
           <div>
             <div className="flex items-center gap-2 mb-1.5">
               <LeagueStatusBadge status={league.status} />
+              {league.isPrivate && (
+                <Badge variant="neutral" className="gap-1">
+                  <IconShield className="w-3 h-3" />
+                  <span>Private</span>
+                </Badge>
+              )}
               <span className="text-xs font-mono text-slate-400">
                 GW {league.startGameweekId} &rarr; GW {league.endGameweekId}
               </span>
@@ -280,25 +341,27 @@ export default function LeagueDetailPage({
             </p>
           </div>
 
-          {/* Invite Code Widget */}
-          <div className="flex items-center gap-2 p-2.5 rounded-lg bg-slate-950/80 border border-slate-800 self-start md:self-auto">
-            <div>
-              <div className="text-[10px] uppercase font-semibold text-slate-500">Invite Code</div>
-              <div className="font-mono font-bold text-white tracking-widest text-sm">
-                {league.inviteCode}
+          {/* Invite Code Widget (private league codes are only returned to the creator) */}
+          {league.inviteCode && (
+            <div className="flex items-center gap-2 p-2.5 rounded-lg bg-slate-950/80 border border-slate-800 self-start md:self-auto">
+              <div>
+                <div className="text-[10px] uppercase font-semibold text-slate-500">Invite Code</div>
+                <div className="font-mono font-bold text-white tracking-widest text-sm">
+                  {league.inviteCode}
+                </div>
               </div>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={copyInviteCode}
+                className="text-xs"
+                title="Copy Invite Code"
+              >
+                {copiedCode ? <IconCheck className="w-3.5 h-3.5 text-emerald-400" /> : <IconCopy className="w-3.5 h-3.5" />}
+              </Button>
             </div>
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              onClick={copyInviteCode}
-              className="text-xs"
-              title="Copy Invite Code"
-            >
-              {copiedCode ? <IconCheck className="w-3.5 h-3.5 text-emerald-400" /> : <IconCopy className="w-3.5 h-3.5" />}
-            </Button>
-          </div>
+          )}
         </div>
 
         {/* 4 Stats Grid */}
@@ -355,6 +418,10 @@ export default function LeagueDetailPage({
                   </Badge>
                 )}
               </div>
+            ) : league.isPrivate ? (
+              <span className="text-xs text-slate-400">
+                This is a private league. Ask the creator for an invitation link to join.
+              </span>
             ) : (
               <div className="flex items-center gap-3">
                 <span className="text-xs font-semibold text-slate-300">Enter with Squad:</span>
@@ -396,7 +463,7 @@ export default function LeagueDetailPage({
               >
                 Pay {league.entryFee} USDC Entry Fee
               </Button>
-            ) : !isMember ? (
+            ) : !isMember && !league.isPrivate ? (
               <Button
                 type="button"
                 variant="primary"
@@ -462,10 +529,18 @@ export default function LeagueDetailPage({
               onSelectEntry={livePoints ? setLiveSquadUserId : undefined}
             />
           </div>
+
+          {user && (isMember || isCreator) && (
+            <LeagueChat leagueId={league.id} currentUser={{ id: user.id, username: user.username }} />
+          )}
         </div>
 
         {/* Right 1 Col: Prize Payout Calculator & Rules */}
         <div className="space-y-6">
+          {league.isPrivate && isCreator && league.status === LeagueStatus.UPCOMING && (
+            <InvitationManager leagueId={league.id} />
+          )}
+
           <PrizeCalculator entryFee={league.entryFee} participants={league.currentMembers || league.maxMembers} />
 
           {league.entryFee > 0 && (

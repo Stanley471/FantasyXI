@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
+import { useToast } from "@/context/ToastContext";
 
 interface AffiliateData {
   referralCode: string;
@@ -16,6 +17,7 @@ interface AffiliateData {
 }
 
 export default function AffiliateDashboardPage() {
+  const { toast } = useToast();
   const [data, setData] = useState<AffiliateData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -37,20 +39,23 @@ export default function AffiliateDashboardPage() {
         if (!res.ok) throw new Error("Failed to fetch affiliate dashboard data");
         const json = await res.json();
         setData(json.data);
-      } catch (err: any) {
-        setError(err.message || "An error occurred");
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "An error occurred";
+        setError(msg);
+        toast.error(msg);
       } finally {
         setLoading(false);
       }
     };
 
     fetchAffiliateData();
-  }, []);
+  }, [toast]);
 
   const handleCopy = () => {
     if (data?.referralLink) {
       navigator.clipboard.writeText(data.referralLink);
       setCopied(true);
+      toast.success("Affiliate referral link copied to clipboard!");
       setTimeout(() => setCopied(false), 2000);
     }
   };

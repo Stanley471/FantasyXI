@@ -18,8 +18,10 @@ import dotenv from "dotenv";
 import {
   Account,
   Address,
+  authorizeEntry,
   BASE_FEE,
   Contract,
+  inspectAuthEntry,
   Keypair,
   Networks,
   Operation,
@@ -30,6 +32,11 @@ import {
   xdr,
   type Transaction,
 } from "@stellar/stellar-sdk";
+import {
+  LocalSecretTransactionSigner,
+  type StellarTransactionSigner,
+  type StellarTransaction,
+} from "./transactionSigner.js";
 
 // Load testnet deployment configuration
 const envTestnetPath = path.resolve(process.cwd(), ".env.testnet.local");
@@ -39,6 +46,24 @@ if (fs.existsSync(envTestnetPath)) {
 
 /** Well-known empty account used as the source of read-only simulations. */
 const SIMULATION_SOURCE = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+
+import {
+  parseSorobanError,
+  executeWithRetry,
+  executeWithRollback,
+  EscrowContractErrorCode,
+  ESCROW_ERROR_CATALOG,
+  type ParsedSorobanError,
+} from "./sorobanErrorRecovery.js";
+
+export {
+  parseSorobanError,
+  executeWithRetry,
+  executeWithRollback,
+  EscrowContractErrorCode,
+  ESCROW_ERROR_CATALOG,
+  type ParsedSorobanError,
+};
 
 export interface OnChainLeagueState {
   creator: string;
@@ -56,18 +81,24 @@ export interface WinnerPayoutParam {
 export interface InvocationResult {
   success: boolean;
   txHash?: string;
+  ledgerSeq?: number;
   returnValue?: unknown;
   error?: string;
   contractErrorCode?: number;
+  humanError?: string;
+  isRetryable?: boolean;
 }
 
 export class SorobanContractClient {
+  private static configuredSigner?: StellarTransactionSigner;
   private server: rpc.Server;
   private networkPassphrase: string;
   private escrowContractId: string;
   private usdcContractId: string;
   private pollIntervalMs: number;
   private maxPollAttempts: number;
+  private signer: StellarTransactionSigner;
+  private feeBumpFeeSource?: string;
 
   constructor(options?: {
     rpcUrl?: string;
@@ -77,6 +108,8 @@ export class SorobanContractClient {
     server?: rpc.Server;
     pollIntervalMs?: number;
     maxPollAttempts?: number;
+    signer?: StellarTransactionSigner;
+    feeBumpFeeSource?: string;
   }) {
     const rpcUrl =
       options?.rpcUrl ||
@@ -97,10 +130,16 @@ export class SorobanContractClient {
       "";
     this.pollIntervalMs = options?.pollIntervalMs ?? 1000;
     this.maxPollAttempts = options?.maxPollAttempts ?? 30;
+    this.signer = options?.signer || SorobanContractClient.configuredSigner || new LocalSecretTransactionSigner();
+    this.feeBumpFeeSource = options?.feeBumpFeeSource || process.env.STELLAR_FEE_BUMP_SOURCE;
 
     if (!this.escrowContractId) {
       throw new Error("STELLAR_ESCROW_CONTRACT_ID not provided or set in environment.");
     }
+  }
+
+  public static configureSigner(signer: StellarTransactionSigner): void {
+    SorobanContractClient.configuredSigner = signer;
   }
 
   public getEscrowContractId(): string {
@@ -120,11 +159,14 @@ export class SorobanContractClient {
   }
 
   private failure(error: string, txHash?: string): InvocationResult {
+    const parsed = parseSorobanError(error);
     return {
       success: false,
       txHash,
       error,
-      contractErrorCode: SorobanContractClient.parseContractErrorCode(error),
+      contractErrorCode: parsed.errorCode ?? SorobanContractClient.parseContractErrorCode(error),
+      humanError: parsed.humanMessage,
+      isRetryable: parsed.isRetryable,
     };
   }
 
@@ -148,7 +190,18 @@ export class SorobanContractClient {
    * Submits a signed transaction and polls until it is final.
    */
   private async sendAndPoll(tx: Transaction): Promise<InvocationResult> {
-    const sent = await this.server.sendTransaction(tx);
+    let submitted: StellarTransaction = tx;
+    if (this.feeBumpFeeSource) {
+      const feeBump = TransactionBuilder.buildFeeBumpTransaction(
+        await this.signer.publicKey(this.feeBumpFeeSource),
+        Math.max(Number(BASE_FEE), Number(tx.fee)).toString(),
+        tx,
+        this.networkPassphrase
+      );
+      await this.signer.sign(feeBump, this.feeBumpFeeSource);
+      submitted = feeBump;
+    }
+    const sent = await this.server.sendTransaction(submitted);
     if (sent.status === "ERROR" || sent.status === "DUPLICATE") {
       return this.failure(
         `Transaction rejected (${sent.status}): ${sent.errorResult?.toXDR("base64") ?? "unknown"}`,
@@ -162,6 +215,7 @@ export class SorobanContractClient {
         return {
           success: true,
           txHash: sent.hash,
+          ledgerSeq: result.ledger,
           returnValue: result.returnValue ? scValToNative(result.returnValue) : undefined,
         };
       }
@@ -181,10 +235,10 @@ export class SorobanContractClient {
    * Restores archived ledger entries reported by a simulation (Operation.restoreFootprint).
    */
   private async restoreFootprint(
-    keypair: Keypair,
+    sourceKey: string,
     restorePreamble: { minResourceFee: string; transactionData: { build(): xdr.SorobanTransactionData } }
   ): Promise<InvocationResult> {
-    const account = await this.server.getAccount(keypair.publicKey());
+    const account = await this.server.getAccount(await this.signer.publicKey(sourceKey));
     const restoreTx = new TransactionBuilder(account, {
       fee: (Number(BASE_FEE) + Number(restorePreamble.minResourceFee)).toString(),
       networkPassphrase: this.networkPassphrase,
@@ -193,7 +247,7 @@ export class SorobanContractClient {
       .addOperation(Operation.restoreFootprint({}))
       .setTimeout(30)
       .build();
-    restoreTx.sign(keypair);
+    await this.signer.sign(restoreTx, sourceKey);
     return this.sendAndPoll(restoreTx);
   }
 
@@ -206,36 +260,50 @@ export class SorobanContractClient {
     method: string,
     args: xdr.ScVal[]
   ): Promise<InvocationResult> {
-    try {
-      const keypair = Keypair.fromSecret(sourceSecret);
+    return executeWithRetry(
+      async () => {
+        try {
+          const keypair = Keypair.fromSecret(sourceSecret);
 
-      let account = await this.server.getAccount(keypair.publicKey());
-      let tx = this.buildInvocation(account, contractId, method, args);
-      let simulation = await this.server.simulateTransaction(tx);
+          let account = await this.server.getAccount(keypair.publicKey());
+          let tx = this.buildInvocation(account, contractId, method, args);
+          let simulation = await this.server.simulateTransaction(tx);
 
-      if (rpc.Api.isSimulationError(simulation)) {
-        return this.failure(`Simulation failed: ${simulation.error}`);
-      }
+          if (rpc.Api.isSimulationError(simulation)) {
+            return this.failure(`Simulation failed: ${simulation.error}`);
+          }
 
-      if (rpc.Api.isSimulationRestore(simulation)) {
-        const restored = await this.restoreFootprint(keypair, simulation.restorePreamble);
-        if (!restored.success) {
-          return this.failure(`Footprint restoration failed: ${restored.error}`, restored.txHash);
+          if (rpc.Api.isSimulationRestore(simulation)) {
+            const restored = await this.restoreFootprint(keypair, simulation.restorePreamble);
+            if (!restored.success) {
+              return this.failure(`Footprint restoration failed: ${restored.error}`, restored.txHash);
+            }
+            account = await this.server.getAccount(keypair.publicKey());
+            tx = this.buildInvocation(account, contractId, method, args);
+            simulation = await this.server.simulateTransaction(tx);
+            if (rpc.Api.isSimulationError(simulation)) {
+              return this.failure(`Simulation failed: ${simulation.error}`);
+            }
+          }
+
+          const prepared = rpc.assembleTransaction(tx, simulation).build();
+          prepared.sign(keypair);
+          const pollRes = await this.sendAndPoll(prepared);
+          if (!pollRes.success && pollRes.isRetryable) {
+            throw new Error(pollRes.error || "Retryable transaction failure");
+          }
+          return pollRes;
+        } catch (error) {
+          const errorMsg = (error as Error).message;
+          const parsed = parseSorobanError(errorMsg);
+          if (parsed.isRetryable) {
+            throw error;
+          }
+          return this.failure(errorMsg);
         }
-        account = await this.server.getAccount(keypair.publicKey());
-        tx = this.buildInvocation(account, contractId, method, args);
-        simulation = await this.server.simulateTransaction(tx);
-        if (rpc.Api.isSimulationError(simulation)) {
-          return this.failure(`Simulation failed: ${simulation.error}`);
-        }
-      }
-
-      const prepared = rpc.assembleTransaction(tx, simulation).build();
-      prepared.sign(keypair);
-      return await this.sendAndPoll(prepared);
-    } catch (error) {
-      return this.failure((error as Error).message);
-    }
+      },
+      { maxRetries: 2, initialDelayMs: 250 }
+    );
   }
 
   /**
@@ -269,6 +337,24 @@ export class SorobanContractClient {
 
   private static address(value: string): xdr.ScVal {
     return new Address(value).toScVal();
+  }
+
+  /** WinnerPayout struct -> ScMap with keys in lexicographic order. */
+  private static winnersScVal(winners: WinnerPayoutParam[]): xdr.ScVal {
+    return xdr.ScVal.scvVec(
+      winners.map((w) =>
+        xdr.ScVal.scvMap([
+          new xdr.ScMapEntry({
+            key: xdr.ScVal.scvSymbol("amount"),
+            val: SorobanContractClient.i128(w.amount),
+          }),
+          new xdr.ScMapEntry({
+            key: xdr.ScVal.scvSymbol("winner"),
+            val: SorobanContractClient.address(w.winner),
+          }),
+        ])
+      )
+    );
   }
 
   /**
@@ -315,6 +401,22 @@ export class SorobanContractClient {
     ]);
   }
 
+  /** Publishes a commitment to a finalized gameweek's score set on Soroban. */
+  public async publishGameweekResult(
+    adminKey: string,
+    gameweekId: number | bigint,
+    proofHash: string
+  ): Promise<InvocationResult> {
+    if (!/^[0-9a-f]{64}$/i.test(proofHash)) {
+      return this.failure("Gameweek result proof must be a 32-byte hexadecimal hash");
+    }
+    return this.invoke(adminKey, this.escrowContractId, "publish_gameweek_result", [
+      SorobanContractClient.address(await this.signer.publicKey(adminKey)),
+      SorobanContractClient.u64(gameweekId),
+      nativeToScVal(Buffer.from(proofHash, "hex"), { type: "bytes" }),
+    ]);
+  }
+
   /**
    * Admin settles the league with winner payouts and platform treasury fee.
    */
@@ -326,21 +428,7 @@ export class SorobanContractClient {
     platformTreasury: string,
     platformFeeStroops: bigint
   ): Promise<InvocationResult> {
-    // WinnerPayout struct -> ScMap with keys in lexicographic order
-    const winnersScVal = xdr.ScVal.scvVec(
-      winners.map((w) =>
-        xdr.ScVal.scvMap([
-          new xdr.ScMapEntry({
-            key: xdr.ScVal.scvSymbol("amount"),
-            val: SorobanContractClient.i128(w.amount),
-          }),
-          new xdr.ScMapEntry({
-            key: xdr.ScVal.scvSymbol("winner"),
-            val: SorobanContractClient.address(w.winner),
-          }),
-        ])
-      )
-    );
+    const winnersScVal = SorobanContractClient.winnersScVal(winners);
 
     return this.invoke(adminSecret, this.escrowContractId, "settle", [
       SorobanContractClient.address(adminPublic),
@@ -364,14 +452,7 @@ export class SorobanContractClient {
     if (!/^[0-9a-f]{64}$/i.test(proofHash)) {
       return this.failure("Settlement proof must be a 32-byte hexadecimal hash");
     }
-    const winnersScVal = xdr.ScVal.scvVec(
-      winners.map((w) =>
-        xdr.ScVal.scvMap([
-          new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("amount"), val: SorobanContractClient.i128(w.amount) }),
-          new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("winner"), val: SorobanContractClient.address(w.winner) }),
-        ])
-      )
-    );
+    const winnersScVal = SorobanContractClient.winnersScVal(winners);
     return this.invoke(adminSecret, this.escrowContractId, "settle_with_proof", [
       SorobanContractClient.address(adminPublic),
       SorobanContractClient.u64(leagueId),
@@ -380,6 +461,127 @@ export class SorobanContractClient {
       SorobanContractClient.i128(platformFeeStroops),
       nativeToScVal(Buffer.from(proofHash, "hex"), { type: "bytes" }),
     ]);
+  }
+
+  /**
+   * Settles a league and routes the platform fee to the treasury through the
+   * contract's M-of-N multi-sig gate (`settle_with_multisig`), instead of the
+   * single-admin-secret `settle` path.
+   *
+   * Every address in `approverSecrets` is required to authorize the invocation
+   * (the contract itself calls `require_auth()` per approved signer, see
+   * `authorize_signers` in contracts/src/lib.rs), so this method collects a
+   * signed Soroban authorization entry per configured signer before the
+   * transaction is assembled and submitted. `requiredThreshold` mirrors the
+   * on-chain `AdminConfig.threshold` and is checked locally first so an
+   * under-signed withdrawal never reaches the network - the contract enforces
+   * the same rule independently as the source of truth.
+   *
+   * The first entry in `approverSecrets` also pays the transaction fee and
+   * submits it (one of the M signers proposes the withdrawal once every
+   * required approval has been collected out of band).
+   */
+  public async settleWithMultisig(
+    approverSecrets: string[],
+    leagueId: number | bigint,
+    winners: WinnerPayoutParam[],
+    platformTreasury: string,
+    platformFeeStroops: bigint,
+    requiredThreshold: number
+  ): Promise<InvocationResult> {
+    if (requiredThreshold < 1) {
+      return this.failure("Treasury multisig threshold must be at least 1");
+    }
+    if (approverSecrets.length < requiredThreshold) {
+      return this.failure(
+        `Insufficient signatures for treasury withdrawal: ${approverSecrets.length} of ${requiredThreshold} required signer(s) provided`
+      );
+    }
+
+    try {
+      const approverKeypairs = approverSecrets.map((secret) => Keypair.fromSecret(secret));
+      const submitterKeypair = approverKeypairs[0];
+      const approvalsScVal = xdr.ScVal.scvVec(
+        approverKeypairs.map((kp) => SorobanContractClient.address(kp.publicKey()))
+      );
+      const winnersScVal = SorobanContractClient.winnersScVal(winners);
+      const args = [
+        approvalsScVal,
+        SorobanContractClient.u64(leagueId),
+        winnersScVal,
+        SorobanContractClient.address(platformTreasury),
+        SorobanContractClient.i128(platformFeeStroops),
+      ];
+
+      let account = await this.server.getAccount(submitterKeypair.publicKey());
+      let tx = this.buildInvocation(account, this.escrowContractId, "settle_with_multisig", args);
+      let simulation = await this.server.simulateTransaction(tx);
+
+      if (rpc.Api.isSimulationError(simulation)) {
+        return this.failure(`Simulation failed: ${simulation.error}`);
+      }
+
+      if (rpc.Api.isSimulationRestore(simulation)) {
+        const restored = await this.restoreFootprint(approverSecrets[0], simulation.restorePreamble);
+        if (!restored.success) {
+          return this.failure(`Footprint restoration failed: ${restored.error}`, restored.txHash);
+        }
+        account = await this.server.getAccount(submitterKeypair.publicKey());
+        tx = this.buildInvocation(account, this.escrowContractId, "settle_with_multisig", args);
+        simulation = await this.server.simulateTransaction(tx);
+        if (rpc.Api.isSimulationError(simulation)) {
+          return this.failure(`Simulation failed: ${simulation.error}`);
+        }
+      }
+
+      const successSim = simulation as rpc.Api.SimulateTransactionSuccessResponse;
+      const rawAuthEntries = successSim.result?.auth ?? [];
+      const latestLedger = await this.server.getLatestLedger();
+      const validUntilLedgerSeq = latestLedger.sequence + 100;
+
+      const signedAuthEntries = await Promise.all(
+        rawAuthEntries.map(async (entry) => {
+          const info = inspectAuthEntry(entry);
+          if (!info.address) {
+            // Source-account credentials carry no separate signature.
+            return entry;
+          }
+          const keypair = approverKeypairs.find((kp) => kp.publicKey() === info.address);
+          if (!keypair) {
+            throw new Error(
+              `No approving signer secret was supplied for required treasury signer ${info.address}`
+            );
+          }
+          return authorizeEntry(entry, keypair, validUntilLedgerSeq, this.networkPassphrase);
+        })
+      );
+
+      const invokeOp = tx.operations[0] as Operation.InvokeHostFunction;
+      const freshAccount = await this.server.getAccount(submitterKeypair.publicKey());
+      const rebuiltTx = new TransactionBuilder(freshAccount, {
+        fee: tx.fee,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          Operation.invokeHostFunction({
+            func: invokeOp.func,
+            auth: signedAuthEntries,
+          })
+        )
+        .setTimeout(30)
+        .build();
+
+      const resimulated = await this.server.simulateTransaction(rebuiltTx);
+      if (rpc.Api.isSimulationError(resimulated)) {
+        return this.failure(`Simulation failed after attaching signatures: ${resimulated.error}`);
+      }
+
+      const prepared = rpc.assembleTransaction(rebuiltTx, resimulated).build();
+      prepared.sign(submitterKeypair);
+      return await this.sendAndPoll(prepared);
+    } catch (error) {
+      return this.failure((error as Error).message);
+    }
   }
 
   /**

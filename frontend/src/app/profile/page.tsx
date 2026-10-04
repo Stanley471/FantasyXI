@@ -7,6 +7,7 @@ import { useAuth } from "@/context/AuthContext";
 import { api } from "@/lib/api";
 import { Squad, League, GameweekHistoryEntry } from "@/types";
 import { Button } from "@/components/ui/Button";
+import { SignInMethods } from "@/components/auth/SignInMethods";
 import {
   IconUser,
   IconFootball,
@@ -174,6 +175,9 @@ export default function ProfilePage() {
           <div>
             <h2 className="text-sm font-bold uppercase tracking-wider text-slate-200">Gameweek History</h2>
             <p className="text-xs text-slate-400 mt-1">Review past scores, ranks, and the squad selected for each gameweek.</p>
+            <Link href="/analytics" className="mt-2 inline-block text-xs font-semibold text-emerald-400 hover:text-emerald-300">
+              View full performance analytics &rarr;
+            </Link>
           </div>
           {gameweekHistory.length > 0 && (
             <label className="flex items-center gap-2 text-xs text-slate-400">
@@ -220,6 +224,9 @@ export default function ProfilePage() {
           </>
         )}
       </section>
+
+      {/* Email/password and Google sign-in management */}
+      <SignInMethods />
 
       {/* Account & Security Information */}
       <div className="bg-pitch-surface border border-pitch-border rounded-xl p-6 shadow-md space-y-4">

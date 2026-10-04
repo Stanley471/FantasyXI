@@ -61,7 +61,7 @@ export function shouldRouteToDlq(retryCount: number, retryLimit: number): boolea
  * every queued attempt (including retries) observes fresh upstream live data.
  */
 export async function executeFplSyncTask(task: FplSyncTask): Promise<unknown> {
-  fplClient.clearCache();
+  await fplClient.clearCache();
   switch (task.type) {
     case "fixtures":
       return fplSyncService.syncFixtures();

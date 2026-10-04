@@ -1,38 +1,56 @@
 "use client";
 
-import React, { useEffect, useState, Suspense } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import React, { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/context/AuthContext";
+import { safeReturnTo } from "@/lib/googleAuth";
 import { IconFootball, IconAlertCircle } from "@/components/ui/Icons";
 import { Button } from "@/components/ui/Button";
 
+/**
+ * Reads the Google sign-in result. The backend puts the token in the URL
+ * fragment (never sent to servers or leaked via Referer); the query string is
+ * still accepted for links issued before that change.
+ */
+function readCallbackParams(): URLSearchParams {
+  const fragment = new URLSearchParams(window.location.hash.slice(1));
+  return fragment.has("token") ? fragment : new URLSearchParams(window.location.search);
+}
+
 function AuthCallbackContent() {
   const router = useRouter();
-  const searchParams = useSearchParams();
   const { setAuthToken } = useAuth();
+  const handled = useRef(false);
 
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const token = searchParams.get("token");
-    const returnTo = searchParams.get("returnTo") || "/";
+    // The token is removed from the URL below, so only handle it once
+    if (handled.current) return;
+    handled.current = true;
 
-    if (!token) {
-      setError("No authentication token found in callback. Please try signing in again.");
-      return;
-    }
+    const params = readCallbackParams();
+    const token = params.get("token");
+    const returnTo = safeReturnTo(params.get("returnTo"));
+
+    // Keep the token out of browser history
+    window.history.replaceState(null, "", window.location.pathname);
 
     // Store token and populate current user
-    setAuthToken(token)
+    (token ? setAuthToken(token) : Promise.reject(new Error("missing token")))
       .then(() => {
         router.replace(returnTo);
       })
       .catch((err) => {
+        if (!token) {
+          setError("No authentication token found in callback. Please try signing in again.");
+          return;
+        }
         console.error("Failed to authenticate callback session:", err);
         setError("Failed to establish authenticated session. The token may have expired.");
       });
-  }, [searchParams, setAuthToken, router]);
+  }, [setAuthToken, router]);
 
   if (error) {
     return (
@@ -67,16 +85,7 @@ function AuthCallbackContent() {
 export default function AuthCallbackPage() {
   return (
     <div className="min-h-[calc(100vh-140px)] flex items-center justify-center py-10 px-4">
-      <Suspense
-        fallback={
-          <div className="text-center py-20 text-slate-400">
-            <div className="inline-block w-8 h-8 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin mb-3" />
-            <p className="text-sm">Connecting...</p>
-          </div>
-        }
-      >
-        <AuthCallbackContent />
-      </Suspense>
+      <AuthCallbackContent />
     </div>
   );
 }
