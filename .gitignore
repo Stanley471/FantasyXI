@@ -28,3 +28,5 @@ prisma/migrations/**/migration_lock.toml
 
 # TypeScript
 *.tsbuildinfo
+
+.agents/
