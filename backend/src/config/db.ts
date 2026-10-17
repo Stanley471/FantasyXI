@@ -117,7 +117,7 @@ export function getSlowQueryMetrics() {
   };
 }
 
-export function registerPrismaQueryTelemetry(client: { $on?: (eventName: string, handler: (event: any) => void) => void }): void {
+export function registerPrismaQueryTelemetry(client: any): void {
   if (!client || typeof client.$on !== "function") {
     return;
   }
@@ -181,7 +181,7 @@ function createClient(connectionString: string): PrismaClient {
         : ["error"],
   });
 
-  registerPrismaQueryTelemetry(prisma);
+  registerPrismaQueryTelemetry(prisma as any);
   return prisma;
 }
 
