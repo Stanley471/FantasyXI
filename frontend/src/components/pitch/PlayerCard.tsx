@@ -33,12 +33,11 @@ const PlayerCardComponent: React.FC<PlayerCardProps> = ({
   isOverlay = false,
   isLoading = false,
 }) => {
-  const isSelectedForSwap = useTeamStore(
-    (state) => state.selectedPlayerId !== null && player?.id === state.selectedPlayerId
-  );
+  const selectedPlayerId = useTeamStore((state) => state.selectedPlayerId);
   const handlePlayerClick = useTeamStore((state) => state.handlePlayerClick);
   const activeDragPlayer = useTeamStore((state) => state.activeDragPlayer);
   const allSquadPlayers = useTeamStore((state) => state.players);
+  const isSelectedForSwap = selectedPlayerId !== null && player?.id === selectedPlayerId;
 
   const onClick = () => handlePlayerClick(player || null, positionSlot);
 
@@ -99,7 +98,9 @@ const PlayerCardComponent: React.FC<PlayerCardProps> = ({
         <button
           type="button"
           onClick={onClick}
-          className={`group relative flex flex-col items-center justify-center p-2 rounded-xl transition-all duration-200 w-20 sm:w-24 ${
+          aria-label={`Add a ${player ? player.position : positionSlot} player`}
+          style={{ touchAction: "manipulation" }}
+          className={`group relative flex w-[72px] max-w-full flex-col items-center justify-center p-2 rounded-xl transition-all duration-200 sm:w-24 ${
             isSwapCandidate || isOver
               ? "bg-emerald-500/20 border-2 border-dashed border-emerald-400 animate-pulse"
               : "bg-slate-950/40 border border-dashed border-slate-700 hover:border-emerald-400 hover:bg-slate-900/60"
@@ -173,7 +174,7 @@ const PlayerCardComponent: React.FC<PlayerCardProps> = ({
   return (
     <div
       ref={setNodeRef}
-      className={`relative flex flex-col items-center transition-all duration-150 ${
+      className={`relative flex max-w-full flex-col items-center transition-all duration-150 ${
         isDragging && !isOverlay ? "opacity-30" : ""
       }`}
       data-testid={`player-card-${player.id}`}
@@ -196,10 +197,12 @@ const PlayerCardComponent: React.FC<PlayerCardProps> = ({
       <button
         type="button"
         onClick={onClick}
+        aria-pressed={isSelectedForSwap}
+        aria-label={`${player.displayName || player.lastName} ${isSelectedForSwap ? "selected for swap" : "player card"}`}
         {...(!isOverlay ? listeners : {})}
         {...(!isOverlay ? attributes : {})}
-        style={!isOverlay ? { touchAction: "none" } : undefined}
-        className={`group relative flex flex-col items-center focus:outline-none transition-all duration-200 ${interactiveStyles}`}
+        style={!isOverlay ? { touchAction: "manipulation" } : undefined}
+        className={`group relative flex w-[72px] max-w-full flex-col items-center focus:outline-none transition-all duration-200 sm:w-24 ${interactiveStyles}`}
       >
         {/* Valid / Invalid Move Indicators during Drag */}
         {isDragInProgress && !isSelfBeingDragged && (
@@ -245,14 +248,14 @@ const PlayerCardComponent: React.FC<PlayerCardProps> = ({
         </div>
 
         {/* Player Name Pill */}
-        <div className="mt-1 w-20 sm:w-24 bg-slate-900/95 border border-slate-800 rounded px-1.5 py-0.5 text-center shadow-md truncate">
-          <span className="text-[11px] sm:text-xs font-bold text-white uppercase tracking-tight truncate block">
+        <div className="mt-1 w-[72px] max-w-full min-w-0 bg-slate-900/95 border border-slate-800 rounded px-1.5 py-0.5 text-center shadow-md">
+          <span className="block text-[10px] sm:text-xs font-bold uppercase tracking-tight text-white leading-[1.15] break-words whitespace-normal">
             {player.displayName || player.lastName}
           </span>
         </div>
 
         {/* Price & Points Footer */}
-        <div className="w-20 sm:w-24 flex items-center justify-between bg-slate-950/90 border-x border-b border-slate-800 rounded-b px-1.5 py-0.5 text-[9px] sm:text-[10px] font-mono">
+        <div className="w-[72px] max-w-full min-w-0 flex items-center justify-between gap-1 bg-slate-950/90 border-x border-b border-slate-800 rounded-b px-1.5 py-0.5 text-[9px] sm:text-[10px] font-mono">
           <span className="text-slate-400">£{(player.price / 10).toFixed(1)}m</span>
           <span className="font-bold text-emerald-400">{player.totalPoints} pts</span>
         </div>
