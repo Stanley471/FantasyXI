@@ -1,6 +1,12 @@
 import type { PrismaClient } from "@prisma/client";
 import { prisma } from "../../config/db.js";
 import { ChipType, Position, SQUAD_RULES } from "../../types/index.js";
+import {
+  LeagueScoringConfig,
+  LeagueScoringRuleEngine,
+  RawPlayerMatchStats,
+  ScoringPresetName,
+} from "../../models/leagueScoringConfig.js";
 
 /**
  * Scoring and Fantasy Points Calculation Service.
@@ -37,6 +43,10 @@ export interface LineupScoreOptions {
   chip?: ChipType | null;
   /** Transfer point deduction for the gameweek (e.g. 4 per extra transfer) */
   transferCost?: number;
+  /** Optional custom scoring configuration or preset for private leagues */
+  scoringConfig?: Partial<LeagueScoringConfig> | ScoringPresetName | null;
+  /** Optional raw player match statistics when evaluating custom league scoring rules */
+  rawStatsMap?: Map<number, RawPlayerMatchStats>;
 }
 
 export interface GameweekCalculationResult {
@@ -229,13 +239,24 @@ export class ScoringService {
   } {
     const chip = options.chip ?? null;
     const isBenchBoost = chip === ChipType.BENCH_BOOST;
+    const resolvedConfig = LeagueScoringRuleEngine.resolveConfig(options.scoringConfig);
+    const compiledScorer = options.rawStatsMap
+      ? LeagueScoringRuleEngine.compileScorer(resolvedConfig)
+      : null;
 
     // 1. Separate starters and bench
     const starterDetails: PlayerScoreDetail[] = [];
     const benchDetails: PlayerScoreDetail[] = [];
 
     for (const p of players) {
+      const rawStat = options.rawStatsMap?.get(p.playerId);
       const stats = statsMap.get(p.playerId) || { minutes: 0, totalPoints: 0 };
+      const minutesPlayed = rawStat ? rawStat.minutes : stats.minutes;
+      const computedRawPoints =
+        rawStat && compiledScorer
+          ? compiledScorer({ ...rawStat, position: p.position })
+          : stats.totalPoints;
+
       const detail: PlayerScoreDetail = {
         playerId: p.playerId,
         position: p.position,
@@ -243,10 +264,10 @@ export class ScoringService {
         isCaptain: p.isCaptain,
         isViceCaptain: p.isViceCaptain,
         positionOrder: p.positionOrder,
-        minutesPlayed: stats.minutes,
-        rawPoints: stats.totalPoints,
+        minutesPlayed,
+        rawPoints: computedRawPoints,
         multiplier: 1,
-        effectivePoints: stats.totalPoints,
+        effectivePoints: computedRawPoints,
         subbedIn: false,
         subbedOut: false,
       };
@@ -274,7 +295,7 @@ export class ScoringService {
       );
     }
 
-    // 3. Determine Captain multiplier (2x, or 3x with Triple Captain)
+    // 3. Determine Captain multiplier (default 2x, or 3x with Triple Captain, or league custom)
     // Find designated captain and vice-captain
     const designatedCaptain = starterDetails.find((s) => s.isCaptain);
     const designatedVice = starterDetails.find((s) => s.isViceCaptain);
@@ -291,7 +312,10 @@ export class ScoringService {
       activeCaptain = designatedCaptain;
     }
 
-    const captainMultiplier = chip === ChipType.TRIPLE_CAPTAIN ? 3 : 2;
+    const captainMultiplier =
+      chip === ChipType.TRIPLE_CAPTAIN
+        ? resolvedConfig.tripleCaptainMultiplier
+        : resolvedConfig.captainMultiplier;
     if (activeCaptain) {
       activeCaptain.multiplier = captainMultiplier;
       activeCaptain.effectivePoints = activeCaptain.rawPoints * captainMultiplier;
