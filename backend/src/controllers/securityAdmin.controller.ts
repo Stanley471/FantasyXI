@@ -1,12 +1,15 @@
 import { Request, Response, NextFunction } from "express";
 import { securityAnomalyLog, SecurityAnomalyType } from "../services/security/securityAnomalyLog.js";
+import {
+  sybilDetectionGraphService,
+  type AccountActivityNode,
+} from "../services/security/sybilDetectionGraphService.js";
 
 /**
- * Security Administration Controller (issue #117).
+ * Security Administration Controller (issue #117 & #274).
  *
  * Read-only view of detected anomalies (failed-login spikes, new-device
- * logins) for admin review. Automated account actions are out of scope -
- * this endpoint only surfaces what was detected.
+ * logins, and Sybil syndicate graph clusters) for admin review.
  */
 
 function parseAnomalyType(value: unknown): SecurityAnomalyType | undefined | null {
@@ -40,3 +43,28 @@ export async function listSecurityAnomalies(
     next(error);
   }
 }
+
+export async function getSybilGraphReport(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const accounts = Array.isArray(req.body?.accounts)
+      ? (req.body.accounts as AccountActivityNode[])
+      : undefined;
+
+    const report = accounts
+      ? sybilDetectionGraphService.analyzeAccounts(accounts)
+      : sybilDetectionGraphService.getLatestReport() ??
+        sybilDetectionGraphService.analyzeAccounts([]);
+
+    res.status(200).json({
+      success: true,
+      data: report,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
