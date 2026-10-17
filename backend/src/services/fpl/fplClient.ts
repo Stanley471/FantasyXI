@@ -35,6 +35,16 @@ interface CacheEntry<T> {
   expiresAt: number;
 }
 
+export type FplDataSourceTier =
+  | "L1_MEMORY"
+  | "L2_REDIS"
+  | "UPSTREAM"
+  | "STALE_L1_MEMORY"
+  | "STALE_L2_REDIS"
+  | "STALE_L3_POSTGRES";
+
+export type PostgresSnapshotProvider = (endpoint: string) => Promise<unknown | null>;
+
 export interface FplClientOptions {
   baseUrl?: string;
   redis?: IRedisCacheClient | null;
@@ -42,6 +52,9 @@ export interface FplClientOptions {
   defaultTtlSeconds?: number;
   circuitBreaker?: CircuitBreaker;
   circuitBreakerOptions?: CircuitBreakerOptions;
+  postgresSnapshotProvider?: PostgresSnapshotProvider;
+  maxRetries?: number;
+  retryBackoffMs?: number;
 }
 
 export class FplClient {
@@ -51,6 +64,9 @@ export class FplClient {
   private redis: IRedisCacheClient | null = null;
   private keyPrefix: string;
   private defaultTtlSeconds: number;
+  private postgresSnapshotProvider?: PostgresSnapshotProvider;
+  private maxRetries: number;
+  private retryBackoffMs: number;
 
   public readonly circuitBreaker: CircuitBreaker;
 
@@ -70,12 +86,17 @@ export class FplClient {
       this.circuitBreaker =
         baseUrlOrOptions.circuitBreaker ||
         new CircuitBreaker(baseUrlOrOptions.circuitBreakerOptions);
+      this.postgresSnapshotProvider = baseUrlOrOptions.postgresSnapshotProvider;
+      this.maxRetries = baseUrlOrOptions.maxRetries ?? 3;
+      this.retryBackoffMs = baseUrlOrOptions.retryBackoffMs ?? 1000;
     } else {
       this.baseUrl = baseUrlOrOptions || FPL_BASE_URL;
       this.redis = redisClient !== undefined ? redisClient : getRedisClient();
       this.keyPrefix = "fpl:cache:";
       this.defaultTtlSeconds = FPL_CACHE_TTL.DEFAULT_SECONDS;
       this.circuitBreaker = new CircuitBreaker();
+      this.maxRetries = 3;
+      this.retryBackoffMs = 1000;
     }
   }
 
@@ -93,15 +114,47 @@ export class FplClient {
     return this.redis;
   }
 
+  /**
+   * Registers an L3 PostgreSQL stale snapshot provider for catastrophic upstream + cache outages.
+   */
+  public setPostgresSnapshotProvider(provider: PostgresSnapshotProvider | undefined): void {
+    this.postgresSnapshotProvider = provider;
+  }
+
   private getCacheKey(endpoint: string): string {
     return `${this.keyPrefix}${endpoint}`;
+  }
+
+  private getStaleRedisKey(endpoint: string): string {
+    return `${this.keyPrefix}stale:${endpoint}`;
+  }
+
+  /**
+   * Exposes circuit breaker state and cache health metrics for administrative telemetry.
+   */
+  public getTelemetryHealth() {
+    const breakerStats = this.circuitBreaker.getStats();
+    return {
+      status: breakerStats.state === "OPEN" ? "degraded" : "healthy",
+      circuitBreaker: breakerStats,
+      cache: {
+        l1ActiveEntries: this.cache.size,
+        l1StaleEntries: this.staleCache.size,
+        l2RedisConnected: Boolean(this.redis),
+        l3PostgresFallbackConfigured: Boolean(this.postgresSnapshotProvider),
+      },
+    };
   }
 
   /**
    * Fetches an upstream URL with retry logic and decorrelated jitter backoff.
    * Throws on 5xx or 429 errors so the circuit breaker can track failures.
    */
-  public async fetchWithRetry(url: string, retries = 3, backoffMs = 1000): Promise<Response> {
+  public async fetchWithRetry(
+    url: string,
+    retries = this.maxRetries,
+    backoffMs = this.retryBackoffMs
+  ): Promise<Response> {
     let currentDelay = backoffMs;
 
     for (let i = 0; i < retries; i++) {
@@ -149,28 +202,39 @@ export class FplClient {
   }
 
   /**
-   * Fetch with metadata indicating whether the data returned is fresh or served stale.
+   * Fetch with metadata indicating whether the data returned is fresh or served stale,
+   * which cache tier served the data, and `X-Data-Stale` HTTP response headers.
    */
   public async getWithMetadata<T>(
     endpoint: string,
     ttlSeconds: number = this.defaultTtlSeconds
-  ): Promise<{ data: T; isStale: boolean }> {
+  ): Promise<{
+    data: T;
+    isStale: boolean;
+    source: FplDataSourceTier;
+    headers: Record<string, string>;
+  }> {
     const effectiveTtlSeconds = ttlSeconds;
     const cacheKey = this.getCacheKey(endpoint);
+    const staleRedisKey = this.getStaleRedisKey(endpoint);
 
-    // 1. Try Redis cache first
+    // 1. Try fresh L1 in-memory cache first if not using Redis, or L2 Redis + L1
     if (this.redis) {
       try {
         const cachedRaw = await this.redis.get(cacheKey);
         if (cachedRaw) {
-          console.log(`[FplClient] Cache HIT (Redis) for ${cacheKey}`);
           const parsed = JSON.parse(cachedRaw) as T;
           this.cache.set(cacheKey, {
             data: parsed,
             expiresAt: Date.now() + effectiveTtlSeconds * 1000,
           });
           this.staleCache.set(cacheKey, parsed);
-          return { data: parsed, isStale: false };
+          return {
+            data: parsed,
+            isStale: false,
+            source: "L2_REDIS",
+            headers: { "X-Data-Stale": "false", "X-Cache-Tier": "L2_REDIS" },
+          };
         }
       } catch (err) {
         console.warn(
@@ -180,16 +244,19 @@ export class FplClient {
       }
     }
 
-    // 2. Try in-memory fallback cache
+    // 2. Try fresh L1 in-memory cache
     const memoryCached = this.cache.get(cacheKey);
     if (memoryCached && Date.now() < memoryCached.expiresAt) {
-      console.log(`[FplClient] Cache HIT (Memory) for ${cacheKey}`);
       this.staleCache.set(cacheKey, memoryCached.data);
-      return { data: memoryCached.data as T, isStale: false };
+      return {
+        data: memoryCached.data as T,
+        isStale: false,
+        source: "L1_MEMORY",
+        headers: { "X-Data-Stale": "false", "X-Cache-Tier": "L1_MEMORY" },
+      };
     }
 
     // 3. Cache MISS: Fetch from upstream official FPL API via Circuit Breaker
-    console.log(`[FplClient] Cache MISS for ${cacheKey}. Fetching upstream from ${this.baseUrl}...`);
     const url = `${this.baseUrl}${endpoint}`;
 
     try {
@@ -205,13 +272,12 @@ export class FplClient {
 
       const data = (await response.json()) as T;
 
-      // 4. Populate Redis cache
+      // 4. Populate L2 Redis cache (both fresh TTL key and long-lived stale backup key)
       if (this.redis) {
         try {
-          await this.redis.set(cacheKey, JSON.stringify(data), "EX", effectiveTtlSeconds);
-          console.log(
-            `[FplClient] Cache SET (Redis) for ${cacheKey} (TTL: ${effectiveTtlSeconds}s)`
-          );
+          const serialized = JSON.stringify(data);
+          await this.redis.set(cacheKey, serialized, "EX", effectiveTtlSeconds);
+          await this.redis.set(staleRedisKey, serialized, "EX", 7 * 24 * 60 * 60);
         } catch (err) {
           console.warn(
             `[FplClient] Redis SET error for ${cacheKey}:`,
@@ -220,28 +286,79 @@ export class FplClient {
         }
       }
 
-      // 5. Populate in-memory caches
+      // 5. Populate L1 in-memory caches
       this.cache.set(cacheKey, {
         data,
         expiresAt: Date.now() + effectiveTtlSeconds * 1000,
       });
       this.staleCache.set(cacheKey, data);
 
-      return { data, isStale: false };
+      return {
+        data,
+        isStale: false,
+        source: "UPSTREAM",
+        headers: { "X-Data-Stale": "false", "X-Cache-Tier": "UPSTREAM" },
+      };
     } catch (err) {
-      // 6. Upstream or Circuit Breaker failed: Fallback to STALE cache if available
+      // 6. Upstream or Circuit Breaker failed -> 3-tier stale cache degradation:
+      // Tier 1: L1 In-Memory Stale Cache
       if (this.staleCache.has(cacheKey)) {
-        console.warn(
-          `[FplClient] Upstream unavailable (${(err as Error).message}). Serving STALE cached data for ${cacheKey}`
-        );
-        return { data: this.staleCache.get(cacheKey) as T, isStale: true };
+        this.circuitBreaker.recordFallbackServed();
+        return {
+          data: this.staleCache.get(cacheKey) as T,
+          isStale: true,
+          source: "STALE_L1_MEMORY",
+          headers: { "X-Data-Stale": "true", "X-Cache-Tier": "STALE_L1_MEMORY" },
+        };
       }
 
       if (memoryCached) {
-        console.warn(
-          `[FplClient] Upstream unavailable (${(err as Error).message}). Serving expired in-memory STALE data for ${cacheKey}`
-        );
-        return { data: memoryCached.data as T, isStale: true };
+        this.circuitBreaker.recordFallbackServed();
+        return {
+          data: memoryCached.data as T,
+          isStale: true,
+          source: "STALE_L1_MEMORY",
+          headers: { "X-Data-Stale": "true", "X-Cache-Tier": "STALE_L1_MEMORY" },
+        };
+      }
+
+      // Tier 2: L2 Redis Stale Cache
+      if (this.redis) {
+        try {
+          const staleRaw = await this.redis.get(staleRedisKey);
+          if (staleRaw) {
+            const parsed = JSON.parse(staleRaw) as T;
+            this.staleCache.set(cacheKey, parsed);
+            this.circuitBreaker.recordFallbackServed();
+            return {
+              data: parsed,
+              isStale: true,
+              source: "STALE_L2_REDIS",
+              headers: { "X-Data-Stale": "true", "X-Cache-Tier": "STALE_L2_REDIS" },
+            };
+          }
+        } catch {
+          // Proceed to Tier 3 PostgreSQL snapshot
+        }
+      }
+
+      // Tier 3: L3 PostgreSQL Stale Snapshot
+      if (this.postgresSnapshotProvider) {
+        try {
+          const pgSnapshot = await this.postgresSnapshotProvider(endpoint);
+          if (pgSnapshot !== null && pgSnapshot !== undefined) {
+            this.staleCache.set(cacheKey, pgSnapshot);
+            this.circuitBreaker.recordFallbackServed();
+            return {
+              data: pgSnapshot as T,
+              isStale: true,
+              source: "STALE_L3_POSTGRES",
+              headers: { "X-Data-Stale": "true", "X-Cache-Tier": "STALE_L3_POSTGRES" },
+            };
+          }
+        } catch {
+          // Fall through to throw original error
+        }
       }
 
       throw err;

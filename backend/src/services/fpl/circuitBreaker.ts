@@ -51,6 +51,13 @@ export class CircuitBreaker {
   private halfOpenSuccesses = 0;
   private nextAttemptTime = 0;
   private lastFailureTime: number | null = null;
+  private currentCooldownMs: number;
+  private totalRequests = 0;
+  private totalFailures = 0;
+  private totalFallbacks = 0;
+  private openTransitions = 0;
+  private halfOpenProbes = 0;
+  private lastErrorMessage: string | null = null;
 
   public readonly failureThreshold: number;
   public readonly cooldownPeriodMs: number;
@@ -65,6 +72,7 @@ export class CircuitBreaker {
     this.successThreshold = options.successThreshold ?? 1;
     this.baseBackoffMs = options.baseBackoffMs ?? 1000;
     this.maxBackoffMs = options.maxBackoffMs ?? 30000;
+    this.currentCooldownMs = this.cooldownPeriodMs;
     this.onStateChange = options.onStateChange;
   }
 
@@ -92,6 +100,10 @@ export class CircuitBreaker {
     return Math.max(0, this.nextAttemptTime - Date.now());
   }
 
+  public recordFallbackServed(): void {
+    this.totalFallbacks++;
+  }
+
   public getStats() {
     return {
       state: this.getState(),
@@ -99,6 +111,12 @@ export class CircuitBreaker {
       lastFailureTime: this.lastFailureTime,
       nextAttemptTime: this.nextAttemptTime,
       remainingCooldownMs: this.getRemainingCooldownMs(),
+      totalRequests: this.totalRequests,
+      totalFailures: this.totalFailures,
+      totalFallbacks: this.totalFallbacks,
+      openTransitions: this.openTransitions,
+      halfOpenProbes: this.halfOpenProbes,
+      lastErrorMessage: this.lastErrorMessage,
     };
   }
 
@@ -110,10 +128,22 @@ export class CircuitBreaker {
       this.consecutiveFailures = 0;
       this.halfOpenSuccesses = 0;
       this.nextAttemptTime = 0;
+      this.currentCooldownMs = this.cooldownPeriodMs;
     } else if (newState === CircuitState.HALF_OPEN) {
       this.halfOpenSuccesses = 0;
+      this.halfOpenProbes++;
     } else if (newState === CircuitState.OPEN) {
-      this.nextAttemptTime = Date.now() + this.cooldownPeriodMs;
+      this.openTransitions++;
+      const jitter =
+        oldState === CircuitState.HALF_OPEN
+          ? calculateDecorrelatedJitter(
+              this.currentCooldownMs,
+              this.cooldownPeriodMs,
+              Math.max(this.maxBackoffMs, this.cooldownPeriodMs * 4)
+            )
+          : this.cooldownPeriodMs;
+      this.currentCooldownMs = jitter;
+      this.nextAttemptTime = Date.now() + jitter;
     }
     if (this.onStateChange) {
       this.onStateChange(oldState, newState);
@@ -134,6 +164,10 @@ export class CircuitBreaker {
   public recordFailure(error?: unknown): void {
     this.lastFailureTime = Date.now();
     this.consecutiveFailures++;
+    this.totalFailures++;
+    if (error instanceof Error) {
+      this.lastErrorMessage = error.message;
+    }
 
     if (this.state === CircuitState.HALF_OPEN) {
       this.transitionTo(CircuitState.OPEN);
@@ -163,11 +197,13 @@ export class CircuitBreaker {
     action: () => Promise<T>,
     fallback?: () => Promise<T> | T
   ): Promise<T> {
+    this.totalRequests++;
     const currentState = this.getState();
 
     if (currentState === CircuitState.OPEN) {
       const remaining = this.getRemainingCooldownMs();
       if (fallback) {
+        this.recordFallbackServed();
         return await fallback();
       }
       throw new CircuitBreakerOpenError(
@@ -183,6 +219,7 @@ export class CircuitBreaker {
     } catch (err) {
       this.recordFailure(err);
       if (fallback) {
+        this.recordFallbackServed();
         return await fallback();
       }
       throw err;
