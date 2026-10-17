@@ -13,7 +13,10 @@ import {
   applyTierTransitions,
   listH2HAnomalies,
 } from "../controllers/leagueAdmin.controller.js";
-import { listSecurityAnomalies } from "../controllers/securityAdmin.controller.js";
+import {
+  listSecurityAnomalies,
+  getSybilGraphReport,
+} from "../controllers/securityAdmin.controller.js";
 import { verifyAuditChainHandler } from "../controllers/audit.controller.js";
 import { requireAuth, requirePermission } from "../middleware/authMiddleware.js";
 import { Permission } from "../types/index.js";
@@ -48,6 +51,10 @@ router.get("/audit/verify", requirePermission(Permission.FINANCIAL_AUDIT_READ), 
 // GET /api/v1/admin/security/anomalies (issue #117): failed-login spikes and
 // new-device/new-IP logins detected across all accounts, for admin review.
 router.get("/security/anomalies", listSecurityAnomalies);
+
+// GET & POST /api/v1/admin/security/sybil-graph (issue #274): Sybil syndicate relationship graph
+router.get("/security/sybil-graph", getSybilGraphReport);
+router.post("/security/sybil-graph", getSybilGraphReport);
 
 // GET /api/v1/admin/leagues/:leagueId/h2h-anomalies
 router.get("/leagues/:leagueId/h2h-anomalies", listH2HAnomalies);
