@@ -25,8 +25,13 @@ export const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
-  const [token, setToken] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [token, setToken] = useState<string | null>(() =>
+    typeof window !== "undefined" ? localStorage.getItem("token") : null
+  );
+  const [isLoading, setIsLoading] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
+    return localStorage.getItem("token") !== null;
+  });
 
   const refreshUserWithToken = async (currentToken: string) => {
     try {
@@ -56,14 +61,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   useEffect(() => {
-    const savedToken = typeof window !== "undefined" ? localStorage.getItem("token") : null;
-    if (savedToken) {
-      setToken(savedToken);
-      refreshUserWithToken(savedToken).finally(() => setIsLoading(false));
-    } else {
-      setIsLoading(false);
-    }
-  }, []);
+    if (!token) return;
+
+    let isActive = true;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void refreshUserWithToken(token).finally(() => {
+      if (isActive) setIsLoading(false);
+    });
+
+    return () => {
+      isActive = false;
+    };
+  }, [token]);
 
   const login = (newToken: string, newUser: User) => {
     if (typeof window !== "undefined") {

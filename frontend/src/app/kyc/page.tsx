@@ -1,19 +1,19 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
 import { api } from "../../lib/api";
 
-async function fetchKycStatus() {
-  return await api.get<{ status: string }>("/api/v1/sep8/kyc/status");
+type KycStatusResponse = { status: string };
+
+async function fetchKycStatus(): Promise<KycStatusResponse> {
+  return await api.get<KycStatusResponse>("/api/v1/sep8/kyc/status");
 }
 
-async function submitKycData(data: any) {
-  return await api.post<{ status: string }>("/api/v1/sep8/kyc", data);
+async function submitKycData(data: Record<string, string>) {
+  return await api.post<KycStatusResponse>("/api/v1/sep8/kyc", data);
 }
 
 export default function KycPage() {
-  const router = useRouter();
   const [status, setStatus] = useState<string>("LOADING");
   const [formData, setFormData] = useState({
     firstName: "",
@@ -28,11 +28,11 @@ export default function KycPage() {
       try {
         const data = await fetchKycStatus();
         setStatus(data.status);
-      } catch (err: any) {
+      } catch {
         setStatus("UNVERIFIED");
       }
     }
-    loadStatus();
+    void loadStatus();
   }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -42,8 +42,9 @@ export default function KycPage() {
     try {
       const data = await submitKycData(formData);
       setStatus(data.status);
-    } catch (err: any) {
-      setError(err.message || "Failed to submit KYC");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to submit KYC";
+      setError(message);
     } finally {
       setLoading(false);
     }

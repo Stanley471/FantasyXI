@@ -98,7 +98,7 @@ const PlayerCardComponent: React.FC<PlayerCardProps> = ({
         <button
           type="button"
           onClick={onClick}
-          aria-label={`Add a ${player ? player.position : positionSlot} player`}
+          aria-label={`Add a ${positionSlot} player`}
           style={{ touchAction: "manipulation" }}
           className={`group relative flex w-[72px] max-w-full flex-col items-center justify-center p-2 rounded-xl transition-all duration-200 sm:w-24 ${
             isSwapCandidate || isOver
@@ -138,7 +138,8 @@ const PlayerCardComponent: React.FC<PlayerCardProps> = ({
     }
   };
 
-  const jerseyStyle = getJerseyStyle(player.position);
+  const playerPosition = player.position ?? positionSlot;
+  const jerseyStyle = getJerseyStyle(playerPosition);
 
   // Dynamic styling based on Drag & Drop and substitution validation
   let interactiveStyles = "hover:scale-105 cursor-grab active:cursor-grabbing";
@@ -197,7 +198,6 @@ const PlayerCardComponent: React.FC<PlayerCardProps> = ({
       <button
         type="button"
         onClick={onClick}
-        aria-pressed={isSelectedForSwap}
         aria-label={`${player.displayName || player.lastName} ${isSelectedForSwap ? "selected for swap" : "player card"}`}
         {...(!isOverlay ? listeners : {})}
         {...(!isOverlay ? attributes : {})}

@@ -31,24 +31,16 @@ export const PlayerPickerModal: React.FC<PlayerPickerModalProps> = ({
 }) => {
   const [players, setPlayers] = useState<Player[]>([]);
   const [search, setSearch] = useState("");
-  const [selectedPosition, setSelectedPosition] = useState<string>(requiredPosition || "ALL");
+  const [selectedPosition, setSelectedPosition] = useState<string>("ALL");
   const [sortBy, setSortBy] = useState<string>("totalPoints");
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const effectiveSelectedPosition = requiredPosition ?? selectedPosition;
 
   // Ref on the scrollable list container for the virtualiser
   const listRef = useRef<HTMLDivElement>(null);
 
   // Virtualise: 64 px per row, 8-row overscan
   const { virtualItems, totalHeight } = useVirtualList(players, 64, listRef, 8);
-
-  // Sync selectedPosition when requiredPosition changes
-  useEffect(() => {
-    if (requiredPosition) {
-      setSelectedPosition(requiredPosition);
-    } else {
-      setSelectedPosition("ALL");
-    }
-  }, [requiredPosition, isOpen]);
 
   // Fetch players with debounced search
   useEffect(() => {
@@ -59,7 +51,7 @@ export const PlayerPickerModal: React.FC<PlayerPickerModalProps> = ({
       try {
         const params = new URLSearchParams();
         if (search.trim()) params.set("search", search.trim());
-        if (selectedPosition !== "ALL") params.set("position", selectedPosition);
+        if (effectiveSelectedPosition !== "ALL") params.set("position", effectiveSelectedPosition);
         params.set("sortBy", sortBy);
         params.set("sortOrder", "desc");
         params.set("limit", "40");
@@ -70,7 +62,9 @@ export const PlayerPickerModal: React.FC<PlayerPickerModalProps> = ({
         }>(`/api/v1/players?${params.toString()}`);
 
         if (res?.data) {
-          const fetched = Array.isArray(res.data) ? res.data : (res.data as any).players || [];
+          const fetched = Array.isArray(res.data)
+            ? res.data
+            : (res.data as { players?: Player[] }).players ?? [];
           setPlayers(fetched);
         }
       } catch (err) {
@@ -81,7 +75,7 @@ export const PlayerPickerModal: React.FC<PlayerPickerModalProps> = ({
     }, 250);
 
     return () => clearTimeout(timer);
-  }, [isOpen, search, selectedPosition, sortBy]);
+  }, [effectiveSelectedPosition, isOpen, search, sortBy]);
 
   if (!isOpen) return null;
 
@@ -134,20 +128,26 @@ export const PlayerPickerModal: React.FC<PlayerPickerModalProps> = ({
           <div className="flex flex-wrap items-center justify-between gap-2">
             {/* Position Tabs */}
             <div className="flex items-center gap-1 bg-slate-950/80 p-1 rounded-lg border border-slate-800">
-              {(requiredPosition ? [requiredPosition] : ["ALL", "GKP", "DEF", "MID", "FWD"]).map((pos) => (
-                <button
-                  key={pos}
-                  type="button"
-                  onClick={() => setSelectedPosition(pos)}
-                  className={`px-3 py-1 rounded text-xs font-bold uppercase transition-colors ${
-                    selectedPosition === pos
-                      ? "bg-emerald-500 text-slate-950 shadow-sm"
-                      : "text-slate-400 hover:text-slate-200"
-                  }`}
-                >
-                  {pos}
-                </button>
-              ))}
+              {((requiredPosition ? [requiredPosition] : ["ALL", "GKP", "DEF", "MID", "FWD"]) as Array<string | Position>).map((pos) => {
+                const isActive = effectiveSelectedPosition === pos;
+                return (
+                  <button
+                    key={String(pos)}
+                    type="button"
+                    onClick={() => {
+                      if (!requiredPosition) setSelectedPosition(String(pos));
+                    }}
+                    disabled={!!requiredPosition}
+                    className={`px-3 py-1 rounded text-xs font-bold uppercase transition-colors ${
+                      isActive
+                        ? "bg-emerald-500 text-slate-950 shadow-sm"
+                        : "text-slate-400 hover:text-slate-200"
+                    } ${requiredPosition ? "cursor-default" : ""}`}
+                  >
+                    {pos}
+                  </button>
+                );
+              })}
             </div>
 
             {/* Sort Select */}

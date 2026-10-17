@@ -225,7 +225,7 @@ describe("Drag-and-Drop Squad Management & Substitutions", () => {
       const currentStarters = useTeamStore
         .getState()
         .players.filter((p) => p.isStarter);
-      assert.strictEqual(detectFormation(currentStarters as any), "3-5-2");
+      assert.strictEqual(detectFormation(currentStarters), "3-5-2");
     });
 
     it("should allow valid tactical switch: 4-4-2 -> 4-3-3 (subbing MID for FWD)", () => {
@@ -241,7 +241,7 @@ describe("Drag-and-Drop Squad Management & Substitutions", () => {
       const currentStarters = useTeamStore
         .getState()
         .players.filter((p) => p.isStarter);
-      assert.strictEqual(detectFormation(currentStarters as any), "4-3-3");
+      assert.strictEqual(detectFormation(currentStarters), "4-3-3");
     });
 
     it("should reject subbing a DEF when squad already has minimum 3 defenders (3-5-2)", () => {

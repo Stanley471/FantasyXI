@@ -45,7 +45,9 @@ export const Pitch: React.FC<PitchProps> = ({ isLoading = false }) => {
   const midSlots = midStarters.length > 0 ? midStarters : [null, null, null, null];
   const fwdSlots = fwdStarters.length > 0 ? fwdStarters : [null, null];
 
-  const currentFormation = detectFormation(starters as any);
+  const currentFormation = detectFormation(
+    starters as Array<{ player?: Player; position?: Position }>
+  );
 
   return (
     <div className="w-full max-w-full overflow-x-hidden relative rounded-2xl shadow-2xl border border-pitch-border bg-slate-950" data-testid="pitch">

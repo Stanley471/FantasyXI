@@ -51,11 +51,34 @@ export function redirectToGoogleSignIn(returnTo?: string | null): void {
 }
 
 /** Starts linking a Google account to the signed-in manager. */
+export function safeGoogleRedirectUrl(value: string | null | undefined): string {
+  if (!value) return API_BASE_URL;
+
+  try {
+    const candidate = value.trim();
+    const parsed = new URL(candidate, API_BASE_URL);
+    const hostname = parsed.hostname.toLowerCase();
+    const isAllowedHost =
+      hostname === new URL(API_BASE_URL).hostname ||
+      hostname === "accounts.google.com" ||
+      hostname === "google.com" ||
+      hostname.endsWith(".google.com");
+
+    if (parsed.protocol !== "https:" || !isAllowedHost) {
+      return API_BASE_URL;
+    }
+
+    return parsed.toString();
+  } catch {
+    return API_BASE_URL;
+  }
+}
+
 export async function redirectToGoogleLink(): Promise<void> {
   const res = await api.post<{ success: boolean; data: { url: string } }>(
     "/api/v1/auth/google/link"
   );
-  window.location.href = new URL(res.data.url, API_BASE_URL).toString();
+  window.location.href = safeGoogleRedirectUrl(res.data.url);
 }
 
 const GOOGLE_AUTH_ERRORS: Record<string, string> = {

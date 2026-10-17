@@ -12,7 +12,7 @@ import {
 
 // Mock localStorage for Node test environment
 const mockStorage = new Map<string, string>();
-(globalThis as any).window = {
+const mockWindow = {
   localStorage: {
     getItem: (key: string) => mockStorage.get(key) || null,
     setItem: (key: string, val: string) => mockStorage.set(key, val),
@@ -20,7 +20,14 @@ const mockStorage = new Map<string, string>();
     clear: () => mockStorage.clear(),
   },
 };
-(globalThis as any).localStorage = (globalThis as any).window.localStorage;
+Object.defineProperty(globalThis, "window", {
+  value: mockWindow,
+  configurable: true,
+});
+Object.defineProperty(globalThis, "localStorage", {
+  value: mockWindow.localStorage,
+  configurable: true,
+});
 
 function createMockKit() {
   let selectedWalletId = "";
@@ -28,7 +35,7 @@ function createMockKit() {
   let shouldRejectNextAction: "none" | "cancel" | "reject" | "close" = "none";
 
   return {
-    init: (_params: any) => {},
+    init: (_params: Record<string, unknown>) => {},
     setWallet: (id: string) => {
       selectedWalletId = id;
     },
@@ -49,7 +56,7 @@ function createMockKit() {
     getAddress: async () => {
       return { address: `G${selectedWalletId.toUpperCase().padEnd(55, "A")}` };
     },
-    signTransaction: async (xdr: string, _opts: any) => {
+    signTransaction: async (xdr: string, _opts: Record<string, unknown>) => {
       if (shouldRejectNextAction === "reject") {
         throw new Error("User declined transaction signature");
       }
@@ -58,7 +65,7 @@ function createMockKit() {
     disconnect: async () => {
       selectedWalletId = "";
     },
-    authModal: async (_params: any) => {
+    authModal: async (_params: Record<string, unknown>) => {
       if (shouldRejectNextAction === "close") {
         return null;
       }
@@ -149,9 +156,9 @@ describe("Stellar Multi-Wallet Connect Support (Issue #223)", () => {
     mockKit.setRejectionMode("reject");
     await assert.rejects(
       async () => manager.connect("freighter"),
-      (err: any) => {
+      (err: unknown) => {
         assert.ok(err instanceof WalletUserRejectedError);
-        assert.equal(err.code, "CONNECTION_REJECTED");
+        assert.equal((err as WalletUserRejectedError).code, "CONNECTION_REJECTED");
         return true;
       }
     );
@@ -164,9 +171,9 @@ describe("Stellar Multi-Wallet Connect Support (Issue #223)", () => {
     mockKit.setRejectionMode("reject");
     await assert.rejects(
       async () => manager.signTransaction("SAMPLE_XDR"),
-      (err: any) => {
+      (err: unknown) => {
         assert.ok(err instanceof WalletUserRejectedError);
-        assert.equal(err.code, "SIGNATURE_REJECTED");
+        assert.equal((err as WalletUserRejectedError).code, "SIGNATURE_REJECTED");
         return true;
       }
     );
@@ -186,9 +193,9 @@ describe("Stellar Multi-Wallet Connect Support (Issue #223)", () => {
             closedCallbackFired = true;
           },
         }),
-      (err: any) => {
+      (err: unknown) => {
         assert.ok(err instanceof WalletModalClosedError);
-        assert.equal(err.code, "MODAL_CLOSED");
+        assert.equal((err as WalletModalClosedError).code, "MODAL_CLOSED");
         return true;
       }
     );

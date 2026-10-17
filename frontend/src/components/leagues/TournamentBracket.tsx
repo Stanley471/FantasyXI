@@ -27,41 +27,39 @@ interface TournamentBracketProps {
   readonly?: boolean;
 }
 
+function buildInitialMatches(teams: BracketTeam[]): BracketMatch[] {
+  if (teams.length === 0) return [];
+
+  const sorted = [...teams].sort((a, b) => (a.seed ?? 0) - (b.seed ?? 0));
+  const totalRounds = Math.ceil(Math.log2(sorted.length));
+  const bracketSize = Math.pow(2, totalRounds);
+
+  const initialMatches: BracketMatch[] = [];
+  for (let i = 0; i < bracketSize / 2; i++) {
+    const homeIdx = i * 2;
+    const awayIdx = i * 2 + 1;
+    const home = homeIdx < sorted.length ? sorted[homeIdx] : null;
+    const away = awayIdx < sorted.length ? sorted[awayIdx] : null;
+
+    initialMatches.push({
+      id: `round-0-match-${i}`,
+      round: 0,
+      position: i,
+      home,
+      away,
+    });
+  }
+
+  return initialMatches;
+}
+
 export const TournamentBracket: React.FC<TournamentBracketProps> = ({
   teams,
   onSeedChange,
   readonly = false,
 }) => {
-  const [matches, setMatches] = useState<BracketMatch[]>([]);
+  const [matches, setMatches] = useState<BracketMatch[]>(() => buildInitialMatches(teams));
   const [draggedTeam, setDraggedTeam] = useState<BracketTeam | null>(null);
-
-  // Build initial bracket from seeded teams
-  React.useEffect(() => {
-    if (teams.length === 0) return;
-
-    const sorted = [...teams].sort((a, b) => (a.seed ?? 0) - (b.seed ?? 0));
-    const totalRounds = Math.ceil(Math.log2(sorted.length));
-    const bracketSize = Math.pow(2, totalRounds);
-    const byes = bracketSize - sorted.length;
-
-    const initialMatches: BracketMatch[] = [];
-    for (let i = 0; i < bracketSize / 2; i++) {
-      const homeIdx = i * 2;
-      const awayIdx = i * 2 + 1;
-      const home = homeIdx < sorted.length ? sorted[homeIdx] : null;
-      const away = awayIdx < sorted.length ? sorted[awayIdx] : null;
-
-      initialMatches.push({
-        id: `round-0-match-${i}`,
-        round: 0,
-        position: i,
-        home,
-        away,
-      });
-    }
-
-    setMatches(initialMatches);
-  }, [teams]);
 
   const handleDragStart = (team: BracketTeam) => {
     if (readonly) return;
