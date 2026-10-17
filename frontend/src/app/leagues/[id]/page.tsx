@@ -17,6 +17,10 @@ import { LeagueChat } from "@/components/chat/LeagueChat";
 import { PrizeCalculator } from "@/components/leagues/PrizeCalculator";
 import { PaymentModal } from "@/components/leagues/PaymentModal";
 import { InvitationManager } from "@/components/leagues/InvitationManager";
+import {
+  CopyInviteButton,
+  copyToClipboardWithFallback,
+} from "@/components/leagues/CopyInviteButton";
 import { getOnChainLeague, OnChainLeagueState } from "@/lib/stellar/sorobanAudit";
 import { LiveMatchdayBar } from "@/components/live/LiveMatchdayBar";
 import { LiveSquadModal } from "@/components/live/LiveSquadModal";
@@ -190,12 +194,18 @@ export default function LeagueDetailPage({
     };
   }, [league, leagueId, escrowContractId]);
 
-  const copyInviteCode = () => {
+  const copyInviteCode = async () => {
     if (league?.inviteCode) {
-      navigator.clipboard.writeText(league.inviteCode);
-      setCopiedCode(true);
-      toast.success("League invite code copied to clipboard!");
-      setTimeout(() => setCopiedCode(false), 2000);
+      const origin = typeof window !== "undefined" ? window.location.origin : "";
+      const fullInviteUrl = origin
+        ? `${origin}/leagues/invite/${encodeURIComponent(league.inviteCode)}`
+        : league.inviteCode;
+      const ok = await copyToClipboardWithFallback(fullInviteUrl);
+      if (ok) {
+        setCopiedCode(true);
+        toast.success("Copied to clipboard!");
+        setTimeout(() => setCopiedCode(false), 2000);
+      }
     }
   };
 
@@ -343,23 +353,28 @@ export default function LeagueDetailPage({
 
           {/* Invite Code Widget (private league codes are only returned to the creator) */}
           {league.inviteCode && (
-            <div className="flex items-center gap-2 p-2.5 rounded-lg bg-slate-950/80 border border-slate-800 self-start md:self-auto">
+            <div className="relative flex items-center gap-2 p-2.5 rounded-lg bg-slate-950/80 border border-slate-800 self-start md:self-auto">
               <div>
                 <div className="text-[10px] uppercase font-semibold text-slate-500">Invite Code</div>
                 <div className="font-mono font-bold text-white tracking-widest text-sm">
                   {league.inviteCode}
                 </div>
               </div>
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                onClick={copyInviteCode}
-                className="text-xs"
-                title="Copy Invite Code"
-              >
-                {copiedCode ? <IconCheck className="w-3.5 h-3.5 text-emerald-400" /> : <IconCopy className="w-3.5 h-3.5" />}
-              </Button>
+              <CopyInviteButton
+                valueToCopy={
+                  typeof window !== "undefined" && window.location?.origin
+                    ? `${window.location.origin}/leagues/invite/${encodeURIComponent(league.inviteCode)}`
+                    : league.inviteCode
+                }
+                ariaLabel="Copy invitation link"
+                initialCopied={copiedCode}
+                onCopied={(_val, ok) => {
+                  if (ok) {
+                    setCopiedCode(true);
+                    setTimeout(() => setCopiedCode(false), 2000);
+                  }
+                }}
+              />
             </div>
           )}
         </div>
