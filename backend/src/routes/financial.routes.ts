@@ -8,6 +8,7 @@ import {
   executeSettlement,
   reconcileLeague,
   getAffiliateDashboard,
+  getMerkleClaimProof,
 } from "../controllers/financial.controller.js";
 import { requireAuth, requirePermission, requireRole } from "../middleware/authMiddleware.js";
 import { Permission, UserRole } from "../types/index.js";
@@ -23,6 +24,8 @@ router.get("/requirement", getPaymentRequirement);
 router.post("/submit", submitPayment);
 router.post("/verify", verifyPayment);
 router.get("/settlement-plan", getSettlementPlan);
+router.get("/merkle-claims", getMerkleClaimProof);
+router.get("/merkle-claims/:address", getMerkleClaimProof);
 router.post("/settle", requireRole(UserRole.ADMIN), executeSettlement);
 router.get("/affiliate-dashboard", getAffiliateDashboard);
 router.get("/requirement", requirePermission(Permission.PAYMENT_MANAGE_OWN), getPaymentRequirement);
