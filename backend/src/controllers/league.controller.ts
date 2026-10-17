@@ -19,6 +19,33 @@ import { liveService } from "../services/live/liveService.js";
  * LeaguePolicy and LeagueService.
  */
 
+const STELLAR_CONTRACT_STRKEY_REGEX = /^C[A-Z2-7]{55}$/;
+
+export function getAllowedTokenAssets(): Set<string> {
+  const configured = (process.env.STELLAR_ALLOWED_TOKEN_CONTRACTS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (process.env.STELLAR_USDC_TOKEN_CONTRACT_ID) {
+    configured.push(process.env.STELLAR_USDC_TOKEN_CONTRACT_ID.trim());
+  }
+  if (process.env.STELLAR_XLM_SAC_CONTRACT_ID) {
+    configured.push(process.env.STELLAR_XLM_SAC_CONTRACT_ID.trim());
+  }
+  return new Set(configured);
+}
+
+export function isAllowedTokenAsset(tokenContractId: string): boolean {
+  if (!STELLAR_CONTRACT_STRKEY_REGEX.test(tokenContractId)) {
+    return false;
+  }
+  const whitelist = getAllowedTokenAssets();
+  if (whitelist.size === 0) {
+    return true;
+  }
+  return whitelist.has(tokenContractId);
+}
+
 export async function createLeague(
   req: Request,
   res: Response,
@@ -31,6 +58,20 @@ export async function createLeague(
         message: "Authentication required to create a league",
       });
       return;
+    }
+
+    // Validate optional Soroban SAC token asset contract address when specified
+    const requestedAsset = (req.body?.tokenAddress ?? req.body?.assetContractId ?? req.body?.asset) as
+      | string
+      | undefined;
+    if (requestedAsset !== undefined && requestedAsset !== null && requestedAsset !== "") {
+      if (typeof requestedAsset !== "string" || !isAllowedTokenAsset(requestedAsset)) {
+        res.status(400).json({
+          success: false,
+          message: `Token asset contract '${String(requestedAsset)}' is not a valid whitelisted Soroban SAC address`,
+        });
+        return;
+      }
     }
 
     // Always derive creator identity from authenticated user
