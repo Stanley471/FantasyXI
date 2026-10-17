@@ -18,17 +18,171 @@ const globalForPrisma = globalThis as unknown as {
   clusterMonitor: DatabaseClusterMonitor | null | undefined;
 };
 
+const SLOW_QUERY_THRESHOLD_MS = 200;
+const SLOW_QUERY_WINDOW_MS = 60_000;
+const SENSITIVE_QUERY_KEYS = new Set([
+  "password",
+  "passwordhash",
+  "password_hash",
+  "token",
+  "accesstoken",
+  "access_token",
+  "refreshtoken",
+  "refresh_token",
+  "jwt",
+  "authorization",
+  "cookie",
+  "session",
+  "secret",
+  "apikey",
+  "api_key",
+  "clientsecret",
+  "client_secret",
+  "hash",
+  "hashvalue",
+]);
+const REDACTED = "[REDACTED]";
+const slowQueryTimestamps: number[] = [];
+let lastSlowQuery: {
+  durationMs: number;
+  operation: string;
+  queryFingerprint: string;
+  params: unknown;
+  occurredAt: number;
+} | null = null;
+
+function normalizeFingerprint(query: string): string {
+  return query.replace(/\s+/g, " ").trim().slice(0, 256) || "<empty query>";
+}
+
+export function redactSensitiveQueryParams(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactSensitiveQueryParams(entry));
+  }
+
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, entry]) => [
+        key,
+        SENSITIVE_QUERY_KEYS.has(key.toLowerCase())
+          ? REDACTED
+          : redactSensitiveQueryParams(entry),
+      ])
+    );
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim();
+    if (!normalized) {
+      return value;
+    }
+
+    const lower = normalized.toLowerCase();
+    if (
+      /^\$2[aby]\$\d+\$/.test(normalized) ||
+      /^[A-Za-z0-9+/=_-]{32,}$/.test(normalized) ||
+      /^eyJ[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+$/.test(normalized) ||
+      lower.includes("password") ||
+      lower.includes("token") ||
+      lower.includes("secret") ||
+      lower.includes("session") ||
+      lower.includes("authorization") ||
+      lower.includes("cookie")
+    ) {
+      return REDACTED;
+    }
+
+    return value;
+  }
+
+  return value;
+}
+
+export function getSlowQueryMetrics() {
+  const now = Date.now();
+  const windowStart = now - SLOW_QUERY_WINDOW_MS;
+
+  while (slowQueryTimestamps.length > 0 && slowQueryTimestamps[0] < windowStart) {
+    slowQueryTimestamps.shift();
+  }
+
+  return {
+    windowMs: SLOW_QUERY_WINDOW_MS,
+    rollingSlowQueryCount: slowQueryTimestamps.length,
+    lastSlowQuery,
+    reset: () => {
+      slowQueryTimestamps.length = 0;
+      lastSlowQuery = null;
+    },
+  };
+}
+
+export function registerPrismaQueryTelemetry(client: { $on?: (eventName: string, handler: (event: any) => void) => void }): void {
+  if (!client || typeof client.$on !== "function") {
+    return;
+  }
+
+  client.$on("query", (event: any) => {
+    const durationMs = Number(event?.duration ?? 0);
+    if (!Number.isFinite(durationMs) || durationMs <= SLOW_QUERY_THRESHOLD_MS) {
+      return;
+    }
+
+    let params: unknown = event?.params ?? null;
+    if (typeof params === "string") {
+      try {
+        params = JSON.parse(params);
+      } catch {
+        params = params;
+      }
+    }
+
+    const sanitizedParams = redactSensitiveQueryParams(params);
+    const queryFingerprint = normalizeFingerprint(String(event?.query ?? "<unknown query>"));
+    const occurredAt = Date.now();
+
+    slowQueryTimestamps.push(occurredAt);
+    lastSlowQuery = {
+      durationMs,
+      operation: String(event?.target ?? "prisma"),
+      queryFingerprint,
+      params: sanitizedParams,
+      occurredAt,
+    };
+
+    const cutoff = occurredAt - SLOW_QUERY_WINDOW_MS;
+    while (slowQueryTimestamps.length > 0 && slowQueryTimestamps[0] < cutoff) {
+      slowQueryTimestamps.shift();
+    }
+
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        type: "db.slow_query",
+        durationMs,
+        operation: lastSlowQuery.operation,
+        queryFingerprint,
+        params: sanitizedParams,
+        rollingSlowQueryCount: slowQueryTimestamps.length,
+      })
+    );
+  });
+}
+
 function createClient(connectionString: string): PrismaClient {
   const pool = new pg.Pool({ connectionString });
   const adapter = new PrismaPg(pool);
 
-  return new PrismaClient({
+  const prisma = new PrismaClient({
     adapter,
     log:
       process.env.NODE_ENV === "development"
         ? ["query", "error", "warn"]
         : ["error"],
   });
+
+  registerPrismaQueryTelemetry(prisma);
+  return prisma;
 }
 
 function getPrismaInstance(): PrismaClient {
