@@ -374,19 +374,63 @@ export class SorobanContractClient {
   }
 
   /**
-   * Create competition partition identified by `league_id`.
+   * Create competition partition identified by `league_id` with configurable SAC token address.
    */
   public async createLeague(
     creatorSecret: string,
     creatorPublic: string,
     leagueId: number | bigint,
-    entryFeeStroops: bigint
+    entryFeeStroops: bigint,
+    tokenContractId?: string
   ): Promise<InvocationResult> {
-    return this.invoke(creatorSecret, this.escrowContractId, "create_league", [
+    const assetAddress = tokenContractId || this.usdcContractId;
+    const args: xdr.ScVal[] = [
       SorobanContractClient.address(creatorPublic),
       SorobanContractClient.u64(leagueId),
       SorobanContractClient.i128(entryFeeStroops),
+    ];
+    if (assetAddress) {
+      args.push(SorobanContractClient.address(assetAddress));
+    }
+    return this.invoke(creatorSecret, this.escrowContractId, "create_league", args);
+  }
+
+  /**
+   * Whitelists an approved SAC token contract address on the escrow contract.
+   */
+  public async whitelistAsset(
+    adminSecret: string,
+    adminPublic: string,
+    tokenContractId: string
+  ): Promise<InvocationResult> {
+    return this.invoke(adminSecret, this.escrowContractId, "whitelist_asset", [
+      SorobanContractClient.address(adminPublic),
+      SorobanContractClient.address(tokenContractId),
     ]);
+  }
+
+  /**
+   * Revokes a previously whitelisted SAC token contract address on the escrow contract.
+   */
+  public async revokeWhitelistedAsset(
+    adminSecret: string,
+    adminPublic: string,
+    tokenContractId: string
+  ): Promise<InvocationResult> {
+    return this.invoke(adminSecret, this.escrowContractId, "revoke_whitelisted_asset", [
+      SorobanContractClient.address(adminPublic),
+      SorobanContractClient.address(tokenContractId),
+    ]);
+  }
+
+  /**
+   * Checks whether a given SAC token contract address is whitelisted on the escrow contract.
+   */
+  public async isAssetWhitelisted(tokenContractId: string): Promise<boolean> {
+    const result = await this.simulateView(this.escrowContractId, "is_asset_whitelisted", [
+      SorobanContractClient.address(tokenContractId),
+    ]);
+    return result.success ? Boolean(result.returnValue) : false;
   }
 
   /**
@@ -395,12 +439,15 @@ export class SorobanContractClient {
   public async deposit(
     participantSecret: string,
     participantPublic: string,
-    leagueId: number | bigint
+    leagueId: number | bigint,
+    tokenContractId?: string
   ): Promise<InvocationResult> {
-    return this.invoke(participantSecret, this.escrowContractId, "deposit", [
+    const args: xdr.ScVal[] = [
       SorobanContractClient.address(participantPublic),
       SorobanContractClient.u64(leagueId),
-    ]);
+    ];
+    void tokenContractId;
+    return this.invoke(participantSecret, this.escrowContractId, "deposit", args);
   }
 
   /** Publishes a commitment to a finalized gameweek's score set on Soroban. */
@@ -642,10 +689,14 @@ export class SorobanContractClient {
   }
 
   /**
-   * Query USDC SAC balance for any account (or contract ID).
+   * Query SAC balance for any account (or contract ID) across USDC or any configured token SAC.
    */
-  public async getTokenBalance(addressOrContractId: string): Promise<bigint> {
-    const result = await this.simulateView(this.usdcContractId, "balance", [
+  public async getTokenBalance(
+    addressOrContractId: string,
+    tokenContractId?: string
+  ): Promise<bigint> {
+    const targetToken = tokenContractId || this.usdcContractId;
+    const result = await this.simulateView(targetToken, "balance", [
       SorobanContractClient.address(addressOrContractId),
     ]);
     return result.success ? BigInt((result.returnValue as bigint) ?? 0) : 0n;

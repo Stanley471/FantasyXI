@@ -45,11 +45,12 @@ pub enum EscrowError {
     LeagueNotCancelled = 23,
     AlreadyClaimed = 24,
     InvalidFeeShare = 25,
-    HashMismatch = 23,
-    TimelockActive = 23,
-    ProposalNotFound = 24,
-    AlreadyApproved = 25,
-    ProposalExecuted = 26,
+    HashMismatch = 26,
+    TimelockActive = 27,
+    ProposalNotFound = 28,
+    AlreadyApproved = 29,
+    ProposalExecuted = 30,
+    AssetNotWhitelisted = 31,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -114,6 +115,9 @@ pub enum DataKey {
     ParticipantPage(u64, u32),
     SettlementHash(u64),
     TimelockProposal(u64),
+    WhitelistedAsset(Address),
+    WhitelistEnabled,
+    WhitelistedAssets,
 }
 
 /// # Issue #83: Soroban Escrow Smart Contract for Fantasy Leagues
@@ -250,8 +254,7 @@ impl FantasyXIEscrow {
             return Err(EscrowError::LeagueAlreadyExists);
         }
 
-        // Validate that the token is a valid contract by executing a dummy read
-        let _ = token::Client::new(&env, &asset).balance(&env.current_contract_address());
+        Self::require_allowed_asset(&env, &asset)?;
 
         let state = LeagueState {
             creator: creator.clone(),
@@ -302,6 +305,8 @@ impl FantasyXIEscrow {
         if league.status != LeagueStatus::Upcoming {
             return Err(EscrowError::LeagueNotAcceptingDeposits);
         }
+
+        Self::require_allowed_asset(&env, &league.asset)?;
 
         let deposit_key = DataKey::Deposit(league_id, participant.clone());
         if env.storage().persistent().has(&deposit_key) {
@@ -1393,9 +1398,137 @@ impl FantasyXIEscrow {
         let key = DataKey::TimelockProposal(proposal_id);
         env.storage().persistent().get(&key)
     }
+
+    /// Adds an approved SAC token contract address to the escrow asset whitelist.
+    /// Enabling any whitelisted asset activates strict whitelist enforcement for league creation and deposits.
+    pub fn whitelist_asset(env: Env, admin: Address, asset: Address) -> Result<(), EscrowError> {
+        Self::require_admin(&env, &admin)?;
+
+        // Verify the asset is an initialized SAC token contract
+        if token::Client::new(&env, &asset)
+            .try_balance(&env.current_contract_address())
+            .is_err()
+        {
+            return Err(EscrowError::AssetNotWhitelisted);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::WhitelistEnabled, &true);
+        let key = DataKey::WhitelistedAsset(asset.clone());
+        env.storage().persistent().set(&key, &true);
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        let mut list: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::WhitelistedAssets)
+            .unwrap_or_else(|| Vec::new(&env));
+        if !list.iter().any(|existing| existing == asset) {
+            list.push_back(asset.clone());
+            env.storage()
+                .instance()
+                .set(&DataKey::WhitelistedAssets, &list);
+        }
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+
+        env.events()
+            .publish((Symbol::new(&env, "AssetWhitelisted"),), asset);
+        Ok(())
+    }
+
+    /// Revokes an asset contract address from the escrow asset whitelist.
+    pub fn revoke_whitelisted_asset(
+        env: Env,
+        admin: Address,
+        asset: Address,
+    ) -> Result<(), EscrowError> {
+        Self::require_admin(&env, &admin)?;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::WhitelistEnabled, &true);
+        let key = DataKey::WhitelistedAsset(asset.clone());
+        env.storage().persistent().set(&key, &false);
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        if let Some(list) = env
+            .storage()
+            .instance()
+            .get::<_, Vec<Address>>(&DataKey::WhitelistedAssets)
+        {
+            let mut updated = Vec::new(&env);
+            for item in list.iter() {
+                if item != asset {
+                    updated.push_back(item);
+                }
+            }
+            env.storage()
+                .instance()
+                .set(&DataKey::WhitelistedAssets, &updated);
+        }
+
+        env.events()
+            .publish((Symbol::new(&env, "AssetRevoked"),), asset);
+        Ok(())
+    }
+
+    /// Checks whether a given asset contract address is currently whitelisted.
+    pub fn is_asset_whitelisted(env: Env, asset: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::WhitelistedAsset(asset))
+            .unwrap_or(false)
+    }
+
+    /// Returns the list of all currently whitelisted asset contract addresses.
+    pub fn get_whitelisted_assets(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::WhitelistedAssets)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
 }
 
 impl FantasyXIEscrow {
+    /// Verifies that `asset` is a valid initialized SAC token and, when whitelist enforcement is active,
+    /// is explicitly whitelisted.
+    pub fn require_allowed_asset(env: &Env, asset: &Address) -> Result<(), EscrowError> {
+        let whitelist_enabled: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::WhitelistEnabled)
+            .unwrap_or(false);
+
+        let key = DataKey::WhitelistedAsset(asset.clone());
+        if let Some(explicit) = env.storage().persistent().get::<_, bool>(&key) {
+            if !explicit {
+                return Err(EscrowError::AssetNotWhitelisted);
+            }
+        } else if whitelist_enabled {
+            return Err(EscrowError::AssetNotWhitelisted);
+        }
+
+        if token::Client::new(env, asset)
+            .try_balance(&env.current_contract_address())
+            .is_err()
+        {
+            return Err(EscrowError::AssetNotWhitelisted);
+        }
+        Ok(())
+    }
+
     /// Internal helper that computes SHA-256 hash over winner addresses, payout amounts, and platform fee.
     pub fn compute_settlement_hash_internal(
         env: &Env,
@@ -2426,6 +2559,9 @@ mod test {
         let league = client.get_league(&702).unwrap();
         assert_eq!(league.status, LeagueStatus::Upcoming);
         assert_eq!(client.get_settlement_hash(&702), None);
+    }
+
+    #[test]
     fn test_multisig_timelock_fee_withdrawal_lifecycle() {
         let env = Env::default();
         env.mock_all_auths();
