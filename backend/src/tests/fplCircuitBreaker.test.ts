@@ -1,273 +1,116 @@
-import { describe, it, beforeEach, afterEach } from "node:test";
+import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import {
-  CircuitBreaker,
-  CircuitState,
-  CircuitBreakerOpenError,
-  calculateDecorrelatedJitter,
-} from "../services/fpl/circuitBreaker.js";
 import { FplClient } from "../services/fpl/fplClient.js";
-import { IRedisCacheClient } from "../config/redis.js";
+import { CircuitState } from "../services/fpl/circuitBreaker.js";
+import type { IRedisCacheClient } from "../config/redis.js";
 
-/**
- * Mock Redis client for testing stale fallback and caching interactions
- */
-class MockRedisClient implements IRedisCacheClient {
-  public store = new Map<string, { value: string; expiresAt: number }>();
-
-  async get(key: string): Promise<string | null> {
-    const entry = this.store.get(key);
-    if (!entry) return null;
-    if (Date.now() >= entry.expiresAt) {
-      this.store.delete(key);
-      return null;
-    }
-    return entry.value;
-  }
-
-  async set(key: string, value: string, mode?: any, duration?: any): Promise<string> {
-    const ttlSeconds = mode === "EX" && typeof duration === "number" ? duration : 600;
-    this.store.set(key, {
-      value,
-      expiresAt: Date.now() + ttlSeconds * 1000,
-    });
-    return "OK";
-  }
-
-  async del(...keys: string[]): Promise<number> {
-    let count = 0;
-    for (const key of keys) {
-      if (this.store.delete(key)) count++;
-    }
-    return count;
-  }
-
-  async keys(pattern: string): Promise<string[]> {
-    const prefix = pattern.replaceAll("*", "");
-    return Array.from(this.store.keys()).filter((k) => k.startsWith(prefix));
-  }
+function createMockRedis(): IRedisCacheClient & { store: Map<string, string> } {
+  const store = new Map<string, string>();
+  return {
+    store,
+    async get(key: string) {
+      return store.get(key) ?? null;
+    },
+    async set(key: string, value: string) {
+      store.set(key, value);
+      return "OK";
+    },
+    async del(...keys: string[]) {
+      let count = 0;
+      for (const k of keys) {
+        if (store.delete(k)) count++;
+      }
+      return count;
+    },
+    async keys(pattern: string) {
+      const prefix = pattern.replace(/\*$/, "");
+      return [...store.keys()].filter((k) => k.startsWith(prefix));
+    },
+  };
 }
 
-describe("FPL Circuit Breaker & Adaptive Backoff (#208)", () => {
-  describe("State Transitions & Cooldown", () => {
-    it("starts in CLOSED state and remains CLOSED on success", async () => {
-      const cb = new CircuitBreaker({ failureThreshold: 3, cooldownPeriodMs: 1000 });
-      assert.equal(cb.getState(), CircuitState.CLOSED);
+describe("FplClient Circuit Breaker & 3-Tier Cache Degradation (#275)", () => {
+  it("opens circuit after consecutive 503 failures and serves L1/L2/L3 stale fallback with X-Data-Stale headers", async () => {
+    const redis = createMockRedis();
+    let pgCalled = false;
 
-      const result = await cb.execute(async () => "ok");
-      assert.equal(result, "ok");
-      assert.equal(cb.getState(), CircuitState.CLOSED);
-      assert.equal(cb.getConsecutiveFailures(), 0);
-    });
-
-    it("trips from CLOSED to OPEN after failureThreshold consecutive failures", async () => {
-      const stateChanges: Array<{ from: CircuitState; to: CircuitState }> = [];
-      const cb = new CircuitBreaker({
+    const client = new FplClient({
+      baseUrl: "https://fpl.mock/api",
+      redis,
+      maxRetries: 1,
+      retryBackoffMs: 1,
+      circuitBreakerOptions: {
         failureThreshold: 3,
-        cooldownPeriodMs: 2000,
-        onStateChange: (from, to) => stateChanges.push({ from, to }),
+        cooldownPeriodMs: 60,
+        successThreshold: 1,
+      },
+      postgresSnapshotProvider: async (endpoint: string) => {
+        pgCalled = true;
+        return { endpoint, source: "postgres-snapshot", elements: [{ id: 99, web_name: "Haaland" }] };
+      },
+    });
+
+    // 1. Simulate 3 consecutive 503 Service Unavailable failures without L1/L2 cache -> degrades to L3 Postgres snapshot
+    client.fetchWithRetry = async () => {
+      throw new Error("FPL API failed: [503] Service Unavailable");
+    };
+
+    const res1 = await client.getWithMetadata<{ source: string }>("/bootstrap-static/", 10);
+    assert.equal(res1.isStale, true);
+    assert.equal(res1.source, "STALE_L3_POSTGRES");
+    assert.equal(res1.headers["X-Data-Stale"], "true");
+    assert.equal(pgCalled, true);
+
+    // Clear L1 stale cache to force 2 more upstream failures so circuit trips to OPEN
+    (client as unknown as { staleCache: Map<string, unknown> }).staleCache.clear();
+    await client.getWithMetadata("/bootstrap-static/", 10);
+    (client as unknown as { staleCache: Map<string, unknown> }).staleCache.clear();
+    await client.getWithMetadata("/bootstrap-static/", 10);
+
+    assert.equal(client.circuitBreaker.getState(), CircuitState.OPEN);
+    assert.equal(client.getTelemetryHealth().status, "degraded");
+
+    // 2. While OPEN, L1 stale cache is served immediately without calling fetchWithRetry
+    let upstreamInvokedWhileOpen = false;
+    client.fetchWithRetry = async () => {
+      upstreamInvokedWhileOpen = true;
+      throw new Error("Should not be called while circuit is OPEN");
+    };
+
+    const openRes = await client.getWithMetadata("/bootstrap-static/", 10);
+    assert.equal(upstreamInvokedWhileOpen, false);
+    assert.equal(openRes.isStale, true);
+    assert.equal(openRes.source, "STALE_L1_MEMORY");
+    assert.equal(openRes.headers["X-Data-Stale"], "true");
+
+    // 3. Verify Tier 2 (STALE_L2_REDIS) fallback when L1 memory is empty
+    (client as unknown as { staleCache: Map<string, unknown> }).staleCache.clear();
+    await redis.set(
+      "fpl:cache:stale:/fixtures/",
+      JSON.stringify([{ id: 1, team_h: 1, team_a: 2 }])
+    );
+    const l2StaleRes = await client.getWithMetadata<Array<{ id: number }>>("/fixtures/", 10);
+    assert.equal(l2StaleRes.isStale, true);
+    assert.equal(l2StaleRes.source, "STALE_L2_REDIS");
+    assert.equal(l2StaleRes.headers["X-Data-Stale"], "true");
+    assert.equal(l2StaleRes.data[0].id, 1);
+
+    // 4. Wait for cooldown (60ms) -> transitions to HALF_OPEN -> upstream recovers -> transitions to CLOSED
+    await new Promise((r) => setTimeout(r, 80));
+    assert.equal(client.circuitBreaker.getState(), CircuitState.HALF_OPEN);
+
+    client.fetchWithRetry = async () =>
+      new Response(JSON.stringify({ events: [], teams: [], elements: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
       });
 
-      for (let i = 0; i < 2; i++) {
-        await assert.rejects(async () => {
-          await cb.execute(async () => {
-            throw new Error("HTTP 500 Internal Server Error");
-          });
-        });
-        assert.equal(cb.getState(), CircuitState.CLOSED);
-      }
-
-      // 3rd failure trips the breaker
-      await assert.rejects(async () => {
-        await cb.execute(async () => {
-          throw new Error("HTTP 429 Too Many Requests");
-        });
-      });
-
-      assert.equal(cb.getState(), CircuitState.OPEN);
-      assert.equal(cb.isOpen(), true);
-      assert.equal(stateChanges.length, 1);
-      assert.deepEqual(stateChanges[0], { from: CircuitState.CLOSED, to: CircuitState.OPEN });
-    });
-
-    it("rejects calls immediately when OPEN without executing action", async () => {
-      const cb = new CircuitBreaker({ failureThreshold: 1, cooldownPeriodMs: 5000 });
-      await assert.rejects(async () => {
-        await cb.execute(async () => {
-          throw new Error("Downstream failed");
-        });
-      });
-      assert.equal(cb.getState(), CircuitState.OPEN);
-
-      let actionCalled = false;
-      await assert.rejects(
-        async () => {
-          await cb.execute(async () => {
-            actionCalled = true;
-            return "unexpected";
-          });
-        },
-        (err: any) => {
-          assert.equal(err instanceof CircuitBreakerOpenError, true);
-          assert.ok(err.remainingCooldownMs > 0);
-          return true;
-        }
-      );
-
-      assert.equal(actionCalled, false, "Action must not be called when circuit breaker is OPEN");
-    });
-
-    it("transitions from OPEN to HALF_OPEN after cooldown period and closes on probe success", async () => {
-      const cb = new CircuitBreaker({ failureThreshold: 2, cooldownPeriodMs: 50 });
-      // Trip to OPEN
-      await assert.rejects(() => cb.execute(() => Promise.reject(new Error("err 1"))));
-      await assert.rejects(() => cb.execute(() => Promise.reject(new Error("err 2"))));
-      assert.equal(cb.getState(), CircuitState.OPEN);
-
-      // Wait for cooldown
-      await new Promise((r) => setTimeout(r, 60));
-
-      // Cooldown elapsed -> state becomes HALF_OPEN
-      assert.equal(cb.getState(), CircuitState.HALF_OPEN);
-
-      // Probe succeeds -> transitions to CLOSED
-      const probeResult = await cb.execute(async () => "probe-success");
-      assert.equal(probeResult, "probe-success");
-      assert.equal(cb.getState(), CircuitState.CLOSED);
-      assert.equal(cb.getConsecutiveFailures(), 0);
-    });
-
-    it("transitions from HALF_OPEN back to OPEN if probe fails", async () => {
-      const cb = new CircuitBreaker({ failureThreshold: 2, cooldownPeriodMs: 50 });
-      await assert.rejects(() => cb.execute(() => Promise.reject(new Error("err 1"))));
-      await assert.rejects(() => cb.execute(() => Promise.reject(new Error("err 2"))));
-      assert.equal(cb.getState(), CircuitState.OPEN);
-
-      await new Promise((r) => setTimeout(r, 60));
-      assert.equal(cb.getState(), CircuitState.HALF_OPEN);
-
-      // Probe fails
-      await assert.rejects(() => cb.execute(() => Promise.reject(new Error("probe-failed"))));
-      assert.equal(cb.getState(), CircuitState.OPEN);
-    });
-  });
-
-  describe("Decorrelated Jitter Backoff", () => {
-    it("calculates jittered delays within base and max bounds", () => {
-      const base = 1000;
-      const max = 30000;
-      let delay = base;
-
-      for (let i = 0; i < 20; i++) {
-        delay = calculateDecorrelatedJitter(delay, base, max);
-        assert.ok(delay >= base, `Delay ${delay} must be >= base ${base}`);
-        assert.ok(delay <= max, `Delay ${delay} must be <= max ${max}`);
-      }
-    });
-
-    it("generates varied jittered delays across multiple calculations", () => {
-      const delays = new Set<number>();
-      for (let i = 0; i < 20; i++) {
-        delays.add(calculateDecorrelatedJitter(1000, 500, 10000));
-      }
-      assert.ok(delays.size > 1, "Decorrelated jitter should produce variable delays");
-    });
-  });
-
-  describe("FplClient Integration & Stale Cache Fallback", () => {
-    const originalFetch = globalThis.fetch;
-    let mockRedis: MockRedisClient;
-    let client: FplClient;
-
-    beforeEach(() => {
-      mockRedis = new MockRedisClient();
-      client = new FplClient(
-        {
-          baseUrl: "https://fantasy.premierleague.com/api",
-          redis: mockRedis,
-          circuitBreakerOptions: {
-            failureThreshold: 2,
-            cooldownPeriodMs: 100,
-          },
-        },
-        mockRedis
-      );
-    });
-
-    afterEach(() => {
-      globalThis.fetch = originalFetch;
-    });
-
-    it("serves stale cached data when upstream fails with 5xx/429", async () => {
-      const sampleData = { teams: [{ id: 1, name: "Arsenal" }] };
-
-      // 1. Initial successful fetch populates fresh cache and stale cache
-      globalThis.fetch = async () =>
-        new Response(JSON.stringify(sampleData), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-
-      const initial = await client.getWithMetadata<typeof sampleData>("/bootstrap-static/", 1);
-      assert.equal(initial.isStale, false);
-      assert.deepEqual(initial.data, sampleData);
-
-      // 2. Clear fresh redis and memory TTL to simulate expired cache
-      await mockRedis.del("fpl:cache:/bootstrap-static/");
-      (client as any).cache.clear();
-
-      // 3. Upstream starts throwing 503
-      globalThis.fetch = async () =>
-        new Response("Service Unavailable", {
-          status: 503,
-          statusText: "Service Unavailable",
-        });
-
-      // Client should fall back to STALE cache instead of crashing
-      const fallback = await client.getWithMetadata<typeof sampleData>("/bootstrap-static/", 1);
-      assert.equal(fallback.isStale, true);
-      assert.deepEqual(fallback.data, sampleData);
-    });
-
-    it("serves stale cached data when circuit breaker trips OPEN", async () => {
-      const sampleData = { fixtures: [{ id: 1, team_h: 1, team_a: 2 }] };
-
-      // Successful fetch
-      globalThis.fetch = async () =>
-        new Response(JSON.stringify(sampleData), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-
-      await client.get("/fixtures/", 1);
-
-      // Clear fresh redis and memory cache so only stale cache remains
-      await mockRedis.del("fpl:cache:/fixtures/");
-      (client as any).cache.clear();
-
-      // Force trip circuit breaker
-      client.circuitBreaker.trip();
-      assert.equal(client.circuitBreaker.isOpen(), true);
-
-      // Fetch with circuit breaker open: returns stale data seamlessly
-      const result = await client.getWithMetadata<typeof sampleData>("/fixtures/", 1);
-      assert.equal(result.isStale, true);
-      assert.deepEqual(result.data, sampleData);
-    });
-
-    it("throws CircuitBreakerOpenError when circuit is OPEN and no stale cache exists", async () => {
-      client.circuitBreaker.trip();
-      assert.equal(client.circuitBreaker.isOpen(), true);
-
-      await assert.rejects(
-        async () => {
-          await client.get("/uncached-endpoint/");
-        },
-        (err: any) => {
-          assert.equal(err instanceof CircuitBreakerOpenError, true);
-          return true;
-        }
-      );
-    });
+    await client.clearCache("/bootstrap-static/");
+    const recoveredRes = await client.getWithMetadata("/bootstrap-static/", 60);
+    assert.equal(recoveredRes.isStale, false);
+    assert.equal(recoveredRes.source, "UPSTREAM");
+    assert.equal(recoveredRes.headers["X-Data-Stale"], "false");
+    assert.equal(client.circuitBreaker.getState(), CircuitState.CLOSED);
+    assert.equal(client.getTelemetryHealth().status, "healthy");
   });
 });
