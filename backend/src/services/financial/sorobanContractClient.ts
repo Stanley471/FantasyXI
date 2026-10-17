@@ -650,4 +650,122 @@ export class SorobanContractClient {
     ]);
     return result.success ? BigInt((result.returnValue as bigint) ?? 0) : 0n;
   }
+
+  /**
+   * Inspects the Soroban ledger entry TTL and restoration status for a league partition
+   * by simulating `get_league` and inspecting `getLedgerEntries` / `restorePreamble`.
+   */
+  public async inspectLeagueTtl(leagueId: number | bigint): Promise<{
+    leagueId: string;
+    latestLedger: number;
+    liveUntilLedgerSeq?: number;
+    remainingLedgers?: number;
+    needsRestore: boolean;
+    restorePreamble?: {
+      minResourceFee: string;
+      transactionData: { build(): xdr.SorobanTransactionData };
+    };
+    error?: string;
+  }> {
+    try {
+      const latest = await this.server.getLatestLedger();
+      const tx = this.buildInvocation(
+        new Account(SIMULATION_SOURCE, "0"),
+        this.escrowContractId,
+        "get_league",
+        [SorobanContractClient.u64(leagueId)]
+      );
+      const simulation = await this.server.simulateTransaction(tx);
+
+      if (rpc.Api.isSimulationError(simulation)) {
+        return {
+          leagueId: String(leagueId),
+          latestLedger: latest.sequence,
+          needsRestore: false,
+          error: `Simulation failed: ${simulation.error}`,
+        };
+      }
+
+      if (rpc.Api.isSimulationRestore(simulation)) {
+        return {
+          leagueId: String(leagueId),
+          latestLedger: latest.sequence,
+          liveUntilLedgerSeq: latest.sequence,
+          remainingLedgers: 0,
+          needsRestore: true,
+          restorePreamble: simulation.restorePreamble,
+        };
+      }
+
+      const simAny = simulation as unknown as {
+        stateChanges?: Array<{ liveUntilLedgerSeq?: number }>;
+        liveUntilLedgerSeq?: number;
+      };
+      let minLiveUntil: number | undefined = simAny.liveUntilLedgerSeq;
+
+      if (Array.isArray(simAny.stateChanges)) {
+        for (const change of simAny.stateChanges) {
+          if (typeof change.liveUntilLedgerSeq === "number") {
+            minLiveUntil =
+              minLiveUntil === undefined
+                ? change.liveUntilLedgerSeq
+                : Math.min(minLiveUntil, change.liveUntilLedgerSeq);
+          }
+        }
+      }
+
+      const remainingLedgers =
+        minLiveUntil !== undefined ? Math.max(0, minLiveUntil - latest.sequence) : undefined;
+
+      return {
+        leagueId: String(leagueId),
+        latestLedger: latest.sequence,
+        liveUntilLedgerSeq: minLiveUntil,
+        remainingLedgers,
+        needsRestore: false,
+      };
+    } catch (error) {
+      return {
+        leagueId: String(leagueId),
+        latestLedger: 0,
+        needsRestore: false,
+        error: (error as Error).message,
+      };
+    }
+  }
+
+  /**
+   * Invokes the contract's `extend_league_ttl(league_id, threshold, extend_to)` entrypoint
+   * (automatically restoring archived entries first if needed via `invoke()`).
+   */
+  public async extendLeagueTtl(
+    signerSecret: string,
+    leagueId: number | bigint,
+    thresholdLedgers: number,
+    extendToLedgers: number
+  ): Promise<InvocationResult> {
+    return this.invoke(signerSecret, this.escrowContractId, "extend_league_ttl", [
+      SorobanContractClient.u64(leagueId),
+      nativeToScVal(thresholdLedgers, { type: "u32" }),
+      nativeToScVal(extendToLedgers, { type: "u32" }),
+    ]);
+  }
+
+  /**
+   * Invokes `extend_participant_page_ttl(league_id, page, threshold, extend_to)` on the escrow contract.
+   */
+  public async extendParticipantPageTtl(
+    signerSecret: string,
+    leagueId: number | bigint,
+    page: number,
+    thresholdLedgers: number,
+    extendToLedgers: number
+  ): Promise<InvocationResult> {
+    return this.invoke(signerSecret, this.escrowContractId, "extend_participant_page_ttl", [
+      SorobanContractClient.u64(leagueId),
+      nativeToScVal(page, { type: "u32" }),
+      nativeToScVal(thresholdLedgers, { type: "u32" }),
+      nativeToScVal(extendToLedgers, { type: "u32" }),
+    ]);
+  }
 }
