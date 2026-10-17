@@ -440,5 +440,132 @@ export async function getUserReferralCode(
   }
 }
 
+import { webauthnService } from "../services/auth/webauthnService.js";
 
+export async function generateWebAuthnRegistrationOptions(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user?.id || !req.user?.email) {
+      res.status(401).json({ success: false, message: "Authentication required" });
+      return;
+    }
 
+    const options = webauthnService.generateRegistrationOptions({
+      userId: req.user.id,
+      email: req.user.email,
+      displayName: req.body?.displayName ?? req.user.email,
+    });
+
+    res.json({
+      success: true,
+      data: options,
+    });
+  } catch (error) {
+    if (error instanceof AuthValidationError) {
+      res.status(400).json({ success: false, message: error.message });
+      return;
+    }
+    next(error);
+  }
+}
+
+export async function verifyWebAuthnRegistration(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user?.id) {
+      res.status(401).json({ success: false, message: "Authentication required" });
+      return;
+    }
+
+    const credential = webauthnService.verifyRegistrationResponse({
+      userId: req.user.id,
+      response: req.body,
+    });
+
+    res.status(201).json({
+      success: true,
+      message: "Passkey credential registered successfully",
+      data: credential,
+    });
+  } catch (error) {
+    if (error instanceof AuthValidationError) {
+      res.status(400).json({ success: false, message: error.message });
+      return;
+    }
+    if (error instanceof AuthConflictError) {
+      res.status(409).json({ success: false, message: error.message });
+      return;
+    }
+    if (error instanceof AuthUnauthorizedError) {
+      res.status(401).json({ success: false, message: error.message });
+      return;
+    }
+    next(error);
+  }
+}
+
+export async function generateWebAuthnAuthenticationOptions(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const userId = req.user?.id ?? req.body?.userId;
+    const intent = req.body?.intent === "step_up_2fa" ? "step_up_2fa" : "login";
+
+    const options = webauthnService.generateAuthenticationOptions({
+      userId,
+      intent,
+    });
+
+    res.json({
+      success: true,
+      data: options,
+    });
+  } catch (error) {
+    if (error instanceof AuthNotFoundError) {
+      res.status(404).json({ success: false, message: error.message });
+      return;
+    }
+    if (error instanceof AuthValidationError) {
+      res.status(400).json({ success: false, message: error.message });
+      return;
+    }
+    next(error);
+  }
+}
+
+export async function verifyWebAuthnAuthentication(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const result = webauthnService.verifyAuthenticationResponse({
+      response: req.body,
+      expectedUserId: req.user?.id ?? req.body?.expectedUserId,
+    });
+
+    res.json({
+      success: true,
+      message: "Passkey authentication verified",
+      data: result,
+    });
+  } catch (error) {
+    if (error instanceof AuthValidationError) {
+      res.status(400).json({ success: false, message: error.message });
+      return;
+    }
+    if (error instanceof AuthUnauthorizedError) {
+      res.status(401).json({ success: false, message: error.message });
+      return;
+    }
+    next(error);
+  }
+}
