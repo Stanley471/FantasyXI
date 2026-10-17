@@ -78,7 +78,11 @@ function createPasswordResetHarness(seedUsers: Array<{ email: string; password: 
           if (where.tokenHash && token.tokenHash !== String(where.tokenHash)) return false;
           if (where.userId && token.userId !== String(where.userId)) return false;
           if (where.usedAt === null && token.usedAt !== null) return false;
-          if (where.expiresAt && token.expiresAt.getTime() <= (where.expiresAt as { gt?: Date }).gt?.getTime()) {
+          if (
+            where.expiresAt &&
+            typeof (where.expiresAt as { gt?: Date }).gt?.getTime === "function" &&
+            token.expiresAt.getTime() <= (where.expiresAt as { gt?: Date }).gt!.getTime()
+          ) {
             return false;
           }
           return true;

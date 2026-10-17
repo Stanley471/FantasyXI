@@ -110,7 +110,7 @@ export const passwordResetRateLimiter: RateLimitRequestHandler = rateLimit({
   legacyHeaders: false,
   validate: { trustProxy: false },
   keyGenerator: (req) => {
-    const ip = ipKeyGenerator(req);
+    const ip = ipKeyGenerator(req.ip ?? req.socket.remoteAddress ?? "unknown");
     const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "unknown";
     return `${ip}:${email}`;
   },
