@@ -10,6 +10,10 @@ import {
   unlinkGoogleAccount,
   setPassword,
   getUserReferralCode,
+  generateWebAuthnRegistrationOptions,
+  verifyWebAuthnRegistration,
+  generateWebAuthnAuthenticationOptions,
+  verifyWebAuthnAuthentication,
 } from "../controllers/auth.controller.js";
 import { requireAuth, requirePermission } from "../middleware/authMiddleware.js";
 import { Permission } from "../types/index.js";
@@ -55,6 +59,12 @@ router.delete("/google/link", requireAuth, unlinkGoogleAccount);
 
 // POST /api/v1/auth/password (Protected: add a password to a Google account, or change it)
 router.post("/password", authRateLimiter, requireAuth, setPassword);
+
+// WebAuthn / Passkey endpoints
+router.post("/webauthn/register/options", authRateLimiter, requireAuth, generateWebAuthnRegistrationOptions);
+router.post("/webauthn/register/verify", authRateLimiter, requireAuth, verifyWebAuthnRegistration);
+router.post("/webauthn/authenticate/options", authRateLimiter, generateWebAuthnAuthenticationOptions);
+router.post("/webauthn/authenticate/verify", authRateLimiter, verifyWebAuthnAuthentication);
 
 export default router;
 
