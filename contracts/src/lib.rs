@@ -45,11 +45,11 @@ pub enum EscrowError {
     LeagueNotCancelled = 23,
     AlreadyClaimed = 24,
     InvalidFeeShare = 25,
-    HashMismatch = 23,
-    TimelockActive = 23,
-    ProposalNotFound = 24,
-    AlreadyApproved = 25,
-    ProposalExecuted = 26,
+    HashMismatch = 26,
+    TimelockActive = 27,
+    ProposalNotFound = 28,
+    AlreadyApproved = 29,
+    ProposalExecuted = 30,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -854,6 +854,9 @@ impl FantasyXIEscrow {
             .persistent()
             .get(&league_key)
             .ok_or(EscrowError::LeagueNotFound)?;
+        if league.status == LeagueStatus::Settled || league.status == LeagueStatus::Cancelled {
+            return Err(EscrowError::AlreadySettled);
+        }
         let deposit_key = DataKey::Deposit(league_id, participant.clone());
         let amount: i128 = env
             .storage()
@@ -2426,6 +2429,9 @@ mod test {
         let league = client.get_league(&702).unwrap();
         assert_eq!(league.status, LeagueStatus::Upcoming);
         assert_eq!(client.get_settlement_hash(&702), None);
+    }
+
+    #[test]
     fn test_multisig_timelock_fee_withdrawal_lifecycle() {
         let env = Env::default();
         env.mock_all_auths();
