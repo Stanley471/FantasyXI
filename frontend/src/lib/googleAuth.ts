@@ -10,13 +10,34 @@ import { api, API_BASE_URL } from "@/lib/api";
 
 /**
  * Only same-site relative paths are followed after sign-in; anything else
- * (absolute or protocol-relative URLs) falls back to the home page.
+ * (absolute, protocol-relative, encoded-host, or backslash-based paths) falls
+ * back to the home page.
  */
 export function safeReturnTo(value: string | null | undefined): string {
-  if (!value || !value.startsWith("/") || value.startsWith("//") || /[\\\s]/.test(value)) {
+  if (!value) return "/";
+
+  try {
+    const candidate = decodeURIComponent(value.trim());
+    if (
+      candidate.length === 0 ||
+      candidate.length > 512 ||
+      !candidate.startsWith("/") ||
+      candidate.startsWith("//") ||
+      /[\\\u0000-\u001F\u007F]/.test(candidate) ||
+      /^(?:[a-zA-Z][a-zA-Z0-9+.-]*:)/.test(candidate)
+    ) {
+      return "/";
+    }
+
+    const parsed = new URL(candidate, "https://fantasyxi.local");
+    if (parsed.origin !== "https://fantasyxi.local") {
+      return "/";
+    }
+
+    return candidate;
+  } catch {
     return "/";
   }
-  return value;
 }
 
 /** Sends the browser to the backend's Google sign-in endpoint. */
