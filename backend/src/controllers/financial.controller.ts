@@ -324,6 +324,7 @@ export async function reconcileLeague(
 }
 
 import { ReferralService } from "../services/auth/referralService.js";
+import { buildPrizeMerkleTree, type MerkleWinnerClaimInput } from "../services/financial/settlementProof.js";
 
 export async function getAffiliateDashboard(
   req: Request,
@@ -348,4 +349,81 @@ export async function getAffiliateDashboard(
     next(error);
   }
 }
+
+export async function getMerkleClaimProof(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user || !req.user.id) {
+      res.status(401).json({
+        success: false,
+        message: "Authentication required",
+      });
+      return;
+    }
+
+    const leagueId = (req.params.leagueId || req.params.id) as string;
+    const targetAddress = (req.params.address || req.query.stellarAddress || req.query.winner) as string | undefined;
+
+    let winnersInput: MerkleWinnerClaimInput[] | undefined = req.body?.winners;
+    if (!winnersInput || !Array.isArray(winnersInput) || winnersInput.length === 0) {
+      const plan = await financialService.prepareSettlement(leagueId, req.user.id);
+      winnersInput = plan.winners.map((w) => ({
+        userId: w.userId,
+        rank: w.rank,
+        stellarAddress: w.stellarAddress,
+        amountStroops: BigInt(Math.round(w.prizeAmount * 10_000_000)),
+      }));
+    }
+
+    const tree = buildPrizeMerkleTree(leagueId, winnersInput);
+
+    if (targetAddress) {
+      const claim = tree.getProofForWinner(targetAddress);
+      if (!claim) {
+        res.status(404).json({
+          success: false,
+          message: `No Merkle prize claim found for address ${targetAddress}`,
+        });
+        return;
+      }
+      res.status(200).json({
+        success: true,
+        data: {
+          leagueId: tree.leagueId,
+          merkleRoot: tree.merkleRoot,
+          claim,
+        },
+      });
+      return;
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        leagueId: tree.leagueId,
+        merkleRoot: tree.merkleRoot,
+        leaves: tree.leaves,
+        claims: tree.claims,
+      },
+    });
+  } catch (error) {
+    if (error instanceof FinancialForbiddenError) {
+      res.status(403).json({ success: false, message: error.message });
+      return;
+    }
+    if (error instanceof FinancialNotFoundError) {
+      res.status(404).json({ success: false, message: error.message });
+      return;
+    }
+    if (error instanceof FinancialValidationError) {
+      res.status(400).json({ success: false, message: error.message });
+      return;
+    }
+    next(error);
+  }
+}
+
 

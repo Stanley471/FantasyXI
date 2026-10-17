@@ -45,11 +45,11 @@ pub enum EscrowError {
     LeagueNotCancelled = 23,
     AlreadyClaimed = 24,
     InvalidFeeShare = 25,
-    HashMismatch = 23,
-    TimelockActive = 23,
-    ProposalNotFound = 24,
-    AlreadyApproved = 25,
-    ProposalExecuted = 26,
+    HashMismatch = 26,
+    TimelockActive = 27,
+    ProposalNotFound = 28,
+    AlreadyApproved = 29,
+    ProposalExecuted = 30,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -114,6 +114,8 @@ pub enum DataKey {
     ParticipantPage(u64, u32),
     SettlementHash(u64),
     TimelockProposal(u64),
+    MerkleRoot(u64),
+    MerkleClaimed(u64, Address),
 }
 
 /// # Issue #83: Soroban Escrow Smart Contract for Fantasy Leagues
@@ -1393,6 +1395,183 @@ impl FantasyXIEscrow {
         let key = DataKey::TimelockProposal(proposal_id);
         env.storage().persistent().get(&key)
     }
+
+    /// Settles a large-league competition by committing a 32-byte Merkle root of winner prize claims
+    /// and transferring the platform fee to the treasury.
+    pub fn settle_merkle_root(
+        env: Env,
+        admin: Address,
+        league_id: u64,
+        merkle_root: BytesN<32>,
+        platform_treasury: Address,
+        platform_fee: i128,
+    ) -> Result<(), EscrowError> {
+        if Self::is_paused(&env) {
+            return Err(EscrowError::ContractPaused);
+        }
+        let mut approvals = Vec::new(&env);
+        approvals.push_back(admin);
+        Self::authorize_signers(&env, &approvals)?;
+
+        if merkle_root.to_array().iter().all(|byte| *byte == 0) {
+            return Err(EscrowError::InvalidProof);
+        }
+        if platform_fee < 0 {
+            return Err(EscrowError::InvalidAmount);
+        }
+
+        let league_key = DataKey::League(league_id);
+        let mut league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&league_key)
+            .ok_or(EscrowError::LeagueNotFound)?;
+
+        if league.status == LeagueStatus::Settled || league.status == LeagueStatus::Cancelled {
+            return Err(EscrowError::AlreadySettled);
+        }
+
+        let max_fee = (league.total_deposited * 500) / 10000;
+        if platform_fee > max_fee {
+            return Err(EscrowError::FeeExceedsMaxCap);
+        }
+
+        if platform_fee > 0 {
+            token::Client::new(&env, &league.asset).transfer(
+                &env.current_contract_address(),
+                &platform_treasury,
+                &platform_fee,
+            );
+        }
+
+        let root_key = DataKey::MerkleRoot(league_id);
+        env.storage().persistent().set(&root_key, &merkle_root);
+        env.storage().persistent().extend_ttl(
+            &root_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        league.status = LeagueStatus::Settled;
+        env.storage().persistent().set(&league_key, &league);
+        env.storage().persistent().extend_ttl(
+            &league_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+
+        env.events().publish(
+            (symbol_short!("mrkl_set"), league_id),
+            (merkle_root, platform_fee),
+        );
+
+        Ok(())
+    }
+
+    /// Returns the committed 32-byte Merkle root for a settled league, if any.
+    pub fn get_merkle_root(env: Env, league_id: u64) -> Option<BytesN<32>> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MerkleRoot(league_id))
+    }
+
+    /// Returns whether a winner has already claimed their Merkle prize for `league_id`.
+    pub fn has_claimed_merkle_prize(env: Env, league_id: u64, winner: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MerkleClaimed(league_id, winner))
+            .unwrap_or(false)
+    }
+
+    /// Deterministically computes the SHA-256 leaf digest for a `(league_id, winner, amount)` tuple.
+    pub fn compute_merkle_leaf(
+        env: Env,
+        league_id: u64,
+        winner: Address,
+        amount: i128,
+    ) -> BytesN<32> {
+        Self::compute_merkle_leaf_internal(&env, league_id, &winner, amount)
+    }
+
+    /// Verifies a sorted-pair SHA-256 Merkle proof against `root` and `leaf`.
+    pub fn verify_merkle_proof(
+        env: Env,
+        root: BytesN<32>,
+        leaf: BytesN<32>,
+        merkle_proof: Vec<BytesN<32>>,
+    ) -> bool {
+        Self::verify_merkle_proof_internal(&env, &root, &leaf, &merkle_proof)
+    }
+
+    /// Claims a winner's prize share for a settled league using a cryptographic Merkle branch proof.
+    pub fn claim_merkle_prize(
+        env: Env,
+        league_id: u64,
+        winner: Address,
+        amount: i128,
+        merkle_proof: Vec<BytesN<32>>,
+    ) -> Result<(), EscrowError> {
+        winner.require_auth();
+
+        if amount <= 0 {
+            return Err(EscrowError::InvalidAmount);
+        }
+
+        let league_key = DataKey::League(league_id);
+        let league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&league_key)
+            .ok_or(EscrowError::LeagueNotFound)?;
+
+        if league.status != LeagueStatus::Settled {
+            return Err(EscrowError::NoClaimablePrize);
+        }
+
+        let claimed_key = DataKey::MerkleClaimed(league_id, winner.clone());
+        if env
+            .storage()
+            .persistent()
+            .get::<_, bool>(&claimed_key)
+            .unwrap_or(false)
+        {
+            return Err(EscrowError::AlreadyClaimed);
+        }
+
+        let root_key = DataKey::MerkleRoot(league_id);
+        let root: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&root_key)
+            .ok_or(EscrowError::NoClaimablePrize)?;
+
+        let leaf = Self::compute_merkle_leaf_internal(&env, league_id, &winner, amount);
+        if !Self::verify_merkle_proof_internal(&env, &root, &leaf, &merkle_proof) {
+            return Err(EscrowError::InvalidProof);
+        }
+
+        // Checks-Effects-Interactions: mark claimed before transferring tokens
+        env.storage().persistent().set(&claimed_key, &true);
+        env.storage().persistent().extend_ttl(
+            &claimed_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        token::Client::new(&env, &league.asset).transfer(
+            &env.current_contract_address(),
+            &winner,
+            &amount,
+        );
+
+        env.events()
+            .publish((symbol_short!("mrkl_clm"), league_id), (winner, amount));
+
+        Ok(())
+    }
 }
 
 impl FantasyXIEscrow {
@@ -1409,6 +1588,50 @@ impl FantasyXIEscrow {
         }
         data.append(&platform_fee.to_xdr(env));
         env.crypto().sha256(&data).to_bytes()
+    }
+
+    /// Computes SHA-256 leaf hash over XDR-encoded `(league_id, winner, amount)`.
+    pub fn compute_merkle_leaf_internal(
+        env: &Env,
+        league_id: u64,
+        winner: &Address,
+        amount: i128,
+    ) -> BytesN<32> {
+        let mut data = Bytes::new(env);
+        data.append(&league_id.to_xdr(env));
+        data.append(&winner.clone().to_xdr(env));
+        data.append(&amount.to_xdr(env));
+        env.crypto().sha256(&data).to_bytes()
+    }
+
+    /// Computes a sorted-pair SHA-256 parent node from two 32-byte child hashes.
+    pub fn hash_merkle_pair(env: &Env, a: &BytesN<32>, b: &BytesN<32>) -> BytesN<32> {
+        let a_arr = a.to_array();
+        let b_arr = b.to_array();
+        let mut combined = [0u8; 64];
+        if a_arr <= b_arr {
+            combined[..32].copy_from_slice(&a_arr);
+            combined[32..].copy_from_slice(&b_arr);
+        } else {
+            combined[..32].copy_from_slice(&b_arr);
+            combined[32..].copy_from_slice(&a_arr);
+        }
+        let bytes = Bytes::from_slice(env, &combined);
+        env.crypto().sha256(&bytes).to_bytes()
+    }
+
+    /// Verifies a Merkle branch proof against `root` and `leaf`.
+    pub fn verify_merkle_proof_internal(
+        env: &Env,
+        root: &BytesN<32>,
+        leaf: &BytesN<32>,
+        merkle_proof: &Vec<BytesN<32>>,
+    ) -> bool {
+        let mut computed = leaf.clone();
+        for sibling in merkle_proof.iter() {
+            computed = Self::hash_merkle_pair(env, &computed, &sibling);
+        }
+        computed == *root
     }
 }
 
@@ -2426,6 +2649,9 @@ mod test {
         let league = client.get_league(&702).unwrap();
         assert_eq!(league.status, LeagueStatus::Upcoming);
         assert_eq!(client.get_settlement_hash(&702), None);
+    }
+
+    #[test]
     fn test_multisig_timelock_fee_withdrawal_lifecycle() {
         let env = Env::default();
         env.mock_all_auths();
