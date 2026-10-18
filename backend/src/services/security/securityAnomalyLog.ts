@@ -16,6 +16,8 @@ export enum SecurityAnomalyType {
   FAILED_LOGIN_SPIKE = "FAILED_LOGIN_SPIKE",
   NEW_DEVICE_LOGIN = "NEW_DEVICE_LOGIN",
   SECURITY_TAMPER_DETECTED = "SECURITY_TAMPER_DETECTED",
+  /** Account placed in a suspected multi-account / collusion cluster (issue #274). */
+  SYBIL_CLUSTER_SUSPECTED = "SYBIL_CLUSTER_SUSPECTED",
 }
 
 export interface SecurityAnomalyInput {

@@ -54,7 +54,7 @@ export interface NewDeviceLoginResult {
   knownDeviceCount: number;
 }
 
-interface KnownDevice {
+export interface KnownDevice {
   ip: string;
   userAgent: string;
   firstSeenAt: string;
@@ -200,6 +200,14 @@ export class LoginSecurityService {
     }
 
     return { isNewDevice, knownDeviceCount: knownDevices.length };
+  }
+
+  /**
+   * Read-only view of the devices/IPs recorded for `userId`, used as login
+   * signatures by Sybil detection (issue #274). Never records anything.
+   */
+  public async getKnownDevices(userId: string): Promise<KnownDevice[]> {
+    return (await this.readJson<KnownDevice[]>(`${KNOWN_DEVICE_PREFIX}${userId}`)) ?? [];
   }
 
   /**

@@ -13,7 +13,11 @@ import {
   applyTierTransitions,
   listH2HAnomalies,
 } from "../controllers/leagueAdmin.controller.js";
-import { listSecurityAnomalies } from "../controllers/securityAdmin.controller.js";
+import {
+  listSecurityAnomalies,
+  getSybilReport,
+  getSybilUserBreakdown,
+} from "../controllers/securityAdmin.controller.js";
 import { verifyAuditChainHandler } from "../controllers/audit.controller.js";
 import { getFplTelemetry } from "../controllers/fplTelemetry.controller.js";
 import { requireAuth, requirePermission } from "../middleware/authMiddleware.js";
@@ -49,6 +53,13 @@ router.get("/audit/verify", requirePermission(Permission.FINANCIAL_AUDIT_READ), 
 // GET /api/v1/admin/security/anomalies (issue #117): failed-login spikes and
 // new-device/new-IP logins detected across all accounts, for admin review.
 router.get("/security/anomalies", listSecurityAnomalies);
+
+// GET /api/v1/admin/security/sybil-report (issue #274): suspected multi-account
+// and collusion clusters across paid leagues (or ?leagueId=), for manual review.
+router.get("/security/sybil-report", getSybilReport);
+
+// GET /api/v1/admin/security/sybil-report/users/:userId (issue #274)
+router.get("/security/sybil-report/users/:userId", getSybilUserBreakdown);
 
 // GET /api/v1/admin/fpl/telemetry (issue #275): FPL client circuit breaker
 // state, cache-tier counters and data staleness.
