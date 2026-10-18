@@ -8,6 +8,12 @@ import {
   normalizeFixture,
   normalizePlayerStats,
 } from "./fplNormalizer.js";
+import {
+  fixtureRescheduleService,
+  type FixtureChange,
+  type FixtureSnapshot,
+  type RescoreResult,
+} from "./fixtureRescheduleService.js";
 
 function generateHash(payload: any): string {
   const normalized = JSON.stringify(payload, (key, value) => {
@@ -39,6 +45,11 @@ export interface SyncBootstrapResult {
 
 export interface SyncFixturesResult {
   fixturesCount: number;
+  /** Postponed / rescheduled / abandoned fixtures detected in this sync (issue #269) */
+  fixtureChanges?: FixtureChange[];
+  statsMoved?: number;
+  statsDeleted?: number;
+  rescore?: RescoreResult;
 }
 
 export interface SyncStatsResult {
@@ -302,6 +313,25 @@ export class FplSyncService {
       ])
     );
 
+    // Detect postponements, reschedules and abandonments, and re-home their
+    // stat rows before the fixture rows change so a failure is retried on the
+    // next sync (issue #269).
+    const incomingSnapshots: FixtureSnapshot[] = rawFixtures
+      .filter((raw) => teamMap.has(raw.team_h) && teamMap.has(raw.team_a))
+      .map((raw) => {
+        const f = normalizeFixture(raw);
+        return {
+          fplId: f.fplId,
+          gameweekId: raw.event ? gwMap.get(raw.event) ?? null : null,
+          kickoffTime: f.kickoffTime,
+          started: f.started,
+          finished: f.finished,
+          minutes: f.minutes,
+        };
+      });
+    const fixtureChanges = fixtureRescheduleService.detectChanges(existingFixtures, incomingSnapshots);
+    const migration = await fixtureRescheduleService.migrateStats(fixtureChanges);
+
     let fixturesCount = 0;
     const fixtureOps = [];
     
@@ -351,8 +381,30 @@ export class FplSyncService {
       await prisma.$transaction(fixtureOps);
     }
 
+    const rescore = await fixtureRescheduleService.rescoreAffected(
+      fixtureChanges,
+      migration.affectedGameweekIds
+    );
+    for (const change of fixtureChanges) {
+      console.log(
+        `⚠️ Fixture ${change.fplId} ${change.type}: gameweek ${change.fromGameweekId ?? "none"} -> ${change.toGameweekId ?? "none"}`
+      );
+    }
+    const manualReview = [...new Set([...migration.requiresManualReview, ...rescore.requiresManualReview])];
+    if (manualReview.length > 0) {
+      console.warn(
+        `⚠️ Fixture changes touch settled gameweeks ${manualReview.join(", ")}; manual review required`
+      );
+    }
+
     console.log(`✅ FPL Fixtures sync complete: ${fixturesCount} fixtures.`);
-    return { fixturesCount };
+    return {
+      fixturesCount,
+      fixtureChanges,
+      statsMoved: migration.statsMoved,
+      statsDeleted: migration.statsDeleted,
+      rescore,
+    };
   }
 
   /**
