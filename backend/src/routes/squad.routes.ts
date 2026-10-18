@@ -12,6 +12,7 @@ import {
 import { requireAuth, requirePermission } from "../middleware/authMiddleware.js";
 import { Permission } from "../types/index.js";
 import { squadRateLimiter, mutationRateLimiter } from "../middleware/rateLimiter.js";
+import { idempotency } from "../middleware/idempotency.js";
 
 const router = Router();
 
@@ -22,6 +23,7 @@ router.post(
   requirePermission(Permission.SQUAD_CREATE),
   squadRateLimiter,
   mutationRateLimiter,
+  idempotency,
   createSquad
 );
 
@@ -41,6 +43,7 @@ router.put(
   requirePermission(Permission.SQUAD_UPDATE_OWN),
   squadRateLimiter,
   mutationRateLimiter,
+  idempotency,
   updateSquad
 );
 
@@ -51,6 +54,7 @@ router.post(
   requirePermission(Permission.SQUAD_UPDATE_OWN),
   squadRateLimiter,
   mutationRateLimiter,
+  idempotency,
   activateChip
 );
 
@@ -63,6 +67,7 @@ router.post(
   "/:id/calculate-score/:gameweekId",
   requireAuth,
   requirePermission(Permission.SCORE_CALCULATE),
+  idempotency,
   calculateGameweekScore
 );
 
