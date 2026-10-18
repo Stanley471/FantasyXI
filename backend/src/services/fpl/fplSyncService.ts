@@ -45,6 +45,8 @@ export interface SyncStatsResult {
   gameweekId: number;
   gameweekFplId: number;
   statsCount: number;
+  /** Live points per local player from this sync's payload (summed across a double gameweek) */
+  playerTotals?: Array<{ playerId: number; totalPoints: number }>;
 }
 
 export class FplSyncService {
@@ -402,6 +404,7 @@ export class FplSyncService {
 
     let statsCount = 0;
     const statsOps = [];
+    const playerTotals = new Map<number, number>();
     
     for (const rawElement of liveData.elements) {
       const localPlayerId = playerMap.get(rawElement.id);
@@ -414,6 +417,7 @@ export class FplSyncService {
       for (const stats of statsArray) {
         const localFixtureId = fixtureMap.get(stats.fixtureFplId);
         if (!localFixtureId) continue;
+        playerTotals.set(localPlayerId, (playerTotals.get(localPlayerId) ?? 0) + stats.totalPoints);
 
         const payload = {
           minutes: stats.minutes,
@@ -471,6 +475,7 @@ export class FplSyncService {
       gameweekId: gameweek.id,
       gameweekFplId,
       statsCount,
+      playerTotals: [...playerTotals].map(([playerId, totalPoints]) => ({ playerId, totalPoints })),
     };
   }
 }

@@ -1,5 +1,6 @@
 import { fplClient } from "../services/fpl/fplClient.js";
 import { fplSyncService } from "../services/fpl/fplSyncService.js";
+import { liveProvisionalLeaderboard } from "../services/live/liveProvisionalLeaderboard.js";
 
 /**
  * FPL Sync Job Worker + Dead-Letter Queue.
@@ -65,8 +66,19 @@ export async function executeFplSyncTask(task: FplSyncTask): Promise<unknown> {
   switch (task.type) {
     case "fixtures":
       return fplSyncService.syncFixtures();
-    case "gameweek-live":
-      return fplSyncService.syncGameweekLiveStats(task.gameweekFplId);
+    case "gameweek-live": {
+      const result = await fplSyncService.syncGameweekLiveStats(task.gameweekFplId);
+      // Push the fresh totals into the live provisional leaderboard (issue #268).
+      // Ingestion is idempotent and Redis-only; failures must not fail the sync.
+      if (result.playerTotals && result.playerTotals.length > 0) {
+        try {
+          await liveProvisionalLeaderboard.ingestPlayerTotals(result.gameweekId, result.playerTotals);
+        } catch (err) {
+          console.warn(`[fpl-sync] Provisional leaderboard update failed: ${(err as Error).message}`);
+        }
+      }
+      return result;
+    }
   }
 }
 

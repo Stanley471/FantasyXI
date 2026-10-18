@@ -1,4 +1,5 @@
 import { prisma } from "../config/db.js";
+import { primeProvisionalLeaderboard } from "../services/live/liveProvisionalLeaderboard.js";
 
 /** Squads lock this many minutes before the first kickoff of a gameweek. */
 export const LOCK_LEAD_MINUTES = 90;
@@ -35,6 +36,14 @@ export async function lockDueGameweeks(now: Date = new Date()): Promise<number[]
         data: { isLocked: true },
       });
       locked.push(gw.id);
+
+      // Squads are frozen now, so seed the live provisional leaderboard (issue #268).
+      // Best effort: live ranks are a convenience and must never block locking.
+      try {
+        await primeProvisionalLeaderboard(gw.id);
+      } catch (err) {
+        console.warn(`Failed to prime provisional leaderboard for gameweek ${gw.id}:`, err);
+      }
     }
   }
   return locked;

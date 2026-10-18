@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import { liveTimelineService } from "../services/live/liveTimelineService.js";
+import { liveProvisionalLeaderboard } from "../services/live/liveProvisionalLeaderboard.js";
 
 /**
  * GET /api/v1/live/timeline/:gameweekId
@@ -96,6 +97,84 @@ export async function streamLiveTimeline(
     }, intervalMs);
 
     req.on("close", () => clearInterval(timer));
+  } catch (error) {
+    next(error);
+  }
+}
+
+function parseProvisionalParams(req: Request): { leagueId: string; gameweekId: number } | null {
+  const gameweekId = Number(req.query.gameweekId);
+  const leagueId = req.params.leagueId as string;
+  if (!Number.isInteger(gameweekId) || gameweekId < 1 || !leagueId) return null;
+  return { leagueId, gameweekId };
+}
+
+/**
+ * GET /api/v1/live/leagues/:leagueId/provisional?gameweekId=N
+ *
+ * Live provisional standings served from Redis only (issue #268).
+ */
+export async function getProvisionalStandings(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  const params = parseProvisionalParams(req);
+  if (!params) {
+    res.status(400).json({ success: false, message: "gameweekId must be a positive integer" });
+    return;
+  }
+
+  try {
+    const standings = await liveProvisionalLeaderboard.getStandings(params.gameweekId, params.leagueId);
+    res.json({ success: true, data: { ...params, provisional: true, standings } });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * GET /api/v1/live/leagues/:leagueId/provisional/stream?gameweekId=N
+ *
+ * Server-Sent Events: an initial `standings` snapshot followed by a
+ * `rank-update` event (rank and point diffs) whenever a match event moves the league.
+ */
+export async function streamProvisionalStandings(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  const params = parseProvisionalParams(req);
+  if (!params) {
+    res.status(400).json({ success: false, message: "gameweekId must be a positive integer" });
+    return;
+  }
+
+  try {
+    const standings = await liveProvisionalLeaderboard.getStandings(params.gameweekId, params.leagueId);
+
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+
+    const send = (event: string, data: unknown) => {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+
+    send("standings", { ...params, provisional: true, standings });
+
+    const unsubscribe = liveProvisionalLeaderboard.subscribe(params.leagueId, (update) => {
+      if (update.gameweekId === params.gameweekId) send("rank-update", update);
+    });
+    const heartbeat = setInterval(() => res.write(": keep-alive\n\n"), 25_000);
+
+    req.on("close", () => {
+      unsubscribe();
+      clearInterval(heartbeat);
+    });
   } catch (error) {
     next(error);
   }
