@@ -9,6 +9,12 @@ import {
   SquadLockedError,
 } from "../services/squad/squadValidator.js";
 import { scoringService } from "../services/scoring/scoringService.js";
+import { transferPlanService } from "../services/fpl/transferPlanService.js";
+import {
+  MAX_HORIZON,
+  MIN_HORIZON,
+  TransferOptimizerError,
+} from "../services/fpl/transferOptimizer.js";
 
 /**
  * Squad Controller.
@@ -297,6 +303,62 @@ export async function activateChip(
         success: false,
         message: error.message,
       });
+      return;
+    }
+    next(error);
+  }
+}
+
+function parseBoundedInt(value: unknown, fallback: number, min: number, max: number): number | null {
+  if (value === undefined || value === "") return fallback;
+  if (typeof value !== "string" || !/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return parsed >= min && parsed <= max ? parsed : null;
+}
+
+/**
+ * GET /api/v1/squads/:id/transfer-plan?horizon=3&maxTransfers=2
+ *
+ * Recommended multi-gameweek transfer paths for the caller's own squad with
+ * projected score deltas (issue #267). Recommendations only; nothing is executed.
+ */
+export async function getTransferPlan(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user || !req.user.id) {
+      res.status(401).json({ success: false, message: "Authentication required" });
+      return;
+    }
+
+    const horizon = parseBoundedInt(req.query.horizon, 3, MIN_HORIZON, MAX_HORIZON);
+    const maxTransfers = parseBoundedInt(req.query.maxTransfers, 2, 0, 3);
+    if (horizon === null || maxTransfers === null) {
+      res.status(400).json({
+        success: false,
+        message: `horizon must be ${MIN_HORIZON}-${MAX_HORIZON} and maxTransfers must be 0-3`,
+      });
+      return;
+    }
+
+    const plan = await transferPlanService.getSquadPlan(req.params.id as string, req.user.id, {
+      horizon,
+      maxTransfersPerGameweek: maxTransfers,
+    });
+    res.json({ success: true, data: plan });
+  } catch (error) {
+    if (error instanceof SquadForbiddenError) {
+      res.status(403).json({ success: false, message: error.message });
+      return;
+    }
+    if (error instanceof SquadValidationError) {
+      res.status(404).json({ success: false, message: error.message });
+      return;
+    }
+    if (error instanceof TransferOptimizerError) {
+      res.status(422).json({ success: false, message: error.message });
       return;
     }
     next(error);
