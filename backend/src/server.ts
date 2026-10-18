@@ -17,10 +17,21 @@ import { financialAuditLog } from "./services/audit/financialAuditLog.js";
 import { resolvers } from "./graphql/resolvers.js";
 import { typeDefs } from "./graphql/schema.js";
 import { attachChatSocketServer } from "./realtime/chatSocketServer.js";
+import {
+  createQueryComplexityPlugin,
+  resolveGraphqlClientKey,
+} from "./graphql/complexity/complexityGuard.js";
+import { createDefaultComplexityRateGovernor } from "./graphql/complexity/complexityRateGovernor.js";
 
 dotenv.config();
 
-const apolloServer = new ApolloServer({ typeDefs, resolvers });
+// Depth/complexity limits and the per-client complexity budget (issue #265)
+// reject abusive operations before any resolver runs
+const apolloServer = new ApolloServer<{ clientKey: string }>({
+  typeDefs,
+  resolvers,
+  plugins: [createQueryComplexityPlugin({ governor: createDefaultComplexityRateGovernor() })],
+});
 
 // Trust reverse proxies (Cloudflare, Nginx, ALB) for accurate client IP rate limiting
 app.set("trust proxy", 1);
@@ -117,7 +128,8 @@ async function startServer(): Promise<void> {
     preferReplicaReads,
     express.json(),
     expressMiddleware(apolloServer, {
-      context: async () => ({
+      context: async ({ req }) => ({
+        clientKey: resolveGraphqlClientKey(req),
         loaders: {
           users: new DataLoader(async (ids) => {
             const records = await prisma.user.findMany({
