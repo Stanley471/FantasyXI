@@ -8,6 +8,12 @@ import {
   normalizeFixture,
   normalizePlayerStats,
 } from "./fplNormalizer.js";
+import {
+  fixtureRescheduleService,
+  type FixtureChange,
+  type FixtureSnapshot,
+  type RescoreResult,
+} from "./fixtureRescheduleService.js";
 
 function generateHash(payload: any): string {
   const normalized = JSON.stringify(payload, (key, value) => {
@@ -39,12 +45,19 @@ export interface SyncBootstrapResult {
 
 export interface SyncFixturesResult {
   fixturesCount: number;
+  /** Postponed / rescheduled / abandoned fixtures detected in this sync (issue #269) */
+  fixtureChanges?: FixtureChange[];
+  statsMoved?: number;
+  statsDeleted?: number;
+  rescore?: RescoreResult;
 }
 
 export interface SyncStatsResult {
   gameweekId: number;
   gameweekFplId: number;
   statsCount: number;
+  /** Live points per local player from this sync's payload (summed across a double gameweek) */
+  playerTotals?: Array<{ playerId: number; totalPoints: number }>;
 }
 
 export class FplSyncService {
@@ -300,6 +313,25 @@ export class FplSyncService {
       ])
     );
 
+    // Detect postponements, reschedules and abandonments, and re-home their
+    // stat rows before the fixture rows change so a failure is retried on the
+    // next sync (issue #269).
+    const incomingSnapshots: FixtureSnapshot[] = rawFixtures
+      .filter((raw) => teamMap.has(raw.team_h) && teamMap.has(raw.team_a))
+      .map((raw) => {
+        const f = normalizeFixture(raw);
+        return {
+          fplId: f.fplId,
+          gameweekId: raw.event ? gwMap.get(raw.event) ?? null : null,
+          kickoffTime: f.kickoffTime,
+          started: f.started,
+          finished: f.finished,
+          minutes: f.minutes,
+        };
+      });
+    const fixtureChanges = fixtureRescheduleService.detectChanges(existingFixtures, incomingSnapshots);
+    const migration = await fixtureRescheduleService.migrateStats(fixtureChanges);
+
     let fixturesCount = 0;
     const fixtureOps = [];
     
@@ -349,8 +381,30 @@ export class FplSyncService {
       await prisma.$transaction(fixtureOps);
     }
 
+    const rescore = await fixtureRescheduleService.rescoreAffected(
+      fixtureChanges,
+      migration.affectedGameweekIds
+    );
+    for (const change of fixtureChanges) {
+      console.log(
+        `⚠️ Fixture ${change.fplId} ${change.type}: gameweek ${change.fromGameweekId ?? "none"} -> ${change.toGameweekId ?? "none"}`
+      );
+    }
+    const manualReview = [...new Set([...migration.requiresManualReview, ...rescore.requiresManualReview])];
+    if (manualReview.length > 0) {
+      console.warn(
+        `⚠️ Fixture changes touch settled gameweeks ${manualReview.join(", ")}; manual review required`
+      );
+    }
+
     console.log(`✅ FPL Fixtures sync complete: ${fixturesCount} fixtures.`);
-    return { fixturesCount };
+    return {
+      fixturesCount,
+      fixtureChanges,
+      statsMoved: migration.statsMoved,
+      statsDeleted: migration.statsDeleted,
+      rescore,
+    };
   }
 
   /**
@@ -402,6 +456,7 @@ export class FplSyncService {
 
     let statsCount = 0;
     const statsOps = [];
+    const playerTotals = new Map<number, number>();
     
     for (const rawElement of liveData.elements) {
       const localPlayerId = playerMap.get(rawElement.id);
@@ -414,6 +469,7 @@ export class FplSyncService {
       for (const stats of statsArray) {
         const localFixtureId = fixtureMap.get(stats.fixtureFplId);
         if (!localFixtureId) continue;
+        playerTotals.set(localPlayerId, (playerTotals.get(localPlayerId) ?? 0) + stats.totalPoints);
 
         const payload = {
           minutes: stats.minutes,
@@ -471,6 +527,7 @@ export class FplSyncService {
       gameweekId: gameweek.id,
       gameweekFplId,
       statsCount,
+      playerTotals: [...playerTotals].map(([playerId, totalPoints]) => ({ playerId, totalPoints })),
     };
   }
 }

@@ -5,6 +5,7 @@ import { leagueService, LeagueService } from "../services/league/leagueService.j
 import { eventBus, publishOrThrow } from "../services/events/eventBus.js";
 import { GAMEWEEK_UPDATED_EVENT } from "../services/events/domainEvents.js";
 import { gameweekOracleService } from "../services/financial/gameweekOracleService.js";
+import { reconcileProvisionalLeaderboard } from "../services/live/liveProvisionalLeaderboard.js";
 // Imported for its side effect: subscribes the scoring, free-hit and league
 // settlement handlers to GAMEWEEK_UPDATED_EVENT (issue #118). This job no
 // longer needs to know which services react to a gameweek update.
@@ -127,6 +128,19 @@ export async function settleGameweek(gameweekId: number): Promise<void> {
   // whole platform (see recalculateClassicStandings for why this replaced a
   // per-league loop).
   await leagueService.recalculateClassicStandings(gameweekId);
+
+  // Realign live provisional ranks with the final scores (issue #268). Best
+  // effort: the database standings above are authoritative.
+  try {
+    const report = await reconcileProvisionalLeaderboard(gameweekId);
+    if (report.discrepancies.length > 0) {
+      console.log(
+        `Provisional leaderboard for gameweek ${gameweekId} reconciled ${report.discrepancies.length} squad scores`
+      );
+    }
+  } catch (err) {
+    console.warn(`Failed to reconcile provisional leaderboard for gameweek ${gameweekId}:`, err);
+  }
 
   const oracleSigningKey = process.env.STELLAR_ORACLE_SIGNING_KEY;
   if (oracleSigningKey) {

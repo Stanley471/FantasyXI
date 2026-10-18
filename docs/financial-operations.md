@@ -84,6 +84,44 @@ This installs triggers that reject `UPDATE`, `DELETE` and `TRUNCATE` on
 **Querying.** `GET /api/v1/admin/audit/financial?userId=&leagueId=&action=&from=&to=&limit=`
 (`ADMIN` only) returns entries, newest first (max 500 per request).
 
+## Treasury withdrawal timelock
+
+Platform-fee treasury withdrawals go through `TreasuryTimelockService`
+(`backend/src/services/financial/treasuryTimelockService.ts`) so that no single
+compromised key can move funds.
+
+### Lifecycle
+
+```
+PENDING_APPROVAL ──(M of N admin signatures)──▶ QUEUED ──(48h elapsed)──▶ EXECUTING ──▶ EXECUTED
+       │                                           │                          │
+       └──────────────── CANCELLED ◀───────────────┘                          └─(submit fails)─▶ QUEUED
+       └── EXPIRED (threshold not met within 7 days, or not executed within 7 days of unlocking)
+```
+
+1. **Propose.** Any administrator creates a proposal (destination, amount,
+   asset, optional memo). Proposing moves no funds.
+2. **Approve.** Each administrator signs the proposal digest with their Stellar
+   key (`signWithdrawalAction(proposal, "APPROVE", keypair, networkPassphrase)`).
+   The digest covers the immutable proposal fields, the action and the network
+   passphrase, so a signature cannot be replayed for another proposal, action or
+   network. Duplicate approvals, keys outside the administrator set and invalid
+   Ed25519 signatures are rejected. The threshold must be at least 2.
+3. **Timelock.** The 48-hour timelock starts when the M-th approval arrives.
+   Execution is refused before `executableAt`. The timelock cannot be configured
+   below 48 hours.
+4. **Cancel.** Any administrator can cancel a pending or queued withdrawal with
+   a signed `CANCEL` action until it executes.
+5. **Execute.** An administrator signs `EXECUTE`. Stored approvals are
+   re-verified first, then `StellarTreasuryWithdrawalExecutor` builds the
+   payment, signs it through the configured `StellarTransactionSigner`
+   (local secret or KMS/HSM) and submits it to Horizon.
+
+Every accepted signature, state change and rejected attempt (with its reason)
+is appended to the `CryptographicAuditLog` hash chain.
+
+Proposals are held by a pluggable `TreasuryProposalStore`; the default store is
+in memory, so a restart drops pending proposals (fail-safe: nothing executes).
 ## Transaction coordinator
 
 `TransactionCoordinatorService` (`backend/src/services/financial/transactionCoordinatorService.ts`) keeps watching submitted transactions after the wallet or the synchronous Soroban poll gives up.

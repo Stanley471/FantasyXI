@@ -8,6 +8,7 @@ import {
   calculateGameweekScore,
   activateChip,
   getSquadValuation,
+  getTransferPlan,
 } from "../controllers/squad.controller.js";
 import { requireAuth, requirePermission } from "../middleware/authMiddleware.js";
 import { Permission } from "../types/index.js";
@@ -35,6 +36,15 @@ router.get("/:id", getSquadById);
 
 // GET /api/v1/squads/:id/value (Public: bank, squad and total team value using live FPL prices)
 router.get("/:id/value", getSquadValuation);
+
+// GET /api/v1/squads/:id/transfer-plan (Protected: multi-gameweek transfer recommendations for own squad)
+router.get(
+  "/:id/transfer-plan",
+  requireAuth,
+  requirePermission(Permission.SQUAD_READ_OWN),
+  squadRateLimiter,
+  getTransferPlan
+);
 
 // PUT /api/v1/squads/:id (Protected: update user's own squad)
 router.put(
