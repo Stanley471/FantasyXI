@@ -107,6 +107,17 @@ enum FailedPayoutStatus {
   DISCARDED
 }
 
+/// Lifecycle of an on-chain transaction watched by the transaction coordinator.
+/// PENDING: submitted, not yet final (getTransaction returns NOT_FOUND or the RPC is unreachable).
+/// SUCCESS / FAILED: final ledger outcome reported by Soroban RPC.
+/// DROPPED: never reached a ledger before the confirmation timeout; an admin is alerted.
+enum CoordinatedTransactionStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  DROPPED
+}
+
 /// Financial operations recorded in the append-only audit log
 enum FinancialAuditAction {
   DEPOSIT_SUBMITTED
@@ -784,4 +795,59 @@ model FinancialAuditLog {
   @@index([leagueId, createdAt])
   @@index([action, createdAt])
   @@map("financial_audit_logs")
+}
+
+/// An on-chain transaction whose finality is tracked by TransactionCoordinatorService.
+/// State lives here (not in memory) so polling resumes after a backend restart.
+model CoordinatedTransaction {
+  id            String                       @id @default(uuid())
+  txHash        String                       @unique @map("tx_hash")
+  /// What the transaction does, e.g. DEPOSIT, SETTLEMENT, REFUND
+  kind          String
+  status        CoordinatedTransactionStatus @default(PENDING)
+  userId        String?                      @map("user_id")
+  leagueId      String?                      @map("league_id")
+  /// Ledger row (transactions.id) to confirm or fail once the outcome is known
+  transactionId String?                      @map("transaction_id")
+  attempts      Int                          @default(0)
+  ledgerSeq     Int?                         @map("ledger_seq")
+  lastError     String?                      @map("last_error")
+  metadata      Json?
+  submittedAt   DateTime                     @default(now()) @map("submitted_at")
+  nextPollAt    DateTime                     @default(now()) @map("next_poll_at")
+  lastPolledAt  DateTime?                    @map("last_polled_at")
+  finalizedAt   DateTime?                    @map("finalized_at")
+  createdAt     DateTime                     @default(now()) @map("created_at")
+  updatedAt     DateTime                     @updatedAt @map("updated_at")
+
+  @@index([status, nextPollAt])
+  @@index([leagueId])
+  @@map("coordinated_transactions")
+}
+
+/// Audit trail of retroactive score corrections (official FPL bonus / stat changes).
+/// One row per changed entity: a player's fixture stats, a squad's gameweek score,
+/// or a league member's running total.
+model ScoreAdjustmentLog {
+  id             String   @id @default(uuid())
+  /// Groups every row written by one adjustment run
+  runId          String   @map("run_id")
+  gameweekId     Int      @map("gameweek_id")
+  /// PLAYER_STAT | SQUAD_SCORE | LEAGUE_MEMBER
+  entityType     String   @map("entity_type")
+  entityId       String   @map("entity_id")
+  squadId        String?  @map("squad_id")
+  leagueId       String?  @map("league_id")
+  playerId       Int?     @map("player_id")
+  previousPoints Int      @map("previous_points")
+  delta          Int
+  newPoints      Int      @map("new_points")
+  reason         String
+  details        Json?
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([gameweekId, createdAt])
+  @@index([squadId])
+  @@index([runId])
+  @@map("score_adjustment_logs")
 }

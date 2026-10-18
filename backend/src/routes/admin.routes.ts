@@ -15,6 +15,12 @@ import {
 } from "../controllers/leagueAdmin.controller.js";
 import { listSecurityAnomalies } from "../controllers/securityAdmin.controller.js";
 import { verifyAuditChainHandler } from "../controllers/audit.controller.js";
+import {
+  runLedgerReconciliation,
+  getCoordinatedTransaction,
+  runRetroactiveAdjustment,
+} from "../controllers/financialIntegrity.controller.js";
+import { idempotency } from "../middleware/idempotency.js";
 import { requireAuth, requirePermission } from "../middleware/authMiddleware.js";
 import { Permission } from "../types/index.js";
 
@@ -44,6 +50,21 @@ router.get("/audit/financial", requirePermission(Permission.FINANCIAL_AUDIT_READ
 
 // GET /api/v1/admin/audit/verify (ADMIN only: verifies SHA-256 hash chain and flags anomalies)
 router.get("/audit/verify", requirePermission(Permission.FINANCIAL_AUDIT_READ), verifyAuditChainHandler);
+
+// POST /api/v1/admin/reconciliation/ledger[?format=markdown] (issue #261):
+// on-demand PostgreSQL vs Stellar transaction reconciliation report
+router.post("/reconciliation/ledger", requirePermission(Permission.FINANCIAL_RECONCILE), runLedgerReconciliation);
+
+// GET /api/v1/admin/transactions/:txHash (issue #260): transaction coordinator state
+router.get("/transactions/:txHash", getCoordinatedTransaction);
+
+// POST /api/v1/admin/scoring/gameweeks/:gameweekId/retroactive-adjustments (issue #266)
+router.post(
+  "/scoring/gameweeks/:gameweekId/retroactive-adjustments",
+  requirePermission(Permission.SCORE_CALCULATE),
+  idempotency,
+  runRetroactiveAdjustment
+);
 
 // GET /api/v1/admin/security/anomalies (issue #117): failed-login spikes and
 // new-device/new-IP logins detected across all accounts, for admin review.

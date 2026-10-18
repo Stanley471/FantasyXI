@@ -42,6 +42,8 @@ export interface ChatSocketServerOptions {
   allowedOrigins?: string[];
   authTimeoutMs?: number;
   heartbeatIntervalMs?: number;
+  /** Upgrade paths served by another WebSocket server on the same HTTP server (left untouched) */
+  passthroughPaths?: RegExp[];
 }
 
 interface ClientFrame {
@@ -81,14 +83,16 @@ export function attachChatSocketServer(server: Server, options: ChatSocketServer
   const allowedOrigins = new Set(options.allowedOrigins ?? [process.env.FRONTEND_URL || "http://localhost:3000"]);
   const authTimeoutMs = options.authTimeoutMs ?? 5_000;
   const heartbeatIntervalMs = options.heartbeatIntervalMs ?? 30_000;
+  const passthroughPaths = options.passthroughPaths ?? [];
 
   const wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 });
   const alive = new WeakMap<WebSocket, boolean>();
 
   const onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const { pathname } = new URL(req.url ?? "/", "http://localhost");
+    if (passthroughPaths.some((path) => path.test(pathname))) return;
     const match = CHAT_SOCKET_PATH.exec(pathname);
-    // This is the API's only WebSocket endpoint; other upgrade requests are refused
+    // Any other upgrade request is refused
     if (!match) {
       rejectUpgrade(socket, 404, "Not Found");
       return;
