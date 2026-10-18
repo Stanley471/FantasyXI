@@ -43,6 +43,18 @@ import {
   ReconciliationReport,
 } from "../../types/index.js";
 
+/** Minimal surface of TransactionCoordinatorService used to hand off unconfirmed hashes. */
+export interface TransactionTracker {
+  track(input: {
+    txHash: string;
+    kind: string;
+    userId?: string | null;
+    leagueId?: string | null;
+    transactionId?: string | null;
+    metadata?: Record<string, unknown>;
+  }): Promise<unknown>;
+}
+
 /** Max participants per refund invocation, keeps Soroban footprint and fees in bounds. */
 export const REFUND_BATCH_SIZE = 10;
 
@@ -127,6 +139,7 @@ export class FinancialService {
   private readonly deadLetters: PayoutDeadLetterService;
   private readonly email: EmailService;
   private readonly audit: FinancialAuditRecorder;
+  private tracker: TransactionTracker | null = null;
 
   constructor(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -147,6 +160,24 @@ export class FinancialService {
     this.deadLetters =
       (hasDeadLetterMethods ? emailOrDeadLetters : undefined) ??
       (db === prisma ? payoutDeadLetterService : new PayoutDeadLetterService(db, audit));
+  }
+
+  /**
+   * Hands submitted-but-unconfirmed hashes to the transaction coordinator
+   * (wired at bootstrap in server.ts; unset in unit tests).
+   */
+  public setTransactionTracker(tracker: TransactionTracker | null): void {
+    this.tracker = tracker;
+  }
+
+  /** Best-effort: a tracking failure never fails the payment flow itself. */
+  private async trackTransaction(input: Parameters<TransactionTracker["track"]>[0]): Promise<void> {
+    if (!this.tracker) return;
+    try {
+      await this.tracker.track(input);
+    } catch (error) {
+      console.error(`[financial] Failed to track transaction ${input.txHash}:`, (error as Error).message);
+    }
   }
 
   /**
@@ -377,6 +408,16 @@ export class FinancialService {
       amount: member.league.entryFee,
       asset: stellarConfig.usdcAssetCode,
       stellarTxHash,
+      metadata: { memberId: member.id, stellarAddress },
+    });
+
+    // Keep watching the hash in case the wallet never reports back for verification
+    await this.trackTransaction({
+      txHash: stellarTxHash,
+      kind: "DEPOSIT",
+      userId,
+      leagueId: member.leagueId,
+      transactionId: transaction?.id ?? null,
       metadata: { memberId: member.id, stellarAddress },
     });
 
@@ -891,6 +932,17 @@ export class FinancialService {
     }
 
     if (!result.success || !result.txHash) {
+      // A submitted-but-unconfirmed settlement may still land: track it so the
+      // outcome is recorded and an admin is alerted if it is dropped
+      if (result.txHash) {
+        await this.trackTransaction({
+          txHash: result.txHash,
+          kind: "SETTLEMENT",
+          userId: adminUserId,
+          leagueId,
+          metadata: { contractLeagueId: contractLeagueId.toString(), error: result.error ?? null },
+        });
+      }
       throw new FinancialConflictError(
         result.error || "Settlement transaction was not confirmed"
       );

@@ -17,6 +17,15 @@ import { financialAuditLog } from "./services/audit/financialAuditLog.js";
 import { resolvers } from "./graphql/resolvers.js";
 import { typeDefs } from "./graphql/schema.js";
 import { attachChatSocketServer } from "./realtime/chatSocketServer.js";
+import {
+  attachNotificationSocketServer,
+  NOTIFICATION_SOCKET_PATH,
+} from "./realtime/notificationSocketServer.js";
+import {
+  transactionCoordinator,
+  CoordinatedTransactionStatus,
+} from "./services/financial/transactionCoordinatorService.js";
+import { financialService } from "./services/financial/financialService.js";
 
 dotenv.config();
 
@@ -108,6 +117,23 @@ app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
 let chatSocketServer: ReturnType<typeof attachChatSocketServer> | null = null;
+let notificationSocketServer: ReturnType<typeof attachNotificationSocketServer> | null = null;
+
+/**
+ * Transaction coordinator (issue #260): submitted hashes are tracked in the
+ * database and polled until final. A deposit that lands after the wallet gave
+ * up is pushed through the normal on-chain verification.
+ */
+function startTransactionCoordinator(): void {
+  financialService.setTransactionTracker(transactionCoordinator);
+  transactionCoordinator.onFinalized("DEPOSIT", async (change) => {
+    if (change.status !== CoordinatedTransactionStatus.SUCCESS || !change.userId || !change.leagueId) return;
+    await financialService.verifyAndConfirmPayment(change.userId, change.leagueId, change.txHash);
+  });
+  if (process.env.DATABASE_URL && process.env.TX_COORDINATOR_ENABLED !== "false") {
+    transactionCoordinator.start();
+  }
+}
 
 async function startServer(): Promise<void> {
   await apolloServer.start();
@@ -158,8 +184,10 @@ async function startServer(): Promise<void> {
   }
   });
 
-  // Real-time league chat shares the HTTP server's port
-  chatSocketServer = attachChatSocketServer(httpServer);
+  // Real-time league chat and user notifications share the HTTP server's port
+  chatSocketServer = attachChatSocketServer(httpServer, { passthroughPaths: [NOTIFICATION_SOCKET_PATH] });
+  notificationSocketServer = attachNotificationSocketServer(httpServer);
+  startTransactionCoordinator();
 }
 
 startServer().catch((error) => {
@@ -170,7 +198,9 @@ startServer().catch((error) => {
 process.on("SIGTERM", () => {
   // Persist buffered financial audit entries before exiting
   stopJobQueue()
+    .finally(() => transactionCoordinator.stop())
     .finally(() => chatSocketServer?.close())
+    .finally(() => notificationSocketServer?.close())
     .finally(() => financialAuditLog.close())
     .finally(() => closeRedisClient())
     .finally(() => process.exit(0));
