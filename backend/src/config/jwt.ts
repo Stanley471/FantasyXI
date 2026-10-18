@@ -58,5 +58,30 @@ export function signAccessToken(payload: JwtPayload): string {
 export function verifyAccessToken(token: string): JwtPayload {
   const secret = getJwtSecret();
   const decoded = jwt.verify(token, secret);
+  // Single-purpose tickets (e.g. a pending passkey step-up) are never access tokens
+  if (typeof decoded === "object" && decoded !== null && "purpose" in decoded) {
+    throw new jwt.JsonWebTokenError("Token is not an access token");
+  }
   return decoded as JwtPayload;
+}
+
+/** Short-lived token that only authorizes one follow-up step, such as passkey MFA. */
+export function signPurposeToken(subject: string, purpose: string, expiresIn: string): string {
+  return jwt.sign({ purpose }, getJwtSecret(), {
+    subject,
+    expiresIn: expiresIn as jwt.SignOptions["expiresIn"],
+    audience: `fantasyxi:${purpose}`,
+  });
+}
+
+/** Returns the subject of a valid token issued for `purpose`, or null. */
+export function verifyPurposeToken(token: unknown, purpose: string): string | null {
+  if (typeof token !== "string" || token.length === 0) return null;
+  try {
+    const decoded = jwt.verify(token, getJwtSecret(), { audience: `fantasyxi:${purpose}` });
+    if (typeof decoded !== "object" || decoded === null || decoded.purpose !== purpose) return null;
+    return typeof decoded.sub === "string" ? decoded.sub : null;
+  } catch {
+    return null;
+  }
 }

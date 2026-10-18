@@ -52,6 +52,41 @@ enum PaymentStatus {
 enum ScoringType {
   CLASSIC
   HEAD_TO_HEAD
+  /// Swiss-system: members are re-paired every gameweek against opponents
+  /// with a similar record, without elimination (see SwissTournament).
+  SWISS
+}
+
+/// Lifecycle of a Swiss-system tournament
+enum SwissTournamentStatus {
+  ACTIVE
+  COMPLETED
+}
+
+/// Outcome of a Swiss pairing, from player A's perspective.
+/// BYE: player A had no opponent this round (playerBId is null).
+enum SwissPairingResult {
+  PENDING
+  A_WIN
+  B_WIN
+  DRAW
+  BYE
+}
+
+/// Honours awarded to members when a league season is archived
+enum TrophyType {
+  CHAMPION
+  RUNNER_UP
+  THIRD_PLACE
+  PARTICIPANT
+}
+
+/// Ceremony a stored WebAuthn challenge belongs to.
+/// MFA: step-up passkey assertion after a successful password login.
+enum WebAuthnChallengeType {
+  REGISTRATION
+  AUTHENTICATION
+  MFA
 }
 
 /// The season-end movement applied to a league across tier ladder boundaries.
@@ -140,6 +175,8 @@ model User {
   role         UserRole @default(USER)
   referrerId   String?  @map("referrer_id")
   referralCode String?  @unique @map("referral_code")
+  /// When true, a password login must be completed with a passkey assertion (step-up 2FA)
+  passkeyMfaEnabled Boolean @default(false) @map("passkey_mfa_enabled")
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 
@@ -154,6 +191,9 @@ model User {
   createdInvitations LeagueInvitation[]  @relation("InvitationCreator")
   usedInvitations    LeagueInvitation[]  @relation("InvitationUser")
   chatMessages       LeagueChatMessage[]
+  passkeys           PasskeyCredential[]
+  webauthnChallenges WebAuthnChallenge[]
+  trophies           UserTrophy[]
 
   @@map("users")
 }
@@ -253,6 +293,7 @@ model Gameweek {
   leaguesEnding   League[]              @relation("LeagueEndGW")
   chipUsages      SquadChipUsage[]
   leagueFixtures  LeagueFixture[]
+  swissPairings   SwissPairing[]
 
   @@map("gameweeks")
 }
@@ -368,19 +409,24 @@ model League {
   isPrivate       Boolean      @default(false) @map("is_private")
   startGameweekId Int          @map("start_gameweek_id")
   endGameweekId   Int          @map("end_gameweek_id")
+  /// 1 for the first campaign; incremented by every season rollover
+  seasonNumber    Int          @default(1) @map("season_number")
   createdAt       DateTime     @default(now()) @map("created_at")
   updatedAt       DateTime     @updatedAt @map("updated_at")
 
   // Relations
-  creator       User                @relation("LeagueCreator", fields: [creatorId], references: [id])
-  startGameweek Gameweek            @relation("LeagueStartGW", fields: [startGameweekId], references: [id])
-  endGameweek   Gameweek            @relation("LeagueEndGW", fields: [endGameweekId], references: [id])
-  members       LeagueMember[]
-  transactions  Transaction[]
-  fixtures      LeagueFixture[]
-  invitations   LeagueInvitation[]
-  chatMessages  LeagueChatMessage[]
-  seasons       LeagueSeason[]
+  creator          User                  @relation("LeagueCreator", fields: [creatorId], references: [id])
+  startGameweek    Gameweek              @relation("LeagueStartGW", fields: [startGameweekId], references: [id])
+  endGameweek      Gameweek              @relation("LeagueEndGW", fields: [endGameweekId], references: [id])
+  members          LeagueMember[]
+  transactions     Transaction[]
+  fixtures         LeagueFixture[]
+  invitations      LeagueInvitation[]
+  chatMessages     LeagueChatMessage[]
+  seasons          LeagueSeason[]
+  swissTournaments SwissTournament[]
+  seasonArchives   LeagueSeasonArchive[]
+  trophies         UserTrophy[]
 
   @@index([status, isPrivate])
   @@index([entryFee])
@@ -506,6 +552,9 @@ model LeagueMember {
   transactions Transaction[]
   homeFixtures LeagueFixture[] @relation("HomeLeagueFixtures")
   awayFixtures LeagueFixture[] @relation("AwayLeagueFixtures")
+  swissPairingsAsA SwissPairing[]       @relation("SwissPlayerA")
+  swissPairingsAsB SwissPairing[]       @relation("SwissPlayerB")
+  swissStandings   SwissRoundStanding[]
 
   @@unique([leagueId, userId])
   @@index([leagueId, joinedAt, id])
@@ -644,9 +693,11 @@ model IndexerCursor {
   @@map("indexer_cursors")
 }
 
-/// Stores indexed Soroban escrow contract events for audit, reconciliation, and history
+/// Stores indexed Soroban escrow contract events for audit, reconciliation, and history.
+/// High-volume telemetry: PARTITION BY RANGE (created_at) in weekly partitions managed by
+/// services/partitioning (the partition key must be part of the primary key).
 model ContractEvent {
-  id         String   @id @default(uuid())
+  id         String   @default(uuid())
   contractId String?  @map("contract_id")
   eventType  String   @map("event_type")
   leagueId   String?  @map("league_id")
@@ -655,6 +706,7 @@ model ContractEvent {
   payload    Json?
   createdAt  DateTime @default(now()) @map("created_at")
 
+  @@id([id, createdAt])
   @@index([eventType])
   @@index([leagueId])
   @@index([txHash])
@@ -784,4 +836,259 @@ model FinancialAuditLog {
   @@index([leagueId, createdAt])
   @@index([action, createdAt])
   @@map("financial_audit_logs")
+}
+
+// ============================================================
+// PARTITIONED EVENT LOGS (issue #263)
+// ============================================================
+
+/// A live match event (goal, assist, card, saves, bonus) persisted by the live
+/// score ingestion daemon. High-velocity log: PARTITION BY RANGE (gameweek_id),
+/// one partition per gameweek, pre-created and archived by the partition
+/// rotation worker (services/partitioning). The partition key is part of the
+/// primary key and of the idempotency key, as PostgreSQL requires.
+model LiveMatchEvent {
+  id            String   @default(uuid())
+  gameweekId    Int      @map("gameweek_id")
+  /// Deterministic event id from the ingestion daemon (e.g. "10-11-goal-1")
+  eventKey      String   @map("event_key")
+  fixtureId     Int      @map("fixture_id")
+  playerId      Int      @map("player_id")
+  type          String
+  minute        Int
+  pointsAwarded Int      @map("points_awarded")
+  payload       Json?
+  occurredAt    DateTime @default(now()) @map("occurred_at")
+
+  @@id([id, gameweekId])
+  @@unique([gameweekId, eventKey])
+  @@index([gameweekId, fixtureId])
+  @@map("live_match_events")
+}
+
+// ============================================================
+// SWISS-SYSTEM TOURNAMENTS (issue #270)
+// ============================================================
+
+/// A Swiss-system tournament run by a SWISS league for one season.
+model SwissTournament {
+  id           String                @id @default(uuid())
+  leagueId     String                @map("league_id")
+  seasonNumber Int                   @default(1) @map("season_number")
+  totalRounds  Int                   @map("total_rounds")
+  /// Last round that has been paired (0 before the first pairing)
+  currentRound Int                   @default(0) @map("current_round")
+  status       SwissTournamentStatus @default(ACTIVE)
+  createdAt    DateTime              @default(now()) @map("created_at")
+  updatedAt    DateTime              @updatedAt @map("updated_at")
+
+  league    League               @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+  pairings  SwissPairing[]
+  standings SwissRoundStanding[]
+
+  @@unique([leagueId, seasonNumber])
+  @@map("swiss_tournaments")
+}
+
+/// One board of a Swiss round. playerBId is null for a bye.
+model SwissPairing {
+  id           String             @id @default(uuid())
+  tournamentId String             @map("tournament_id")
+  round        Int
+  gameweekId   Int                @map("gameweek_id")
+  tableNumber  Int                @map("table_number")
+  playerAId    String             @map("player_a_id")
+  playerBId    String?            @map("player_b_id")
+  scoreA       Int?               @map("score_a")
+  scoreB       Int?               @map("score_b")
+  result       SwissPairingResult @default(PENDING)
+  /// True only when no rematch-free pairing existed for this round
+  isRematch    Boolean            @default(false) @map("is_rematch")
+  settledAt    DateTime?          @map("settled_at")
+
+  tournament SwissTournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  gameweek   Gameweek        @relation(fields: [gameweekId], references: [id])
+  playerA    LeagueMember    @relation("SwissPlayerA", fields: [playerAId], references: [id], onDelete: Cascade)
+  playerB    LeagueMember?   @relation("SwissPlayerB", fields: [playerBId], references: [id], onDelete: Cascade)
+
+  @@unique([tournamentId, round, playerAId])
+  @@unique([tournamentId, round, tableNumber])
+  @@index([tournamentId, round])
+  @@map("swiss_pairings")
+}
+
+/// Standings snapshot of a Swiss tournament after a settled round.
+model SwissRoundStanding {
+  id              String @id @default(uuid())
+  tournamentId    String @map("tournament_id")
+  round           Int
+  memberId        String @map("member_id")
+  rank            Int
+  matchPoints     Int    @map("match_points")
+  wins            Int
+  draws           Int
+  losses          Int
+  byes            Int
+  buchholz        Int
+  sonnebornBerger Float  @map("sonneborn_berger")
+  /// Squad points scored in played (non-bye) matches, and conceded
+  pointsFor       Int    @map("points_for")
+  pointsAgainst   Int    @map("points_against")
+  /// Squad points across every round, byes included
+  totalSquadScore Int    @map("total_squad_score")
+
+  tournament SwissTournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  member     LeagueMember    @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@unique([tournamentId, round, memberId])
+  @@map("swiss_round_standings")
+}
+
+// ============================================================
+// SEASON ROLLOVER ARCHIVES (issue #271)
+// ============================================================
+
+/// Frozen record of one finished league season. Rows are written once by the
+/// season rollover pipeline and never updated or deleted by the application.
+model LeagueSeasonArchive {
+  id              String      @id @default(uuid())
+  leagueId        String      @map("league_id")
+  seasonNumber    Int         @map("season_number")
+  season          String
+  scoringType     ScoringType @map("scoring_type")
+  startGameweekId Int         @map("start_gameweek_id")
+  endGameweekId   Int         @map("end_gameweek_id")
+  memberCount     Int         @map("member_count")
+  prizePool       Decimal     @map("prize_pool") @db.Decimal(10, 2)
+  entryFee        Decimal     @map("entry_fee") @db.Decimal(10, 2)
+  championUserId  String?     @map("champion_user_id")
+  /// Sum of every archived member's points in the season window
+  totalPoints     Int         @map("total_points")
+  archivedById    String      @map("archived_by_id")
+  archivedAt      DateTime    @default(now()) @map("archived_at")
+
+  league    League                        @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+  standings LeagueSeasonArchiveStanding[]
+  matches   LeagueSeasonArchiveMatch[]
+  trophies  UserTrophy[]
+
+  @@unique([leagueId, seasonNumber])
+  @@map("league_season_archives")
+}
+
+/// Final table row of an archived season. Usernames and squad names are
+/// snapshotted so the historical leaderboard never changes retroactively.
+model LeagueSeasonArchiveStanding {
+  id                 String @id @default(uuid())
+  archiveId          String @map("archive_id")
+  userId             String @map("user_id")
+  squadId            String @map("squad_id")
+  username           String
+  squadName          String @map("squad_name")
+  rank               Int
+  totalPoints        Int    @map("total_points")
+  bestGameweekPoints Int    @map("best_gameweek_points")
+  matchesWon         Int    @default(0) @map("matches_won")
+  matchesDrawn       Int    @default(0) @map("matches_drawn")
+  matchesLost        Int    @default(0) @map("matches_lost")
+  pointsFor          Int    @default(0) @map("points_for")
+  pointsAgainst      Int    @default(0) @map("points_against")
+  h2hPoints          Int    @default(0) @map("h2h_points")
+
+  archive LeagueSeasonArchive @relation(fields: [archiveId], references: [id], onDelete: Cascade)
+
+  @@unique([archiveId, userId])
+  @@index([userId])
+  @@map("league_season_archive_standings")
+}
+
+/// Head-to-head (or Swiss) match result of an archived season.
+model LeagueSeasonArchiveMatch {
+  id           String  @id @default(uuid())
+  archiveId    String  @map("archive_id")
+  gameweekId   Int     @map("gameweek_id")
+  homeUserId   String  @map("home_user_id")
+  /// Null for a match against the league Average team or a Swiss bye
+  awayUserId   String? @map("away_user_id")
+  homeScore    Int?    @map("home_score")
+  awayScore    Int?    @map("away_score")
+  isPlayoff    Boolean @default(false) @map("is_playoff")
+  playoffRound Int?    @map("playoff_round")
+  /// "H2H" for league fixtures, "SWISS" for Swiss pairings
+  format       String
+
+  archive LeagueSeasonArchive @relation(fields: [archiveId], references: [id], onDelete: Cascade)
+
+  @@index([archiveId, gameweekId])
+  @@map("league_season_archive_matches")
+}
+
+/// A badge or trophy shown on a member's profile for an archived season.
+model UserTrophy {
+  id        String     @id @default(uuid())
+  userId    String     @map("user_id")
+  leagueId  String     @map("league_id")
+  archiveId String     @map("archive_id")
+  type      TrophyType
+  season    String
+  title     String
+  rank      Int?
+  awardedAt DateTime   @default(now()) @map("awarded_at")
+
+  user    User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  league  League              @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+  archive LeagueSeasonArchive @relation(fields: [archiveId], references: [id], onDelete: Cascade)
+
+  @@unique([archiveId, userId, type])
+  @@index([userId])
+  @@map("user_trophies")
+}
+
+// ============================================================
+// WEBAUTHN / PASSKEYS (issue #273)
+// ============================================================
+
+/// A registered WebAuthn credential (passkey or hardware security key).
+/// Only the public key is stored; the private key never leaves the authenticator.
+model PasskeyCredential {
+  id           String    @id @default(uuid())
+  userId       String    @map("user_id")
+  /// Base64url credential ID chosen by the authenticator
+  credentialId String    @unique @map("credential_id")
+  /// COSE-encoded public key
+  publicKey    Bytes     @map("public_key")
+  /// Signature counter; an assertion that does not advance it is rejected
+  counter      BigInt    @default(0)
+  transports   String[]
+  /// "singleDevice" or "multiDevice" (synced passkey)
+  deviceType   String    @map("device_type")
+  backedUp     Boolean   @default(false) @map("backed_up")
+  name         String?
+  aaguid       String?
+  createdAt    DateTime  @default(now()) @map("created_at")
+  lastUsedAt   DateTime? @map("last_used_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("passkey_credentials")
+}
+
+/// Single-use, short-lived WebAuthn challenge. Consuming it atomically before
+/// verification is what makes a replayed ceremony response fail.
+model WebAuthnChallenge {
+  id         String                @id @default(uuid())
+  /// Base64url random challenge sent to the authenticator
+  challenge  String                @unique
+  type       WebAuthnChallengeType
+  /// Null for a discoverable (usernameless) passkey login
+  userId     String?               @map("user_id")
+  expiresAt  DateTime              @map("expires_at")
+  consumedAt DateTime?             @map("consumed_at")
+  createdAt  DateTime              @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("webauthn_challenges")
 }

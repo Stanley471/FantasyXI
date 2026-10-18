@@ -146,6 +146,16 @@ export interface AuthResult {
   token: string;
 }
 
+/**
+ * Returned by password login instead of AuthResult when the account requires
+ * a passkey step-up. `mfaToken` only authorizes the passkey MFA endpoints.
+ */
+export interface MfaChallengeResult {
+  mfaRequired: true;
+  mfaToken: string;
+  methods: ["passkey"];
+}
+
 /** Standard auth API response wrapper */
 export interface AuthResponse {
   success: boolean;

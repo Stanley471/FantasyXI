@@ -1,12 +1,14 @@
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import { prisma as defaultPrisma } from "../../config/db.js";
-import { signAccessToken } from "../../config/jwt.js";
+import { signAccessToken, signPurposeToken } from "../../config/jwt.js";
+import { PASSKEY_MFA_PURPOSE, PASSKEY_MFA_TICKET_TTL } from "../../config/webauthn.js";
 import {
   RegisterInput,
   LoginInput,
   SafeUser,
   AuthResult,
+  MfaChallengeResult,
   UserRole,
 } from "../../types/index.js";
 import { eventBus, EventBus } from "../events/eventBus.js";
@@ -56,6 +58,21 @@ export class AuthNotFoundError extends Error {
   constructor(message: string = "User not found") {
     super(message);
     this.name = "AuthNotFoundError";
+  }
+}
+
+/**
+ * The password was correct but the account requires a passkey step-up.
+ * Carries the short-lived ticket for the /auth/passkeys/mfa/* endpoints.
+ */
+export class PasskeyMfaRequiredError extends Error {
+  constructor(public readonly mfaToken: string) {
+    super("Passkey verification required");
+    this.name = "PasskeyMfaRequiredError";
+  }
+
+  public toResult(): MfaChallengeResult {
+    return { mfaRequired: true, mfaToken: this.mfaToken, methods: ["passkey"] };
   }
 }
 
@@ -319,6 +336,14 @@ export class AuthService {
         ip: context.ip,
         userAgent: context.userAgent,
       });
+    }
+
+    // Step-up 2FA (issue #273): the password alone does not grant a session;
+    // the client finishes with a passkey assertion via /auth/passkeys/mfa/*.
+    if (user.passkeyMfaEnabled) {
+      throw new PasskeyMfaRequiredError(
+        signPurposeToken(user.id, PASSKEY_MFA_PURPOSE, PASSKEY_MFA_TICKET_TTL)
+      );
     }
 
     const safeUser = toSafeUser(user);

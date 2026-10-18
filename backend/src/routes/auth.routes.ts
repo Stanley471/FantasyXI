@@ -11,6 +11,18 @@ import {
   setPassword,
   getUserReferralCode,
 } from "../controllers/auth.controller.js";
+import {
+  deletePasskey,
+  listPasskeys,
+  passkeyLoginOptions,
+  passkeyLoginVerify,
+  passkeyMfaOptions,
+  passkeyMfaVerify,
+  passkeyRegistrationOptions,
+  passkeyRegistrationVerify,
+  setPasskeyMfa,
+} from "../controllers/passkey.controller.js";
+import { getMyTrophies } from "../controllers/seasonRollover.controller.js";
 import { requireAuth, requirePermission } from "../middleware/authMiddleware.js";
 import { Permission } from "../types/index.js";
 import {
@@ -55,6 +67,28 @@ router.delete("/google/link", requireAuth, unlinkGoogleAccount);
 
 // POST /api/v1/auth/password (Protected: add a password to a Google account, or change it)
 router.post("/password", authRateLimiter, requireAuth, setPassword);
+
+// GET /api/v1/auth/me/trophies (Protected: season trophies and badges on the profile)
+router.get(
+  "/me/trophies",
+  requireAuth,
+  authenticatedRateLimiter,
+  requirePermission(Permission.PROFILE_READ),
+  getMyTrophies
+);
+
+// WebAuthn / passkeys (issue #273)
+// Management (Protected)
+router.post("/passkeys/register/options", requireAuth, authenticatedRateLimiter, passkeyRegistrationOptions);
+router.post("/passkeys/register/verify", requireAuth, authenticatedRateLimiter, passkeyRegistrationVerify);
+router.get("/passkeys", requireAuth, authenticatedRateLimiter, listPasskeys);
+router.delete("/passkeys/:id", requireAuth, authenticatedRateLimiter, deletePasskey);
+router.put("/passkeys/mfa", authRateLimiter, requireAuth, setPasskeyMfa);
+// Passwordless sign-in and password + passkey step-up (Public, rate limited)
+router.post("/passkeys/login/options", authRateLimiter, passkeyLoginOptions);
+router.post("/passkeys/login/verify", authRateLimiter, passkeyLoginVerify);
+router.post("/passkeys/mfa/options", authRateLimiter, passkeyMfaOptions);
+router.post("/passkeys/mfa/verify", authRateLimiter, passkeyMfaVerify);
 
 export default router;
 

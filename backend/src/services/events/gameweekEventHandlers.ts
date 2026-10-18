@@ -3,6 +3,7 @@ import { ChipType, LeagueStatus, ScoringType } from "../../types/index.js";
 import { scoringService } from "../scoring/scoringService.js";
 import { squadService } from "../squad/squadService.js";
 import { leagueService } from "../league/leagueService.js";
+import { swissTournamentService } from "../league/swissTournamentService.js";
 import { eventBus, EventBus } from "./eventBus.js";
 import { GAMEWEEK_UPDATED_EVENT, GameweekUpdatedPayload } from "./domainEvents.js";
 
@@ -51,6 +52,10 @@ async function handleSettleLeagues({ gameweekId }: GameweekUpdatedPayload): Prom
   for (const league of leagues) {
     if (league.scoringType === ScoringType.HEAD_TO_HEAD) {
       await leagueService.settleH2HGameweek(league.id, gameweekId);
+    }
+    if (league.scoringType === ScoringType.SWISS) {
+      // Resolves this gameweek's round and pairs the next one (idempotent)
+      await swissTournamentService.processGameweek(league.id, gameweekId);
     }
     if (league.endGameweekId === gameweekId) {
       await leagueService.transitionStatus(league.id, LeagueStatus.COMPLETED);

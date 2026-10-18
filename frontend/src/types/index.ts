@@ -37,6 +37,7 @@ export enum MembershipStatus {
 export enum ScoringType {
   CLASSIC = "CLASSIC",
   HEAD_TO_HEAD = "HEAD_TO_HEAD",
+  SWISS = "SWISS",
 }
 
 export enum TransactionType {
@@ -508,6 +509,13 @@ export interface AuthResponse {
   success: true;
   token: string;
   user: User;
+}
+
+/** Returned by password login when the account requires a passkey step-up */
+export interface MfaChallenge {
+  mfaRequired: true;
+  mfaToken: string;
+  methods: Array<"passkey">;
 }
 
 // ============================================================

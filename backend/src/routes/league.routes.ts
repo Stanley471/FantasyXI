@@ -20,6 +20,12 @@ import { Permission, UserRole } from "../types/index.js";
 import { authenticatedRateLimiter, mutationRateLimiter } from "../middleware/rateLimiter.js";
 import { primaryReads } from "../middleware/readConsistency.js";
 import { getChatMessages, postChatMessage } from "../controllers/chat.controller.js";
+import { getSwissPairings, getSwissStandings } from "../controllers/swiss.controller.js";
+import {
+  getLeagueSeason,
+  listLeagueSeasons,
+  rolloverLeague,
+} from "../controllers/seasonRollover.controller.js";
 
 const router = Router();
 
@@ -57,6 +63,23 @@ router.get("/:id/live", streamLeagueLive);
 
 // GET /api/v1/leagues/:id/h2h-standings (Public: head-to-head league table)
 router.get("/:id/h2h-standings", getH2HStandings);
+
+// Swiss-system leagues (Public: standings with tie-breaks, and round pairings)
+router.get("/:id/swiss/standings", getSwissStandings);
+router.get("/:id/swiss/pairings", getSwissPairings);
+
+// Season rollover (Protected: creator or admin) and archived seasons
+// (public leagues: anyone; private leagues: current and past members)
+router.post(
+  "/:id/rollover",
+  requireAuth,
+  authenticatedRateLimiter,
+  mutationRateLimiter,
+  requirePermission(Permission.LEAGUE_MANAGE_OWN),
+  rolloverLeague
+);
+router.get("/:id/seasons", primaryReads, optionalAuth, listLeagueSeasons);
+router.get("/:id/seasons/:seasonNumber", primaryReads, optionalAuth, getLeagueSeason);
 
 // POST /api/v1/leagues/:id/cancel (Protected: creator only)
 router.post("/:id/cancel", requireAuth, authenticatedRateLimiter, mutationRateLimiter, requirePermission(Permission.LEAGUE_CANCEL_OWN), cancelLeague);

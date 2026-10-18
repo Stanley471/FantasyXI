@@ -15,6 +15,7 @@ import {
   LeagueSortField,
 } from "../../types/index.js";
 import { PrizeService } from "./prizeService.js";
+import { SwissTournamentPairingService } from "./swissTournamentService.js";
 import { ScoringService } from "../scoring/scoringService.js";
 
 /** A scheduled H2H pairing. awayMemberId null = the league 'Average' team. */
@@ -1160,6 +1161,14 @@ export class LeagueService {
         await tx.leagueFixture.createMany({
           data: pairings.map((p) => ({ leagueId, ...p })),
         });
+      }
+
+      // Swiss leagues pair round 1 on activation; later rounds follow each settled gameweek
+      if (
+        targetStatus === LeagueStatus.ACTIVE &&
+        league.scoringType === ScoringType.SWISS
+      ) {
+        await new SwissTournamentPairingService(tx).startTournament(leagueId);
       }
 
       return updated;

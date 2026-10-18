@@ -5,6 +5,7 @@ import {
   AuthConflictError,
   AuthUnauthorizedError,
   AuthNotFoundError,
+  PasskeyMfaRequiredError,
 } from "../services/auth/authService.js";
 import { ReferralService } from "../services/auth/referralService.js";
 
@@ -66,6 +67,15 @@ export async function login(
       data: result,
     });
   } catch (error) {
+    if (error instanceof PasskeyMfaRequiredError) {
+      // Password accepted; the client must finish with /auth/passkeys/mfa/*
+      res.json({
+        success: true,
+        message: error.message,
+        data: error.toResult(),
+      });
+      return;
+    }
     if (error instanceof AuthUnauthorizedError) {
       res.status(401).json({
         success: false,

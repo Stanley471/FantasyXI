@@ -1,13 +1,17 @@
 "use client";
 
-import React, { useState, useEffect, Suspense } from "react";
+import React, { useState, useEffect, useSyncExternalStore, Suspense } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { api, ApiError } from "@/lib/api";
 import { describeGoogleAuthError, redirectToGoogleSignIn, safeReturnTo } from "@/lib/googleAuth";
+import { completePasskeyMfa, isMfaChallenge, isPasskeySupported, signInWithPasskey } from "@/lib/passkeys";
+import type { MfaChallenge } from "@/types";
 import { IconFootball, IconGoogle, IconAlertCircle, IconCheck } from "@/components/ui/Icons";
 import { Button } from "@/components/ui/Button";
+
+const subscribeNever = () => () => {};
 
 function LoginForm() {
   const router = useRouter();
@@ -22,6 +26,42 @@ function LoginForm() {
   const [showPassword, setShowPassword] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(describeGoogleAuthError(urlError));
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [pendingMfaToken, setPendingMfaToken] = useState<string | null>(null);
+  // Browser capability: false during server rendering, read once on the client
+  const passkeyAvailable = useSyncExternalStore(subscribeNever, isPasskeySupported, () => false);
+
+  const describeError = (err: unknown, fallback: string) => {
+    if (err instanceof ApiError) return err.message || fallback;
+    // The browser rejects with NotAllowedError when the passkey prompt is dismissed
+    if (err instanceof DOMException && err.name === "NotAllowedError") return "Passkey request was cancelled.";
+    if (err instanceof Error) return err.message;
+    return fallback;
+  };
+
+  const finishWithPasskey = async (mfaToken: string) => {
+    try {
+      const session = await completePasskeyMfa(mfaToken);
+      setPendingMfaToken(null);
+      login(session.token, session.user);
+      router.push(returnTo);
+    } catch (err: unknown) {
+      setErrorMsg(describeError(err, "Passkey verification failed."));
+    }
+  };
+
+  const handlePasskeyLogin = async () => {
+    setErrorMsg(null);
+    setIsSubmitting(true);
+    try {
+      const session = await signInWithPasskey(email.trim() || undefined);
+      login(session.token, session.user);
+      router.push(returnTo);
+    } catch (err: unknown) {
+      setErrorMsg(describeError(err, "Passkey sign-in failed."));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
   // If already authenticated, redirect immediately
   useEffect(() => {
@@ -45,22 +85,28 @@ function LoginForm() {
       const response = await api.post<{
         success: boolean;
         message: string;
-        data: {
-          token: string;
-          user: {
-            id: string;
-            email: string;
-            username: string;
-            name?: string | null;
-            createdAt: string;
-          };
-        };
+        data:
+          | {
+              token: string;
+              user: {
+                id: string;
+                email: string;
+                username: string;
+                name?: string | null;
+                createdAt: string;
+              };
+            }
+          | MfaChallenge;
       }>("/api/v1/auth/login", {
         email: email.trim(),
         password,
       });
 
-      if (response?.data?.token && response?.data?.user) {
+      if (isMfaChallenge(response?.data)) {
+        // Password accepted; the account also requires a passkey
+        setPendingMfaToken(response.data.mfaToken);
+        await finishWithPasskey(response.data.mfaToken);
+      } else if (response?.data?.token && response?.data?.user) {
         login(response.data.token, response.data.user);
         router.push(returnTo);
       } else {
@@ -197,6 +243,27 @@ function LoginForm() {
             </Button>
           </div>
         </form>
+
+        {pendingMfaToken && (
+          <button
+            type="button"
+            onClick={() => finishWithPasskey(pendingMfaToken)}
+            className="mt-3 w-full px-4 py-2.5 rounded-lg border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10 text-sm font-semibold transition-colors"
+          >
+            Verify with your passkey to finish signing in
+          </button>
+        )}
+
+        {passkeyAvailable && !pendingMfaToken && (
+          <button
+            type="button"
+            onClick={handlePasskeyLogin}
+            disabled={isSubmitting}
+            className="mt-3 w-full px-4 py-2.5 rounded-lg border border-slate-700 bg-slate-800/60 hover:bg-slate-700 text-slate-100 text-sm font-medium transition-colors disabled:opacity-60"
+          >
+            Sign in with a passkey
+          </button>
+        )}
 
         {/* Footer info */}
         <div className="mt-6 text-center text-xs text-slate-400">

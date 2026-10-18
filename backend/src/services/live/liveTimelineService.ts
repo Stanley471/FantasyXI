@@ -665,6 +665,9 @@ export class LiveScoreIngestionDaemon {
       }
     }
 
+    // Persist after broadcasting so storage latency never delays live updates
+    await this.persistMatchEvents(gameweekId, newEvents);
+
     // Now recompute squad scores for squads owning affected players
     const updatedSquadIds: string[] = [];
     if (affectedPlayerIds.size > 0 && this.db?.squadPlayer?.findMany) {
@@ -744,6 +747,40 @@ export class LiveScoreIngestionDaemon {
       updatedSquadIds,
       processedCount: freshStats.length,
     };
+  }
+
+  /**
+   * Appends new events to the gameweek-partitioned live_match_events log
+   * (issue #263). Event ids are deterministic, so (gameweekId, eventKey)
+   * makes the write idempotent across daemon restarts. Best-effort: a storage
+   * failure (e.g. a missing partition) must never stop live broadcasting.
+   */
+  private async persistMatchEvents(gameweekId: number, events: TimelineEvent[]): Promise<void> {
+    if (events.length === 0 || !this.db?.liveMatchEvent?.createMany) return;
+    try {
+      await this.db.liveMatchEvent.createMany({
+        data: events.map((evt) => ({
+          gameweekId,
+          eventKey: evt.id,
+          fixtureId: evt.fixtureId,
+          playerId: evt.playerId,
+          type: evt.type,
+          minute: evt.minute,
+          pointsAwarded: evt.pointsAwarded,
+          payload: {
+            detail: evt.detail,
+            playerName: evt.playerName,
+            fplId: evt.fplId,
+            teamId: evt.teamId,
+            teamShortName: evt.teamShortName,
+            fixtureName: evt.fixtureName,
+          },
+        })),
+        skipDuplicates: true,
+      });
+    } catch (err) {
+      console.warn(`[LiveScoreIngestionDaemon] Failed to persist match events: ${err}`);
+    }
   }
 
   public async pollAndIngest(gameweekId: number): Promise<IngestionDeltaResult | null> {
