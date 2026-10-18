@@ -14,6 +14,10 @@ import {
   revokeLeagueInvitation,
   previewLeagueInvitation,
   acceptLeagueInvitation,
+  getScoringPresets,
+  getLeagueScoringConfig,
+  updateLeagueScoringConfig,
+  resetLeagueScoringConfig,
 } from "../controllers/league.controller.js";
 import { requireAuth, requirePermission, optionalAuth, requireRole } from "../middleware/authMiddleware.js";
 import { Permission, UserRole } from "../types/index.js";
@@ -39,6 +43,9 @@ router.post(
   requirePermission(Permission.LEAGUE_JOIN),
   acceptLeagueInvitation
 );
+
+// GET /api/v1/leagues/scoring-presets (Public: preset custom scoring rule sets, issue #272)
+router.get("/scoring-presets", getScoringPresets);
 
 // GET /api/v1/leagues/:id (Public: view league details; invite code only for creator)
 router.get("/:id", optionalAuth, getLeagueById);
@@ -80,6 +87,24 @@ router.delete(
   requireAuth,
   requirePermission(Permission.LEAGUE_MANAGE_OWN),
   revokeLeagueInvitation
+);
+
+// Custom scoring rules (issue #272). Reading is public like standings;
+// changing them is creator-only and limited to private leagues before kickoff.
+router.get("/:id/scoring-config", getLeagueScoringConfig);
+router.put(
+  "/:id/scoring-config",
+  requireAuth,
+  mutationRateLimiter,
+  requirePermission(Permission.LEAGUE_MANAGE_OWN),
+  updateLeagueScoringConfig
+);
+router.delete(
+  "/:id/scoring-config",
+  requireAuth,
+  mutationRateLimiter,
+  requirePermission(Permission.LEAGUE_MANAGE_OWN),
+  resetLeagueScoringConfig
 );
 
 // League chat (Protected: creator and members only). History is read from the

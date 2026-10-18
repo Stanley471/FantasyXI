@@ -235,6 +235,10 @@ export interface NormalizedPlayerStats {
   saves: number;
   bonus: number;
   totalPoints: number;
+  goalsConceded: number;
+  ownGoals: number;
+  penaltiesSaved: number;
+  penaltiesMissed: number;
 }
 
 export function normalizePlayerStats(raw: {
@@ -249,6 +253,10 @@ export function normalizePlayerStats(raw: {
     saves: number;
     bonus: number;
     total_points: number;
+    goals_conceded?: number;
+    own_goals?: number;
+    penalties_saved?: number;
+    penalties_missed?: number;
   };
   explain?: Array<{
     fixture: number;
@@ -272,6 +280,10 @@ export function normalizePlayerStats(raw: {
       saves: s.saves ?? 0,
       bonus: s.bonus ?? 0,
       totalPoints: s.total_points ?? 0,
+      goalsConceded: s.goals_conceded ?? 0,
+      ownGoals: s.own_goals ?? 0,
+      penaltiesSaved: s.penalties_saved ?? 0,
+      penaltiesMissed: s.penalties_missed ?? 0,
     };
   }
 
@@ -285,6 +297,10 @@ export function normalizePlayerStats(raw: {
     let saves = 0;
     let bonus = 0;
     let totalPoints = 0;
+    let goalsConceded = 0;
+    let ownGoals = 0;
+    let penaltiesSaved = 0;
+    let penaltiesMissed = 0;
 
     for (const stat of exp.stats) {
       totalPoints += stat.points;
@@ -313,6 +329,18 @@ export function normalizePlayerStats(raw: {
         case "bonus":
           bonus = stat.value;
           break;
+        case "goals_conceded":
+          goalsConceded = stat.value;
+          break;
+        case "own_goals":
+          ownGoals = stat.value;
+          break;
+        case "penalties_saved":
+          penaltiesSaved = stat.value;
+          break;
+        case "penalties_missed":
+          penaltiesMissed = stat.value;
+          break;
       }
     }
 
@@ -328,6 +356,10 @@ export function normalizePlayerStats(raw: {
       saves,
       bonus,
       totalPoints,
+      goalsConceded,
+      ownGoals,
+      penaltiesSaved,
+      penaltiesMissed,
     };
   });
 }

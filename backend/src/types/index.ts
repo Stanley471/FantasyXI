@@ -24,6 +24,7 @@ import {
   ChipType,
   UserRole,
 } from "@prisma/client";
+import type { LeagueScoringConfigInput } from "../models/leagueScoringConfig.js";
 
 export { Role, Permission } from "../config/permissions.js";
 import type { Role } from "../config/permissions.js";
@@ -232,6 +233,8 @@ export interface CreateLeagueInput {
   squadId: string; // Creator's initial squad
   scoringType?: ScoringType; // default CLASSIC
   isPrivate?: boolean; // default false: private leagues are invitation-only
+  /** Custom scoring rules (private leagues only); omitted/null = official FPL scoring */
+  scoringConfig?: LeagueScoringConfigInput | null;
 }
 
 export interface CreateLeagueTierGroupInput {

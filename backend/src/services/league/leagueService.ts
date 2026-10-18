@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../../config/db.js";
 import {
   LeagueStatus,
@@ -16,6 +17,15 @@ import {
 } from "../../types/index.js";
 import { PrizeService } from "./prizeService.js";
 import { ScoringService } from "../scoring/scoringService.js";
+import {
+  LeagueScoringConfig,
+  LeagueScoringConfigInput,
+  SCORING_PRESETS,
+  SCORING_PRESET_DESCRIPTIONS,
+  ScoringConfigValidationError,
+  ScoringPresetName,
+  resolveScoringConfig,
+} from "../../models/leagueScoringConfig.js";
 
 /** A scheduled H2H pairing. awayMemberId null = the league 'Average' team. */
 export interface H2HPairing {
@@ -423,6 +433,14 @@ export class LeagueService {
       throw new LeagueValidationError("isPrivate must be a boolean");
     }
 
+    let scoringConfig: LeagueScoringConfig | null = null;
+    if (input.scoringConfig !== undefined && input.scoringConfig !== null) {
+      if (input.isPrivate !== true) {
+        throw new LeagueValidationError("Custom scoring rules are only available for private leagues");
+      }
+      scoringConfig = LeagueService.resolveLeagueScoringConfig(input.scoringConfig);
+    }
+
     const maxMembers = input.maxMembers ?? 20;
     const minMembers = input.minMembers ?? 2;
 
@@ -506,6 +524,7 @@ export class LeagueService {
           status: LeagueStatus.UPCOMING,
           scoringType,
           isPrivate: input.isPrivate ?? false,
+          ...(scoringConfig ? { scoringConfig: scoringConfig as object } : {}),
           startGameweekId: startGw.id,
           endGameweekId: endGw.id,
         },
@@ -1028,12 +1047,44 @@ export class LeagueService {
         status: MembershipStatus.ACTIVE,
         league: { scoringType: ScoringType.CLASSIC, status: LeagueStatus.ACTIVE },
       },
-      select: { id: true, leagueId: true, squadId: true, joinedAt: true },
+      select: {
+        id: true,
+        leagueId: true,
+        squadId: true,
+        joinedAt: true,
+        league: { select: { scoringConfig: true } },
+      },
     });
 
     if (members.length === 0) {
       return { membersUpdated: 0 };
     }
+
+    // Leagues with custom scoring rules (issue #272) rank on their own
+    // per-league scores; one extra aggregation, and only when such leagues exist.
+    const customLeagueIds = [
+      ...new Set(
+        members
+          .filter((m: any) => m.league?.scoringConfig !== null && m.league?.scoringConfig !== undefined)
+          .map((m: any) => m.leagueId as string)
+      ),
+    ];
+    const customTotals = new Map<string, number>();
+    if (customLeagueIds.length > 0) {
+      const leagueTotals = await this.db.leagueSquadGameweekScore.groupBy({
+        by: ["leagueId", "squadId"],
+        where: { leagueId: { in: customLeagueIds }, gameweekId: { lte: gameweekId } },
+        _sum: { points: true },
+      });
+      for (const t of leagueTotals as any[]) {
+        customTotals.set(`${t.leagueId}:${t.squadId}`, t._sum.points ?? 0);
+      }
+    }
+    const customLeagues = new Set(customLeagueIds);
+    const pointsFor = (member: any): number =>
+      customLeagues.has(member.leagueId)
+        ? customTotals.get(`${member.leagueId}:${member.squadId}`) ?? 0
+        : totalBySquad.get(member.squadId) ?? 0;
 
     const byLeague = new Map<string, typeof members>();
     for (const member of members) {
@@ -1048,13 +1099,12 @@ export class LeagueService {
 
     for (const leagueMembers of byLeague.values()) {
       const sorted = [...leagueMembers].sort((a: any, b: any) => {
-        const diff =
-          (totalBySquad.get(b.squadId) ?? 0) - (totalBySquad.get(a.squadId) ?? 0);
+        const diff = pointsFor(b) - pointsFor(a);
         return diff !== 0 ? diff : a.joinedAt.getTime() - b.joinedAt.getTime();
       });
       sorted.forEach((member: any, idx: number) => {
         ids.push(member.id);
-        totalPoints.push(totalBySquad.get(member.squadId) ?? 0);
+        totalPoints.push(pointsFor(member));
         ranks.push(idx + 1);
       });
     }
@@ -1339,7 +1389,11 @@ export class LeagueService {
    * updates member H2H statistics and refreshes table ranks.
    * The 'Average' team scores the rounded mean of all active members that gameweek.
    */
-  public async settleH2HGameweek(leagueId: string, gameweekId: number) {
+  public async settleH2HGameweek(
+    leagueId: string,
+    gameweekId: number,
+    options: { customScoring?: boolean } = {}
+  ) {
     const fixtures = await this.db.leagueFixture.findMany({
       where: { leagueId, gameweekId, isFinished: false },
     });
@@ -1350,9 +1404,15 @@ export class LeagueService {
     const members = await this.db.leagueMember.findMany({
       where: { leagueId, status: MembershipStatus.ACTIVE },
     });
-    const scores = await this.db.squadGameweekScore.findMany({
-      where: { gameweekId, squadId: { in: members.map((m: any) => m.squadId) } },
-    });
+    const squadIds = members.map((m: any) => m.squadId);
+    // Custom-rule leagues (issue #272) settle on their own per-league scores
+    const scores = options.customScoring
+      ? await this.db.leagueSquadGameweekScore.findMany({
+          where: { leagueId, gameweekId, squadId: { in: squadIds } },
+        })
+      : await this.db.squadGameweekScore.findMany({
+          where: { gameweekId, squadId: { in: squadIds } },
+        });
 
     const pointsBySquad = new Map<string, number>(
       scores.map((s: any) => [s.squadId, s.points])
@@ -1749,6 +1809,88 @@ export class LeagueService {
    * Retrieves a single league with members, gameweeks, and creator info.
    * The invite code of a private league is only revealed to its creator.
    */
+  /**
+   * Validates a scoring config request (preset + overrides), translating rule
+   * violations into a LeagueValidationError for a 400 response.
+   */
+  public static resolveLeagueScoringConfig(input: LeagueScoringConfigInput): LeagueScoringConfig {
+    try {
+      return resolveScoringConfig(input);
+    } catch (error) {
+      if (error instanceof ScoringConfigValidationError) {
+        throw new LeagueValidationError(error.message);
+      }
+      throw error;
+    }
+  }
+
+  /** Preset rule sets a league creator can start from. */
+  public static listScoringPresets() {
+    return (Object.keys(SCORING_PRESETS) as ScoringPresetName[]).map((name) => ({
+      name,
+      description: SCORING_PRESET_DESCRIPTIONS[name],
+      rules: SCORING_PRESETS[name],
+    }));
+  }
+
+  /** The rules a league is scored with: its custom config, or official FPL points. */
+  public async getScoringConfig(leagueId: string) {
+    const league = await this.db.league.findUnique({
+      where: { id: leagueId },
+      select: { id: true, scoringConfig: true },
+    });
+    if (!league) {
+      throw new LeagueNotFoundError(leagueId);
+    }
+    const isCustom = league.scoringConfig !== null && league.scoringConfig !== undefined;
+    return {
+      leagueId: league.id,
+      isCustom,
+      config: isCustom ? (league.scoringConfig as unknown as LeagueScoringConfig) : SCORING_PRESETS.CLASSIC_FPL,
+    };
+  }
+
+  /**
+   * Sets (or, with `input === null`, clears) a league's custom scoring rules.
+   * Creator-only, private leagues only, and only before the league starts:
+   * changing rules mid-season would silently rewrite settled standings.
+   */
+  public async updateScoringConfig(
+    leagueId: string,
+    userId: string,
+    input: LeagueScoringConfigInput | null
+  ) {
+    const league = await this.db.league.findUnique({
+      where: { id: leagueId },
+      select: { id: true, creatorId: true, status: true, isPrivate: true },
+    });
+    if (!league) {
+      throw new LeagueNotFoundError(leagueId);
+    }
+    if (league.creatorId !== userId) {
+      throw new LeagueForbiddenError("Only the league creator can change scoring rules");
+    }
+    if (league.status !== LeagueStatus.UPCOMING) {
+      throw new LeagueValidationError("Scoring rules are locked once a league has started");
+    }
+    if (input !== null && !league.isPrivate) {
+      throw new LeagueValidationError("Custom scoring rules are only available for private leagues");
+    }
+
+    const config = input === null ? null : LeagueService.resolveLeagueScoringConfig(input);
+    await this.db.league.update({
+      where: { id: leagueId },
+      // Prisma.DbNull clears a nullable Json column; null alone is rejected
+      data: { scoringConfig: config === null ? Prisma.DbNull : (config as object) },
+    });
+
+    return {
+      leagueId,
+      isCustom: config !== null,
+      config: config ?? SCORING_PRESETS.CLASSIC_FPL,
+    };
+  }
+
   public async getLeagueById(leagueId: string, viewerId?: string) {
     const league = await this.db.league.findUnique({
       where: { id: leagueId },

@@ -396,6 +396,10 @@ export class FplSyncService {
           saves: s.saves,
           bonus: s.bonus,
           totalPoints: s.totalPoints,
+          goalsConceded: s.goalsConceded,
+          ownGoals: s.ownGoals,
+          penaltiesSaved: s.penaltiesSaved,
+          penaltiesMissed: s.penaltiesMissed,
         })
       ])
     );
@@ -425,6 +429,11 @@ export class FplSyncService {
           saves: stats.saves,
           bonus: stats.bonus,
           totalPoints: stats.totalPoints,
+          // Raw events behind custom league scoring rules (issue #272)
+          goalsConceded: stats.goalsConceded ?? 0,
+          ownGoals: stats.ownGoals ?? 0,
+          penaltiesSaved: stats.penaltiesSaved ?? 0,
+          penaltiesMissed: stats.penaltiesMissed ?? 0,
         };
 
         const incomingHash = generateHash(payload);

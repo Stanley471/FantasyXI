@@ -253,6 +253,7 @@ model Gameweek {
   leaguesEnding   League[]              @relation("LeagueEndGW")
   chipUsages      SquadChipUsage[]
   leagueFixtures  LeagueFixture[]
+  leagueScores    LeagueSquadGameweekScore[]
 
   @@map("gameweeks")
 }
@@ -297,6 +298,12 @@ model PlayerGameweekStats {
   bonus       Int     @default(0)
   totalPoints Int     @default(0) @map("total_points")
 
+  // Additional match events used by custom league scoring rules (issue #272)
+  goalsConceded   Int @default(0) @map("goals_conceded")
+  ownGoals        Int @default(0) @map("own_goals")
+  penaltiesSaved  Int @default(0) @map("penalties_saved")
+  penaltiesMissed Int @default(0) @map("penalties_missed")
+
   // Relations
   player   Player   @relation(fields: [playerId], references: [id])
   gameweek Gameweek @relation(fields: [gameweekId], references: [id])
@@ -326,6 +333,7 @@ model Squad {
   transfers      SquadTransfer[]
   memberships    LeagueMember[]
   chipUsages     SquadChipUsage[]
+  leagueScores   LeagueSquadGameweekScore[]
 
   @@map("squads")
 }
@@ -366,6 +374,8 @@ model League {
   scoringType     ScoringType  @default(CLASSIC) @map("scoring_type")
   /// Private leagues are hidden from public search and joinable only via invitation
   isPrivate       Boolean      @default(false) @map("is_private")
+  /// Custom scoring rules (LeagueScoringConfig) for private leagues; null = official FPL points
+  scoringConfig   Json?        @map("scoring_config")
   startGameweekId Int          @map("start_gameweek_id")
   endGameweekId   Int          @map("end_gameweek_id")
   createdAt       DateTime     @default(now()) @map("created_at")
@@ -381,6 +391,7 @@ model League {
   invitations   LeagueInvitation[]
   chatMessages  LeagueChatMessage[]
   seasons       LeagueSeason[]
+  squadScores   LeagueSquadGameweekScore[]
 
   @@index([status, isPrivate])
   @@index([entryFee])
@@ -529,6 +540,26 @@ model SquadGameweekScore {
 
   @@unique([squadId, gameweekId])
   @@map("squad_gameweek_scores")
+}
+
+/// A squad's gameweek score under a league's custom scoring rules (issue #272).
+/// Only written for leagues with a scoringConfig; other leagues read SquadGameweekScore.
+model LeagueSquadGameweekScore {
+  id           Int      @id @default(autoincrement())
+  leagueId     String   @map("league_id")
+  squadId      String   @map("squad_id")
+  gameweekId   Int      @map("gameweek_id")
+  points       Int      @default(0)
+  calculatedAt DateTime @default(now()) @map("calculated_at")
+
+  // Relations
+  league   League   @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+  squad    Squad    @relation(fields: [squadId], references: [id], onDelete: Cascade)
+  gameweek Gameweek @relation(fields: [gameweekId], references: [id])
+
+  @@unique([leagueId, squadId, gameweekId])
+  @@index([leagueId, gameweekId])
+  @@map("league_squad_gameweek_scores")
 }
 
 /// Last good FPL API payload per endpoint: the L3 fallback served when the

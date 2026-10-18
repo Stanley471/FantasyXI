@@ -11,14 +11,16 @@ import { GAMEWEEK_UPDATED_EVENT, GameweekUpdatedPayload } from "./domainEvents.j
  *
  * `jobs/gameweekSettlement.ts` used to import and call the scoring, squad and
  * league services directly and in sequence. It now only publishes one event;
- * these three subscribers react to it independently, so a future subscriber
+ * these subscribers react to it independently, so a future subscriber
  * (e.g. a push-notification service) can be added here without touching the
  * settlement job at all.
  *
  * Ordering: subscribers are registered, and therefore run, in the order
- * below - scoring, then free-hit reverts, then league settlement - because
- * league settlement reads squad scores that the scoring subscriber must have
- * already persisted. The in-process bus runs subscribers sequentially for
+ * below - scoring, then custom-rule league scoring, then free-hit reverts,
+ * then league settlement - because league settlement reads squad scores that
+ * the scoring subscribers must have already persisted (and custom league
+ * scoring reuses the transfer cost the official scoring step recorded).
+ * The in-process bus runs subscribers sequentially for
  * exactly this reason (see eventBus.ts); a real broker's competing consumers
  * would need that dependency expressed as an explicit follow-up event instead.
  */
@@ -28,6 +30,11 @@ async function handleScoreSquads({ gameweekId }: GameweekUpdatedPayload): Promis
   for (const squad of squads) {
     await scoringService.calculateAndPersistSquadScore(squad.id, gameweekId);
   }
+}
+
+async function handleScoreCustomLeagues({ gameweekId }: GameweekUpdatedPayload): Promise<void> {
+  // Must run before free-hit reverts, which restore the pre-chip lineup
+  await scoringService.calculateCustomLeagueScores(gameweekId);
 }
 
 async function handleRevertFreeHits({ gameweekId }: GameweekUpdatedPayload): Promise<void> {
@@ -50,7 +57,9 @@ async function handleSettleLeagues({ gameweekId }: GameweekUpdatedPayload): Prom
   });
   for (const league of leagues) {
     if (league.scoringType === ScoringType.HEAD_TO_HEAD) {
-      await leagueService.settleH2HGameweek(league.id, gameweekId);
+      await leagueService.settleH2HGameweek(league.id, gameweekId, {
+        customScoring: league.scoringConfig !== null,
+      });
     }
     if (league.endGameweekId === gameweekId) {
       await leagueService.transitionStatus(league.id, LeagueStatus.COMPLETED);
@@ -61,6 +70,7 @@ async function handleSettleLeagues({ gameweekId }: GameweekUpdatedPayload): Prom
 /** Handler names, exported so tests can assert on registration without invoking prisma. */
 export const GAMEWEEK_HANDLER_NAMES = [
   "scoringService.scoreSquads",
+  "scoringService.scoreCustomLeagues",
   "squadService.revertFreeHits",
   "leagueService.settleLeagues",
 ] as const;
@@ -68,7 +78,7 @@ export const GAMEWEEK_HANDLER_NAMES = [
 let registeredOnDefaultBus = false;
 
 /**
- * Subscribes the three gameweek-update handlers to `bus`. Idempotent for the
+ * Subscribes the gameweek-update handlers to `bus`. Idempotent for the
  * process-wide default bus (repeated imports must not double-subscribe);
  * tests may pass a fresh `InMemoryEventBus` to inspect subscriptions in
  * isolation, in which case this always subscribes.
@@ -79,8 +89,9 @@ export function registerGameweekEventHandlers(bus: EventBus = eventBus): void {
     registeredOnDefaultBus = true;
   }
   bus.subscribe(GAMEWEEK_UPDATED_EVENT, handleScoreSquads, { name: GAMEWEEK_HANDLER_NAMES[0] });
-  bus.subscribe(GAMEWEEK_UPDATED_EVENT, handleRevertFreeHits, { name: GAMEWEEK_HANDLER_NAMES[1] });
-  bus.subscribe(GAMEWEEK_UPDATED_EVENT, handleSettleLeagues, { name: GAMEWEEK_HANDLER_NAMES[2] });
+  bus.subscribe(GAMEWEEK_UPDATED_EVENT, handleScoreCustomLeagues, { name: GAMEWEEK_HANDLER_NAMES[1] });
+  bus.subscribe(GAMEWEEK_UPDATED_EVENT, handleRevertFreeHits, { name: GAMEWEEK_HANDLER_NAMES[2] });
+  bus.subscribe(GAMEWEEK_UPDATED_EVENT, handleSettleLeagues, { name: GAMEWEEK_HANDLER_NAMES[3] });
 }
 
 // Registers on import so `jobs/gameweekSettlement.ts` only needs to publish.

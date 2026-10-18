@@ -339,6 +339,81 @@ export async function cancelLeague(
 // ============================================================
 
 /**
+ * GET /api/v1/leagues/scoring-presets
+ * Preset scoring rule sets a private league can adopt or customize (issue #272).
+ */
+export function getScoringPresets(_req: Request, res: Response): void {
+  res.json({ success: true, data: LeagueService.listScoringPresets() });
+}
+
+/**
+ * GET /api/v1/leagues/:id/scoring-config
+ * The rules this league is scored with (custom, or official FPL points).
+ */
+export async function getLeagueScoringConfig(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const data = await leagueService.getScoringConfig(req.params.id as string);
+    res.json({ success: true, data });
+  } catch (error) {
+    if (sendLeagueError(error, res)) return;
+    next(error);
+  }
+}
+
+/**
+ * PUT /api/v1/leagues/:id/scoring-config (creator only, private UPCOMING leagues)
+ * Body: { preset?: "CLASSIC_FPL" | "ALL_ATTACK" | "DEFENSIVE_MASTERMIND", rules?: {...} }
+ * Invalid rules (e.g. negative points for goals) are rejected with 400.
+ */
+export async function updateLeagueScoringConfig(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user?.id) {
+      res.status(401).json({ success: false, message: "Authentication required" });
+      return;
+    }
+    const { preset, rules } = req.body ?? {};
+    const data = await leagueService.updateScoringConfig(req.params.id as string, req.user.id, {
+      preset,
+      rules,
+    });
+    res.json({ success: true, message: "Scoring rules updated", data });
+  } catch (error) {
+    if (sendLeagueError(error, res)) return;
+    next(error);
+  }
+}
+
+/**
+ * DELETE /api/v1/leagues/:id/scoring-config (creator only, UPCOMING leagues)
+ * Reverts the league to official FPL scoring.
+ */
+export async function resetLeagueScoringConfig(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user?.id) {
+      res.status(401).json({ success: false, message: "Authentication required" });
+      return;
+    }
+    const data = await leagueService.updateScoringConfig(req.params.id as string, req.user.id, null);
+    res.json({ success: true, message: "Scoring rules reset to official FPL scoring", data });
+  } catch (error) {
+    if (sendLeagueError(error, res)) return;
+    next(error);
+  }
+}
+
+/**
  * POST /api/v1/leagues/:id/invitations (creator only)
  * Body: { expiresInHours?: number }
  * Returns the raw token once; the client builds the shareable link from it.

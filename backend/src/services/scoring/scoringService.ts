@@ -1,6 +1,7 @@
 import type { PrismaClient } from "@prisma/client";
 import { prisma } from "../../config/db.js";
-import { ChipType, Position, SQUAD_RULES } from "../../types/index.js";
+import { ChipType, LeagueStatus, MembershipStatus, Position, SQUAD_RULES } from "../../types/index.js";
+import { CompiledScoringRules, ScoringEventStats, compileScoringRules } from "./scoringRuleEngine.js";
 
 /**
  * Scoring and Fantasy Points Calculation Service.
@@ -13,6 +14,9 @@ import { ChipType, Position, SQUAD_RULES } from "../../types/index.js";
  *   Wildcard / Free Hit (transfer point deductions waived)
  * - Head-to-head match resolution (Win 3 / Draw 1 / Loss 0)
  * - SquadGameweekScore persistence and total points aggregation
+ * - Custom per-league scoring rules (issue #272): leagues with a scoringConfig
+ *   get a LeagueSquadGameweekScore computed from raw match events with the
+ *   league's compiled rules; all other leagues use official FPL points.
  *
  * Laravel equivalent: Like app/Services/ScoringService.php with event listeners
  * calculating gameweek results.
@@ -37,6 +41,31 @@ export interface LineupScoreOptions {
   chip?: ChipType | null;
   /** Transfer point deduction for the gameweek (e.g. 4 per extra transfer) */
   transferCost?: number;
+}
+
+/** One PlayerGameweekStats row: a player's events in one fixture. */
+export interface PlayerFixtureStats extends ScoringEventStats {
+  playerId: number;
+  totalPoints: number;
+}
+
+interface SquadScoringInputs {
+  players: Array<{
+    playerId: number;
+    position: Position;
+    isStarter: boolean;
+    isCaptain: boolean;
+    isViceCaptain: boolean;
+    positionOrder: number;
+  }>;
+  stats: PlayerFixtureStats[];
+  chip: ChipType | null;
+  transferCost: number;
+}
+
+export interface CustomLeagueScoringResult {
+  leaguesScored: number;
+  scoresWritten: number;
 }
 
 export interface GameweekCalculationResult {
@@ -205,6 +234,37 @@ export class ScoringService {
   constructor(private readonly db: PrismaClient = prisma) {}
 
   /**
+   * Aggregates per-fixture stats into the per-player map consumed by
+   * `calculateLineupScore` (double gameweeks sum across fixtures).
+   *
+   * Without `rules` this is the official path: FPL's own totalPoints are summed
+   * exactly as before, with no extra work. With `rules`, each fixture is
+   * re-scored from its raw events using the league's compiled rules.
+   */
+  public static buildStatsMap(
+    stats: PlayerFixtureStats[],
+    positions?: Map<number, Position>,
+    rules?: CompiledScoringRules | null
+  ): Map<number, { minutes: number; totalPoints: number }> {
+    const statsMap = new Map<number, { minutes: number; totalPoints: number }>();
+    for (const st of stats) {
+      let points = st.totalPoints;
+      if (rules) {
+        const position = positions?.get(st.playerId);
+        points = position ? rules.score(st, position) : 0;
+      }
+      const existing = statsMap.get(st.playerId);
+      if (existing) {
+        existing.minutes += st.minutes;
+        existing.totalPoints += points;
+      } else {
+        statsMap.set(st.playerId, { minutes: st.minutes, totalPoints: points });
+      }
+    }
+    return statsMap;
+  }
+
+  /**
    * Pure function to calculate gameweek score for a squad given players and their stats.
    * Enables complete automated unit testing without requiring database mocks.
    */
@@ -351,13 +411,11 @@ export class ScoringService {
     return { homePoints: 1, awayPoints: 1 };
   }
 
-  /**
-   * Calculates and persists a squad's score for a specific gameweek into the database.
-   */
-  public async calculateAndPersistSquadScore(
+  /** Loads everything needed to score one squad's gameweek, or null if the squad is gone. */
+  private async loadSquadScoringInputs(
     squadId: string,
     gameweekId: number
-  ): Promise<GameweekCalculationResult> {
+  ): Promise<SquadScoringInputs | null> {
     const squad = await this.db.squad.findUnique({
       where: { id: squadId },
       include: {
@@ -369,7 +427,7 @@ export class ScoringService {
     });
 
     if (!squad) {
-      throw new Error(`Squad ${squadId} not found`);
+      return null;
     }
 
     // Fetch stats for all players in the squad for this gameweek
@@ -380,20 +438,6 @@ export class ScoringService {
         playerId: { in: playerIds },
       },
     });
-
-    const statsMap = new Map<number, { minutes: number; totalPoints: number }>();
-    for (const st of statsList) {
-      const existing = statsMap.get(st.playerId);
-      if (existing) {
-        existing.minutes += st.minutes;
-        existing.totalPoints += st.totalPoints;
-      } else {
-        statsMap.set(st.playerId, {
-          minutes: st.minutes,
-          totalPoints: st.totalPoints,
-        });
-      }
-    }
 
     const formattedPlayers = squad.players.map((sp) => ({
       playerId: sp.playerId,
@@ -412,11 +456,32 @@ export class ScoringService {
         where: { squadId_gameweekId: { squadId, gameweekId } },
       }),
     ]);
-    const chip = chipUsage?.chipType ?? null;
 
-    const result = ScoringService.calculateLineupScore(formattedPlayers, statsMap, {
-      chip,
+    return {
+      players: formattedPlayers,
+      stats: statsList,
+      chip: chipUsage?.chipType ?? null,
       transferCost: existingScore?.transferCost ?? 0,
+    };
+  }
+
+  /**
+   * Calculates and persists a squad's score for a specific gameweek into the database.
+   */
+  public async calculateAndPersistSquadScore(
+    squadId: string,
+    gameweekId: number
+  ): Promise<GameweekCalculationResult> {
+    const inputs = await this.loadSquadScoringInputs(squadId, gameweekId);
+    if (!inputs) {
+      throw new Error(`Squad ${squadId} not found`);
+    }
+    const { chip } = inputs;
+
+    const statsMap = ScoringService.buildStatsMap(inputs.stats);
+    const result = ScoringService.calculateLineupScore(inputs.players, statsMap, {
+      chip,
+      transferCost: inputs.transferCost,
     });
 
     // Persist into SquadGameweekScore
@@ -467,6 +532,74 @@ export class ScoringService {
       totalPoints: result.totalPoints,
       lineupDetails: result.details,
     };
+  }
+
+  /**
+   * Scores every active league with custom rules for `gameweekId` (issue #272)
+   * and persists one LeagueSquadGameweekScore per member squad.
+   *
+   * Each squad's lineup and stats are loaded once and evaluated under every
+   * custom rule set it is entered with, so a squad in several custom leagues
+   * costs one set of queries. Captaincy, auto-subs, chips and transfer costs
+   * apply exactly as in official scoring; only per-player points differ.
+   * Leagues without a scoringConfig are skipped (they use SquadGameweekScore).
+   */
+  public async calculateCustomLeagueScores(gameweekId: number): Promise<CustomLeagueScoringResult> {
+    const leagues = await this.db.league.findMany({
+      where: {
+        status: LeagueStatus.ACTIVE,
+        startGameweekId: { lte: gameweekId },
+        endGameweekId: { gte: gameweekId },
+      },
+      select: {
+        id: true,
+        scoringConfig: true,
+        members: { where: { status: MembershipStatus.ACTIVE }, select: { squadId: true } },
+      },
+    });
+
+    // squadId -> leagues (with compiled rules) that squad must be scored for
+    const leaguesBySquad = new Map<string, Array<{ leagueId: string; rules: CompiledScoringRules }>>();
+    let leaguesScored = 0;
+    for (const league of leagues) {
+      if (league.scoringConfig === null || league.scoringConfig === undefined) continue;
+      let rules: CompiledScoringRules;
+      try {
+        rules = compileScoringRules(league.scoringConfig);
+      } catch (error) {
+        console.error(`[scoring] League ${league.id} has invalid custom scoring rules; skipped:`, error);
+        continue;
+      }
+      leaguesScored++;
+      for (const member of league.members) {
+        const entries = leaguesBySquad.get(member.squadId) ?? [];
+        entries.push({ leagueId: league.id, rules });
+        leaguesBySquad.set(member.squadId, entries);
+      }
+    }
+
+    let scoresWritten = 0;
+    for (const [squadId, entries] of leaguesBySquad) {
+      const inputs = await this.loadSquadScoringInputs(squadId, gameweekId);
+      if (!inputs) continue;
+      const positions = new Map(inputs.players.map((p) => [p.playerId, p.position]));
+
+      for (const { leagueId, rules } of entries) {
+        const statsMap = ScoringService.buildStatsMap(inputs.stats, positions, rules);
+        const result = ScoringService.calculateLineupScore(inputs.players, statsMap, {
+          chip: inputs.chip,
+          transferCost: inputs.transferCost,
+        });
+        await this.db.leagueSquadGameweekScore.upsert({
+          where: { leagueId_squadId_gameweekId: { leagueId, squadId, gameweekId } },
+          update: { points: result.totalPoints, calculatedAt: new Date() },
+          create: { leagueId, squadId, gameweekId, points: result.totalPoints },
+        });
+        scoresWritten++;
+      }
+    }
+
+    return { leaguesScored, scoresWritten };
   }
 
   /**
