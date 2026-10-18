@@ -266,7 +266,8 @@ export class SybilDetectionGraphService {
         const raw = await this.redis.get(key);
         if (raw) return JSON.parse(raw) as SybilGraphReport;
       } catch (err) {
-        console.warn(`[security] Redis GET error for ${key}:`, (err as Error).message);
+        // Constant format string: the key embeds the request's leagueId
+        console.warn("[security] Redis GET error for %s: %s", key, (err as Error).message);
       }
     }
     const entry = this.memory.get(key);
@@ -279,7 +280,8 @@ export class SybilDetectionGraphService {
       try {
         await this.redis.set(key, JSON.stringify(report), "EX", this.cacheTtlSeconds);
       } catch (err) {
-        console.warn(`[security] Redis SET error for ${key}:`, (err as Error).message);
+        // Constant format string: the key embeds the request's leagueId
+        console.warn("[security] Redis SET error for %s: %s", key, (err as Error).message);
       }
     }
   }
