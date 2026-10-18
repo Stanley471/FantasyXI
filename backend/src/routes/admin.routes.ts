@@ -15,6 +15,7 @@ import {
 } from "../controllers/leagueAdmin.controller.js";
 import { listSecurityAnomalies } from "../controllers/securityAdmin.controller.js";
 import { verifyAuditChainHandler } from "../controllers/audit.controller.js";
+import { getFplTelemetry } from "../controllers/fplTelemetry.controller.js";
 import { requireAuth, requirePermission } from "../middleware/authMiddleware.js";
 import { Permission } from "../types/index.js";
 
@@ -48,6 +49,10 @@ router.get("/audit/verify", requirePermission(Permission.FINANCIAL_AUDIT_READ), 
 // GET /api/v1/admin/security/anomalies (issue #117): failed-login spikes and
 // new-device/new-IP logins detected across all accounts, for admin review.
 router.get("/security/anomalies", listSecurityAnomalies);
+
+// GET /api/v1/admin/fpl/telemetry (issue #275): FPL client circuit breaker
+// state, cache-tier counters and data staleness.
+router.get("/fpl/telemetry", requirePermission(Permission.SYSTEM_HEALTH_READ), getFplTelemetry);
 
 // GET /api/v1/admin/leagues/:leagueId/h2h-anomalies
 router.get("/leagues/:leagueId/h2h-anomalies", listH2HAnomalies);

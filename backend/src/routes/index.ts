@@ -15,6 +15,7 @@ import financialRoutes from "./financial.routes.js";
 import sep8Routes from "./sep8.routes.js";
 import webhookRoutes from "./webhook.routes.js";
 import { replicaReads } from "../middleware/readConsistency.js";
+import { fplDataFreshness } from "../middleware/fplDataFreshness.js";
 
 /**
  * Main API v1 router.
@@ -33,13 +34,14 @@ apiV1Router.use("/webhooks", webhookRoutes);
 
 // Read-heavy public data: GET requests may be served by the nearest read replica.
 // All other routers (auth, squads, admin, sync) always use the primary database.
-apiV1Router.use("/players", replicaReads, playerRoutes);
-apiV1Router.use("/teams", replicaReads, teamRoutes);
-apiV1Router.use("/gameweeks", replicaReads, gameweekRoutes);
-apiV1Router.use("/fixtures", replicaReads, fixtureRoutes);
+// FPL-derived reads advertise X-Data-Stale while the FPL upstream is degraded (issue #275)
+apiV1Router.use("/players", replicaReads, fplDataFreshness, playerRoutes);
+apiV1Router.use("/teams", replicaReads, fplDataFreshness, teamRoutes);
+apiV1Router.use("/gameweeks", replicaReads, fplDataFreshness, gameweekRoutes);
+apiV1Router.use("/fixtures", replicaReads, fplDataFreshness, fixtureRoutes);
 apiV1Router.use("/squads", squadRoutes);
 apiV1Router.use("/leagues", replicaReads, leagueRoutes);
-apiV1Router.use("/live", replicaReads, liveRoutes);
+apiV1Router.use("/live", replicaReads, fplDataFreshness, liveRoutes);
 // Historical analytics are aggregates of settled scores, so replica lag is harmless
 apiV1Router.use("/analytics", replicaReads, analyticsRoutes);
 apiV1Router.use("/leaderboard", replicaReads, leaderboardRoutes);

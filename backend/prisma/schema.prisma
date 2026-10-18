@@ -531,6 +531,16 @@ model SquadGameweekScore {
   @@map("squad_gameweek_scores")
 }
 
+/// Last good FPL API payload per endpoint: the L3 fallback served when the
+/// circuit breaker is open and the memory/Redis caches are cold (issue #275).
+model FplApiSnapshot {
+  cacheKey   String   @id @map("cache_key")
+  payload    Json
+  capturedAt DateTime @default(now()) @map("captured_at")
+
+  @@map("fpl_api_snapshots")
+}
+
 /// Audit record of a single transfer (one player out, one player in).
 model SquadTransfer {
   id          Int      @id @default(autoincrement())

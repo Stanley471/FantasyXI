@@ -7,6 +7,15 @@
  * - Automatic probe trial in HALF_OPEN after cooldown period
  * - Decorrelated jitter backoff calculation
  * - Fallback to cached/stale data
+ *
+ * Half-open health probing (issue #275):
+ * - Only one probe request is let through while HALF_OPEN; concurrent callers
+ *   short-circuit to their fallback instead of stampeding a recovering upstream.
+ * - The first cooldown after tripping can be jittered (cooldownJitterRatio)
+ *   so multiple API instances do not probe in lockstep.
+ * - Each failed probe re-opens the circuit with a decorrelated-jitter cooldown
+ *   that grows toward maxCooldownMs, backing off a persistently-down upstream.
+ * - Lifetime counters (getStats) feed the admin telemetry endpoint.
  */
 
 export enum CircuitState {
@@ -31,7 +40,27 @@ export interface CircuitBreakerOptions {
   successThreshold?: number;
   baseBackoffMs?: number;
   maxBackoffMs?: number;
+  /** Upper bound for the cooldown after repeated failed half-open probes. Default 8x cooldownPeriodMs. */
+  maxCooldownMs?: number;
+  /** Random extra fraction (0-1) added to the first cooldown after tripping. Default 0. */
+  cooldownJitterRatio?: number;
   onStateChange?: (from: CircuitState, to: CircuitState) => void;
+}
+
+export interface CircuitBreakerStats {
+  state: CircuitState;
+  consecutiveFailures: number;
+  lastFailureTime: number | null;
+  nextAttemptTime: number;
+  remainingCooldownMs: number;
+  currentCooldownMs: number;
+  lastStateChangeAt: number | null;
+  totalRequests: number;
+  totalSuccesses: number;
+  totalFailures: number;
+  /** Requests answered without calling upstream because the circuit was open. */
+  totalShortCircuited: number;
+  timesOpened: number;
 }
 
 export function calculateDecorrelatedJitter(
@@ -51,12 +80,22 @@ export class CircuitBreaker {
   private halfOpenSuccesses = 0;
   private nextAttemptTime = 0;
   private lastFailureTime: number | null = null;
+  private currentCooldownMs = 0;
+  private probeInFlight = false;
+  private lastStateChangeAt: number | null = null;
+  private totalRequests = 0;
+  private totalSuccesses = 0;
+  private totalFailures = 0;
+  private totalShortCircuited = 0;
+  private timesOpened = 0;
 
   public readonly failureThreshold: number;
   public readonly cooldownPeriodMs: number;
   public readonly successThreshold: number;
   public readonly baseBackoffMs: number;
   public readonly maxBackoffMs: number;
+  public readonly maxCooldownMs: number;
+  public readonly cooldownJitterRatio: number;
   private onStateChange?: (from: CircuitState, to: CircuitState) => void;
 
   constructor(options: CircuitBreakerOptions = {}) {
@@ -65,6 +104,11 @@ export class CircuitBreaker {
     this.successThreshold = options.successThreshold ?? 1;
     this.baseBackoffMs = options.baseBackoffMs ?? 1000;
     this.maxBackoffMs = options.maxBackoffMs ?? 30000;
+    this.maxCooldownMs = Math.max(
+      this.cooldownPeriodMs,
+      options.maxCooldownMs ?? this.cooldownPeriodMs * 8
+    );
+    this.cooldownJitterRatio = Math.min(Math.max(options.cooldownJitterRatio ?? 0, 0), 1);
     this.onStateChange = options.onStateChange;
   }
 
@@ -92,28 +136,56 @@ export class CircuitBreaker {
     return Math.max(0, this.nextAttemptTime - Date.now());
   }
 
-  public getStats() {
+  public getStats(): CircuitBreakerStats {
     return {
       state: this.getState(),
       consecutiveFailures: this.consecutiveFailures,
       lastFailureTime: this.lastFailureTime,
       nextAttemptTime: this.nextAttemptTime,
       remainingCooldownMs: this.getRemainingCooldownMs(),
+      currentCooldownMs: this.currentCooldownMs,
+      lastStateChangeAt: this.lastStateChangeAt,
+      totalRequests: this.totalRequests,
+      totalSuccesses: this.totalSuccesses,
+      totalFailures: this.totalFailures,
+      totalShortCircuited: this.totalShortCircuited,
+      timesOpened: this.timesOpened,
     };
+  }
+
+  /**
+   * Cooldown before the next half-open probe. Tripping from CLOSED waits the
+   * base cooldown (plus optional jitter); re-opening after a failed probe
+   * grows the wait with decorrelated jitter, capped at maxCooldownMs.
+   */
+  private nextCooldownMs(fromState: CircuitState): number {
+    if (fromState === CircuitState.HALF_OPEN && this.currentCooldownMs > 0) {
+      return calculateDecorrelatedJitter(
+        this.currentCooldownMs,
+        this.cooldownPeriodMs,
+        this.maxCooldownMs
+      );
+    }
+    const jitter = Math.floor(Math.random() * this.cooldownPeriodMs * this.cooldownJitterRatio);
+    return Math.min(this.maxCooldownMs, this.cooldownPeriodMs + jitter);
   }
 
   private transitionTo(newState: CircuitState): void {
     if (this.state === newState) return;
     const oldState = this.state;
     this.state = newState;
+    this.lastStateChangeAt = Date.now();
     if (newState === CircuitState.CLOSED) {
       this.consecutiveFailures = 0;
       this.halfOpenSuccesses = 0;
       this.nextAttemptTime = 0;
+      this.currentCooldownMs = 0;
     } else if (newState === CircuitState.HALF_OPEN) {
       this.halfOpenSuccesses = 0;
     } else if (newState === CircuitState.OPEN) {
-      this.nextAttemptTime = Date.now() + this.cooldownPeriodMs;
+      this.currentCooldownMs = this.nextCooldownMs(oldState);
+      this.nextAttemptTime = Date.now() + this.currentCooldownMs;
+      this.timesOpened++;
     }
     if (this.onStateChange) {
       this.onStateChange(oldState, newState);
@@ -164,28 +236,42 @@ export class CircuitBreaker {
     fallback?: () => Promise<T> | T
   ): Promise<T> {
     const currentState = this.getState();
+    this.totalRequests++;
 
-    if (currentState === CircuitState.OPEN) {
+    // While HALF_OPEN a single probe tests the upstream; everyone else waits it out
+    const shortCircuit =
+      currentState === CircuitState.OPEN ||
+      (currentState === CircuitState.HALF_OPEN && this.probeInFlight);
+
+    if (shortCircuit) {
+      this.totalShortCircuited++;
       const remaining = this.getRemainingCooldownMs();
       if (fallback) {
         return await fallback();
       }
       throw new CircuitBreakerOpenError(
-        `FPL API Circuit Breaker is OPEN. Skipping request. Try again in ${Math.ceil(remaining / 1000)}s.`,
+        `FPL API Circuit Breaker is ${currentState}. Skipping request. Try again in ${Math.ceil(remaining / 1000)}s.`,
         remaining
       );
     }
 
+    const isProbe = currentState === CircuitState.HALF_OPEN;
+    if (isProbe) this.probeInFlight = true;
+
     try {
       const result = await action();
+      this.totalSuccesses++;
       this.recordSuccess();
       return result;
     } catch (err) {
+      this.totalFailures++;
       this.recordFailure(err);
       if (fallback) {
         return await fallback();
       }
       throw err;
+    } finally {
+      if (isProbe) this.probeInFlight = false;
     }
   }
 }
