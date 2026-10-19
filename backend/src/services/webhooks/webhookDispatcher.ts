@@ -10,6 +10,154 @@ export interface WebhookEndpoint {
   isActive: boolean;
 }
 
+export type WebhookSubscription = WebhookEndpoint;
+
+export class WebhookDuplicateSubscriptionError extends Error {
+  public readonly statusCode = 409;
+  constructor(message: string = "Webhook subscription already exists for this URL and event") {
+    super(message);
+    this.name = "WebhookDuplicateSubscriptionError";
+  }
+}
+
+/**
+ * Normalizes a webhook target URL:
+ * - Trims whitespace
+ * - Parses and validates URL format
+ * - Lower-cases protocol and hostname
+ * - Removes trailing slash(es)
+ */
+export function normalizeWebhookUrl(rawUrl: string): string {
+  if (!rawUrl || typeof rawUrl !== "string") {
+    throw new Error("Invalid URL provided");
+  }
+  const trimmed = rawUrl.trim();
+  const parsed = new URL(trimmed);
+  parsed.protocol = parsed.protocol.toLowerCase();
+  parsed.hostname = parsed.hostname.toLowerCase();
+  let href = parsed.toString();
+  return href.replace(/\/+(\?|#|$)/, "$1");
+}
+
+export interface WebhookSubscriptionCandidate {
+  userId: string;
+  url: string;
+  events: string[];
+  id?: string;
+}
+
+/**
+ * Checks whether an active subscription already exists for the given user, URL, and event combination.
+ * Excludes candidate id if specified (e.g. updating an existing subscription).
+ */
+export function findDuplicateWebhookSubscription(
+  existingSubscriptions: Iterable<WebhookEndpoint>,
+  candidateOrUserId: WebhookSubscriptionCandidate | string,
+  url?: string,
+  events?: string[],
+  excludeEndpointId?: string
+): { duplicate: boolean; conflictingEndpoint?: WebhookEndpoint; conflictingEvent?: string } {
+  let candidate: WebhookSubscriptionCandidate;
+  if (typeof candidateOrUserId === "string") {
+    candidate = {
+      userId: candidateOrUserId,
+      url: url!,
+      events: events || [],
+      id: excludeEndpointId,
+    };
+  } else {
+    candidate = candidateOrUserId;
+  }
+
+  let normalizedCandidateUrl: string;
+  try {
+    normalizedCandidateUrl = normalizeWebhookUrl(candidate.url);
+  } catch {
+    return { duplicate: false };
+  }
+
+  const candidateEvents = new Set(candidate.events);
+
+  for (const existing of existingSubscriptions) {
+    if (candidate.id && existing.id === candidate.id) {
+      continue;
+    }
+    if (!existing.isActive) {
+      continue;
+    }
+    if (existing.userId !== candidate.userId) {
+      continue;
+    }
+
+    let normalizedExistingUrl: string;
+    try {
+      normalizedExistingUrl = normalizeWebhookUrl(existing.url);
+    } catch {
+      continue;
+    }
+
+    if (normalizedExistingUrl !== normalizedCandidateUrl) {
+      continue;
+    }
+
+    for (const ev of existing.events) {
+      if (candidateEvents.has(ev)) {
+        return {
+          duplicate: true,
+          conflictingEndpoint: existing,
+          conflictingEvent: ev,
+        };
+      }
+    }
+  }
+
+  return { duplicate: false };
+}
+
+/**
+ * Validates compound uniqueness for a webhook subscription (user + normalized URL + event).
+ * Throws WebhookDuplicateSubscriptionError (409) if an active subscription already exists.
+ */
+export function validateWebhookUniqueness(
+  existingSubscriptions: Iterable<WebhookEndpoint>,
+  candidateOrUserId: WebhookSubscriptionCandidate | string,
+  url?: string,
+  events?: string[],
+  excludeEndpointId?: string
+): void {
+  const result = findDuplicateWebhookSubscription(
+    existingSubscriptions,
+    candidateOrUserId,
+    url,
+    events,
+    excludeEndpointId
+  );
+  if (result.duplicate) {
+    throw new WebhookDuplicateSubscriptionError(
+      "Webhook subscription already exists for this URL and event"
+    );
+  }
+}
+
+export const validateWebhookSubscriptionUniqueness = validateWebhookUniqueness;
+
+export function isDuplicateWebhookSubscription(
+  existingSubscriptions: Iterable<WebhookEndpoint>,
+  candidateOrUserId: WebhookSubscriptionCandidate | string,
+  url?: string,
+  events?: string[],
+  excludeEndpointId?: string
+): boolean {
+  return findDuplicateWebhookSubscription(
+    existingSubscriptions,
+    candidateOrUserId,
+    url,
+    events,
+    excludeEndpointId
+  ).duplicate;
+}
+
+
 export interface WebhookDeliveryRecord {
   id: string;
   endpointId: string;
