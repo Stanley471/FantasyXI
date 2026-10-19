@@ -673,6 +673,27 @@ model ContractEvent {
   @@map("contract_events")
 }
 
+/// Stores decoded Soroban smart contract invocation events with ledger timestamp and topic metadata
+model SorobanContractEvent {
+  id          String   @id @default(uuid())
+  contractId  String?  @map("contract_id")
+  eventType   String   @map("event_type")
+  topics      Json?
+  leagueId    String?  @map("league_id")
+  txHash      String   @map("tx_hash")
+  ledgerSeq   Int      @map("ledger_seq")
+  timestamp   DateTime @default(now())
+  pagingToken String?  @unique @map("paging_token")
+  payload     Json
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([eventType])
+  @@index([leagueId])
+  @@index([txHash])
+  @@index([ledgerSeq])
+  @@map("soroban_contract_events")
+}
+
 /// Tracks player price movements detected by the FPL tracking daemon
 model PlayerPriceChange {
   id        Int      @id @default(autoincrement())

@@ -1,5 +1,9 @@
 import { Request, Response, NextFunction } from "express";
 import {
+  defaultWalletDepositLimiter,
+  recordDepositTxLookupOutcome,
+} from "../middleware/rateLimiter.js";
+import {
   financialService,
   FinancialValidationError,
   FinancialNotFoundError,
@@ -140,6 +144,18 @@ export async function verifyPayment(
       return;
     }
 
+    const walletAddress = typeof req.body?.stellarAddress === "string" ? req.body.stellarAddress.trim() : null;
+    const lockoutSecs = defaultWalletDepositLimiter.getLockoutRemainingSeconds(walletAddress, req.user.id);
+    if (lockoutSecs > 0) {
+      res.setHeader?.("Retry-After", String(lockoutSecs));
+      res.status(429).json({
+        success: false,
+        message: "Wallet address is temporarily locked due to repeated non-existent transaction hashes.",
+        retryAfter: lockoutSecs,
+      });
+      return;
+    }
+
     const verification = await financialService.verifyAndConfirmPayment(
       req.user.id,
       leagueId,
@@ -147,6 +163,23 @@ export async function verifyPayment(
     );
 
     if (!verification.success) {
+      const isNotFound = /not found|not_found|404/i.test(String(verification.error || ""));
+      if (isNotFound) {
+        const outcome = await recordDepositTxLookupOutcome({
+          walletAddress,
+          userId: req.user.id,
+          txExists: false,
+        });
+        if (outcome.lockedOut) {
+          res.setHeader?.("Retry-After", String(outcome.retryAfterSeconds));
+          res.status(429).json({
+            success: false,
+            message: "Wallet address locked after 3 consecutive non-existent transaction hashes.",
+            retryAfter: outcome.retryAfterSeconds,
+          });
+          return;
+        }
+      }
       res.status(422).json({
         success: false,
         message: verification.error || "Payment verification failed",
@@ -155,6 +188,7 @@ export async function verifyPayment(
       return;
     }
 
+    await recordDepositTxLookupOutcome({ walletAddress, userId: req.user.id, txExists: true });
     res.status(200).json({
       success: true,
       message: "Payment verified successfully. Membership activated!",

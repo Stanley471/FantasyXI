@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import { prisma } from "../config/db.js";
 import { Position } from "../types/index.js";
+import { playerAnalyticsEngine } from "../services/analytics/playerAnalyticsEngine.js";
 
 /**
  * Player Controller.
@@ -284,3 +285,45 @@ export async function getPlayerOwnershipStats(
   }
 }
 
+
+export async function getPlayerAnalytics(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const id = parseInt(req.params.id as string, 10);
+    if (isNaN(id) || id <= 0) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid player ID",
+      });
+      return;
+    }
+
+    const gameweekIdParam = req.query.gameweekId
+      ? parseInt(req.query.gameweekId as string, 10)
+      : undefined;
+    const targetGameweekId =
+      gameweekIdParam !== undefined && !isNaN(gameweekIdParam)
+        ? gameweekIdParam
+        : undefined;
+
+    const result = await playerAnalyticsEngine.getPlayerAnalytics(id, targetGameweekId);
+    if (!result) {
+      res.status(404).json({
+        success: false,
+        message: `Player with ID ${id} not found`,
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      data: result.prediction,
+      cached: result.cached,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
