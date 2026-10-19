@@ -4,6 +4,13 @@ import React, { useEffect, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
 import { api, ApiError } from "@/lib/api";
 import { describeGoogleAuthError, redirectToGoogleLink } from "@/lib/googleAuth";
+import {
+  isWebAuthnSupported,
+  listUserPasskeys,
+  registerPasskey,
+  revokeUserPasskey,
+} from "@/lib/passkeyAuth";
+import { PasskeyCredential } from "@/types";
 import { Button } from "@/components/ui/Button";
 import { IconGoogle, IconShield, IconCheck, IconAlertCircle } from "@/components/ui/Icons";
 
@@ -24,8 +31,8 @@ const inputClass =
   "w-full px-3 py-2 bg-slate-950/70 border border-slate-700/80 rounded-lg text-slate-100 placeholder-slate-500 text-sm focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors";
 
 /**
- * Lets a manager see and manage how they sign in: email & password and/or
- * Google. Either method opens the same account.
+ * Lets a manager see and manage how they sign in: email & password, Google,
+ * and WebAuthn Passkeys. Any method opens the same account.
  */
 export function SignInMethods() {
   const { user, refreshUser } = useAuth();
@@ -33,11 +40,27 @@ export function SignInMethods() {
   const hasGoogle = Boolean(user?.authProviders?.google);
 
   const [notice, setNotice] = useState<Notice>(readLinkResult);
-  const [busy, setBusy] = useState<"link" | "unlink" | "password" | null>(null);
+  const [busy, setBusy] = useState<"link" | "unlink" | "password" | "passkey" | string | null>(null);
   const [showPasswordForm, setShowPasswordForm] = useState(false);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+
+  const [passkeys, setPasskeys] = useState<PasskeyCredential[]>([]);
+  const [passkeyName, setPasskeyName] = useState("");
+  const [showAddPasskey, setShowAddPasskey] = useState(false);
+  const [webAuthnSupported, setWebAuthnSupported] = useState(false);
+
+  const hasPasskeys = passkeys.length > 0 || Boolean(user?.authProviders?.passkeys);
+
+  useEffect(() => {
+    setWebAuthnSupported(isWebAuthnSupported());
+    listUserPasskeys()
+      .then((list) => setPasskeys(list))
+      .catch(() => {
+        // Ignore initial load error if unauthenticated
+      });
+  }, []);
 
   // After returning from Google: reload the profile and drop the result from the URL
   useEffect(() => {
@@ -51,7 +74,7 @@ export function SignInMethods() {
   }, []);
 
   const errorText = (err: unknown, fallback: string) =>
-    err instanceof ApiError ? err.message : fallback;
+    err instanceof ApiError ? err.message : err instanceof Error ? err.message : fallback;
 
   const handleLink = async () => {
     setNotice(null);
@@ -107,6 +130,42 @@ export function SignInMethods() {
       setConfirmPassword("");
     } catch (err) {
       setNotice({ kind: "error", text: errorText(err, "Could not update your password.") });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleRegisterPasskey = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setNotice(null);
+    setBusy("passkey");
+    try {
+      const { credential } = await registerPasskey(passkeyName);
+      setPasskeys((prev) => [credential, ...prev]);
+      setPasskeyName("");
+      setShowAddPasskey(false);
+      await refreshUser();
+      setNotice({
+        kind: "success",
+        text: `Passkey "${credential.name}" registered. You can now sign in without a password.`,
+      });
+    } catch (err) {
+      setNotice({ kind: "error", text: errorText(err, "Could not register passkey.") });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleRevokePasskey = async (id: string, name: string) => {
+    setNotice(null);
+    setBusy(`revoke:${id}`);
+    try {
+      await revokeUserPasskey(id);
+      setPasskeys((prev) => prev.filter((p) => p.id !== id));
+      await refreshUser();
+      setNotice({ kind: "success", text: `Passkey "${name}" revoked.` });
+    } catch (err) {
+      setNotice({ kind: "error", text: errorText(err, "Could not revoke passkey.") });
     } finally {
       setBusy(null);
     }
@@ -206,7 +265,7 @@ export function SignInMethods() {
               <p className="text-slate-200 font-semibold">Google</p>
               <p className="text-slate-500 mt-0.5">
                 {hasGoogle ? "Linked" : "Not linked"}
-                {hasGoogle && !hasPassword && " · set a password before unlinking"}
+                {hasGoogle && !hasPassword && !hasPasskeys && " · set a password or passkey before unlinking"}
               </p>
             </div>
           </div>
@@ -217,7 +276,7 @@ export function SignInMethods() {
               size="sm"
               onClick={handleUnlink}
               isLoading={busy === "unlink"}
-              disabled={!hasPassword}
+              disabled={!hasPassword && !hasPasskeys}
             >
               Unlink
             </Button>
@@ -227,9 +286,85 @@ export function SignInMethods() {
             </Button>
           )}
         </div>
+
+        {/* Passkeys (WebAuthn) */}
+        <div className="py-3 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-slate-200 font-semibold">Passkeys (WebAuthn)</p>
+              <p className="text-slate-500 mt-0.5">
+                {passkeys.length > 0
+                  ? `${passkeys.length} registered passkey${passkeys.length === 1 ? "" : "s"}`
+                  : "Sign in with Face ID, Touch ID, Windows Hello, or a hardware security key"}
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              disabled={!webAuthnSupported}
+              onClick={() => setShowAddPasskey((open) => !open)}
+            >
+              {showAddPasskey ? "Cancel" : "Add passkey"}
+            </Button>
+          </div>
+
+          {showAddPasskey && (
+            <form onSubmit={handleRegisterPasskey} className="flex flex-col sm:flex-row gap-2">
+              <input
+                type="text"
+                placeholder="Passkey label (e.g. MacBook Touch ID, YubiKey)"
+                aria-label="Passkey label"
+                value={passkeyName}
+                onChange={(e) => setPasskeyName(e.target.value)}
+                className={inputClass}
+                maxLength={64}
+              />
+              <Button type="submit" size="sm" isLoading={busy === "passkey"}>
+                Register passkey
+              </Button>
+            </form>
+          )}
+
+          {passkeys.length > 0 && (
+            <ul className="space-y-2 pt-1">
+              {passkeys.map((pk) => {
+                const isOnlyMethod = !hasPassword && !hasGoogle && passkeys.length <= 1;
+                return (
+                  <li
+                    key={pk.id}
+                    className="flex items-center justify-between gap-3 px-3 py-2 rounded-lg bg-slate-950/50 border border-slate-800/80"
+                  >
+                    <div>
+                      <p className="text-slate-200 font-medium">{pk.name}</p>
+                      <p className="text-slate-500 text-[11px]">
+                        Added {new Date(pk.createdAt).toLocaleDateString()}
+                        {pk.lastUsedAt
+                          ? ` · Last used ${new Date(pk.lastUsedAt).toLocaleDateString()}`
+                          : " · Never used"}
+                        {pk.backedUp ? " · Synced" : ""}
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={isOnlyMethod}
+                      isLoading={busy === `revoke:${pk.id}`}
+                      onClick={() => handleRevokePasskey(pk.id, pk.name)}
+                    >
+                      Revoke
+                    </Button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
       </div>
     </section>
   );
 }
 
 export default SignInMethods;
+

@@ -6,7 +6,8 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { api, ApiError } from "@/lib/api";
 import { describeGoogleAuthError, redirectToGoogleSignIn, safeReturnTo } from "@/lib/googleAuth";
-import { IconFootball, IconGoogle, IconAlertCircle, IconCheck } from "@/components/ui/Icons";
+import { authenticateWithPasskey } from "@/lib/passkeyAuth";
+import { IconFootball, IconGoogle, IconShield, IconAlertCircle, IconCheck } from "@/components/ui/Icons";
 import { Button } from "@/components/ui/Button";
 
 function LoginForm() {
@@ -22,6 +23,7 @@ function LoginForm() {
   const [showPassword, setShowPassword] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(describeGoogleAuthError(urlError));
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isPasskeyLoading, setIsPasskeyLoading] = useState(false);
 
   // If already authenticated, redirect immediately
   useEffect(() => {
@@ -83,6 +85,30 @@ function LoginForm() {
     redirectToGoogleSignIn(returnTo);
   };
 
+  const handlePasskeyLogin = async () => {
+    setErrorMsg(null);
+    setIsPasskeyLoading(true);
+    try {
+      const result = await authenticateWithPasskey(email);
+      if (result?.token && result?.user) {
+        login(result.token, result.user);
+        router.push(returnTo);
+      } else {
+        setErrorMsg("Unexpected response from passkey authentication.");
+      }
+    } catch (err: unknown) {
+      if (err instanceof ApiError) {
+        setErrorMsg(err.message || "Passkey authentication failed.");
+      } else if (err instanceof Error) {
+        setErrorMsg(err.message);
+      } else {
+        setErrorMsg("Could not sign in with passkey.");
+      }
+    } finally {
+      setIsPasskeyLoading(false);
+    }
+  };
+
   return (
     <div className="w-full max-w-md mx-auto">
       {/* Brand Header */}
@@ -111,15 +137,28 @@ function LoginForm() {
           </div>
         )}
 
-        {/* Google OAuth Button */}
-        <button
-          type="button"
-          onClick={handleGoogleLogin}
-          className="w-full flex items-center justify-center gap-3 px-4 py-3 rounded-lg border border-slate-700 bg-slate-800/80 hover:bg-slate-700 text-slate-100 font-medium text-sm transition-all focus:outline-none focus:ring-2 focus:ring-emerald-500/50 shadow-sm group"
-        >
-          <IconGoogle className="w-5 h-5 flex-shrink-0 group-hover:scale-105 transition-transform" />
-          <span>Continue with Google</span>
-        </button>
+        <div className="space-y-3">
+          {/* Google OAuth Button */}
+          <button
+            type="button"
+            onClick={handleGoogleLogin}
+            className="w-full flex items-center justify-center gap-3 px-4 py-3 rounded-lg border border-slate-700 bg-slate-800/80 hover:bg-slate-700 text-slate-100 font-medium text-sm transition-all focus:outline-none focus:ring-2 focus:ring-emerald-500/50 shadow-sm group"
+          >
+            <IconGoogle className="w-5 h-5 flex-shrink-0 group-hover:scale-105 transition-transform" />
+            <span>Continue with Google</span>
+          </button>
+
+          {/* Passkey / WebAuthn Button */}
+          <button
+            type="button"
+            onClick={handlePasskeyLogin}
+            disabled={isPasskeyLoading}
+            className="w-full flex items-center justify-center gap-3 px-4 py-3 rounded-lg border border-emerald-500/30 bg-emerald-950/30 hover:bg-emerald-900/40 text-emerald-200 font-medium text-sm transition-all focus:outline-none focus:ring-2 focus:ring-emerald-500/50 shadow-sm group disabled:opacity-60"
+          >
+            <IconShield className="w-5 h-5 text-emerald-400 flex-shrink-0 group-hover:scale-105 transition-transform" />
+            <span>{isPasskeyLoading ? "Verifying Passkey..." : "Sign in with a Passkey"}</span>
+          </button>
+        </div>
 
         {/* Tactical Divider */}
         <div className="relative my-6">
@@ -132,6 +171,7 @@ function LoginForm() {
             </span>
           </div>
         </div>
+
 
         {/* Standard Email/Password Form */}
         <form onSubmit={handleSubmit} className="space-y-4">

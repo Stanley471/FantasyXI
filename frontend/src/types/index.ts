@@ -63,6 +63,17 @@ export enum ChipType {
 // API response types
 // ============================================================
 
+export interface PasskeyCredential {
+  id: string;
+  credentialId: string;
+  name: string;
+  deviceType: string;
+  backedUp: boolean;
+  transports: string[];
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
 export interface User {
   id: string;
   email: string;
@@ -73,10 +84,12 @@ export interface User {
   authProviders?: {
     password: boolean;
     google: boolean;
+    passkeys?: boolean;
   };
   createdAt: string;
   updatedAt?: string;
 }
+
 
 export interface Team {
   id: number;

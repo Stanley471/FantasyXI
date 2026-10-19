@@ -71,9 +71,14 @@ export function toSafeUser(user: {
   role?: UserRole | string | null;
   passwordHash?: string | null;
   googleId?: string | null;
+  hasPasskeys?: boolean;
+  passkeys?: unknown[];
   createdAt: Date;
   updatedAt: Date;
 }): SafeUser {
+  const hasPasskeys = Boolean(
+    user.hasPasskeys || (Array.isArray(user.passkeys) && user.passkeys.length > 0)
+  );
   return {
     id: user.id,
     email: user.email,
@@ -84,6 +89,7 @@ export function toSafeUser(user: {
     authProviders: {
       password: Boolean(user.passwordHash),
       google: Boolean(user.googleId),
+      ...(hasPasskeys ? { passkeys: true } : {}),
     },
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
@@ -515,6 +521,17 @@ export class AuthService {
     }
   }
 
+  private async countUserPasskeys(userId: string): Promise<number> {
+    if (typeof this.db?.webAuthnCredential?.count !== "function") {
+      return 0;
+    }
+    try {
+      return await this.db.webAuthnCredential.count({ where: { userId } });
+    } catch {
+      return 0;
+    }
+  }
+
   /**
    * Removes the Google identity from an account. Refused while Google is the
    * only way to sign in, so users cannot lock themselves out.
@@ -527,7 +544,8 @@ export class AuthService {
     if (!user.googleId) {
       return toSafeUser(user);
     }
-    if (!user.passwordHash) {
+    const passkeyCount = await this.countUserPasskeys(userId);
+    if (!user.passwordHash && passkeyCount === 0) {
       throw new AuthConflictError(
         "Set a password before unlinking Google, otherwise you will not be able to sign in."
       );
@@ -537,7 +555,7 @@ export class AuthService {
       where: { id: userId },
       data: { googleId: null },
     });
-    return toSafeUser(updated);
+    return toSafeUser({ ...updated, hasPasskeys: passkeyCount > 0 });
   }
 
   /**
@@ -591,8 +609,10 @@ export class AuthService {
       throw new AuthNotFoundError("User not found");
     }
 
-    return toSafeUser(user);
+    const passkeyCount = await this.countUserPasskeys(userId);
+    return toSafeUser({ ...user, hasPasskeys: passkeyCount > 0 });
   }
 }
 
 export const authService = new AuthService();
+

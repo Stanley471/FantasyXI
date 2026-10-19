@@ -10,6 +10,12 @@ import {
   unlinkGoogleAccount,
   setPassword,
   getUserReferralCode,
+  generatePasskeyRegistrationOptions,
+  verifyPasskeyRegistration,
+  generatePasskeyAuthenticationOptions,
+  verifyPasskeyAuthentication,
+  listPasskeys,
+  revokePasskey,
 } from "../controllers/auth.controller.js";
 import { requireAuth, requirePermission } from "../middleware/authMiddleware.js";
 import { Permission } from "../types/index.js";
@@ -56,5 +62,22 @@ router.delete("/google/link", requireAuth, unlinkGoogleAccount);
 // POST /api/v1/auth/password (Protected: add a password to a Google account, or change it)
 router.post("/password", authRateLimiter, requireAuth, setPassword);
 
+// WebAuthn / Passkey routes
+router.post("/passkeys/register/options", authRateLimiter, requireAuth, generatePasskeyRegistrationOptions);
+router.post("/passkeys/register/verify", authRateLimiter, requireAuth, verifyPasskeyRegistration);
+router.post("/passkeys/login/options", authRateLimiter, generatePasskeyAuthenticationOptions);
+router.post("/passkeys/login/verify", authRateLimiter, verifyPasskeyAuthentication);
+router.get("/passkeys", requireAuth, authenticatedRateLimiter, listPasskeys);
+router.delete("/passkeys/:id", authRateLimiter, requireAuth, revokePasskey);
+
+// Standard /webauthn/* aliases
+router.post("/webauthn/register/options", authRateLimiter, requireAuth, generatePasskeyRegistrationOptions);
+router.post("/webauthn/register/verify", authRateLimiter, requireAuth, verifyPasskeyRegistration);
+router.post("/webauthn/login/options", authRateLimiter, generatePasskeyAuthenticationOptions);
+router.post("/webauthn/login/verify", authRateLimiter, verifyPasskeyAuthentication);
+router.get("/webauthn/credentials", requireAuth, authenticatedRateLimiter, listPasskeys);
+router.delete("/webauthn/credentials/:id", authRateLimiter, requireAuth, revokePasskey);
+
 export default router;
+
 

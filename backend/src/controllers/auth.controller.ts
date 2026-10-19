@@ -440,5 +440,173 @@ export async function getUserReferralCode(
   }
 }
 
+import { webauthnService } from "../services/auth/webauthnService.js";
 
+/** POST /api/v1/auth/passkeys/register/options (Protected) */
+export async function generatePasskeyRegistrationOptions(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user?.id) {
+      res.status(401).json({ success: false, message: "Authentication required" });
+      return;
+    }
+    const options = await webauthnService.generateRegistrationOptions(req.user.id);
+    res.json({
+      success: true,
+      data: options,
+    });
+  } catch (error) {
+    if (error instanceof AuthNotFoundError) {
+      res.status(404).json({ success: false, message: error.message });
+      return;
+    }
+    next(error);
+  }
+}
 
+/** POST /api/v1/auth/passkeys/register/verify (Protected) */
+export async function verifyPasskeyRegistration(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user?.id) {
+      res.status(401).json({ success: false, message: "Authentication required" });
+      return;
+    }
+    const result = await webauthnService.verifyRegistration(req.user.id, req.body);
+    res.status(201).json({
+      success: true,
+      message: "Passkey registered successfully",
+      data: result,
+    });
+  } catch (error) {
+    if (error instanceof AuthValidationError) {
+      res.status(400).json({ success: false, message: error.message });
+      return;
+    }
+    if (error instanceof AuthUnauthorizedError) {
+      res.status(401).json({ success: false, message: error.message });
+      return;
+    }
+    if (error instanceof AuthConflictError) {
+      res.status(409).json({ success: false, message: error.message });
+      return;
+    }
+    if (error instanceof AuthNotFoundError) {
+      res.status(404).json({ success: false, message: error.message });
+      return;
+    }
+    next(error);
+  }
+}
+
+/** POST /api/v1/auth/passkeys/login/options (Public) */
+export async function generatePasskeyAuthenticationOptions(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const options = await webauthnService.generateAuthenticationOptions(req.body ?? {});
+    res.json({
+      success: true,
+      data: options,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/** POST /api/v1/auth/passkeys/login/verify (Public) */
+export async function verifyPasskeyAuthentication(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const result = await webauthnService.verifyAuthentication(req.body, {
+      ip: req.ip ?? req.socket.remoteAddress ?? "unknown",
+      userAgent: req.headers["user-agent"] ?? null,
+    });
+    res.json({
+      success: true,
+      message: "Logged in with passkey successfully",
+      data: result,
+    });
+  } catch (error) {
+    if (error instanceof AuthValidationError) {
+      res.status(400).json({ success: false, message: error.message });
+      return;
+    }
+    if (error instanceof AuthUnauthorizedError) {
+      res.status(401).json({ success: false, message: error.message });
+      return;
+    }
+    next(error);
+  }
+}
+
+/** GET /api/v1/auth/passkeys (Protected) */
+export async function listPasskeys(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user?.id) {
+      res.status(401).json({ success: false, message: "Authentication required" });
+      return;
+    }
+    const passkeys = await webauthnService.listPasskeys(req.user.id);
+    res.json({
+      success: true,
+      data: passkeys,
+    });
+  } catch (error) {
+    if (error instanceof AuthNotFoundError) {
+      res.status(404).json({ success: false, message: error.message });
+      return;
+    }
+    next(error);
+  }
+}
+
+/** DELETE /api/v1/auth/passkeys/:id (Protected) */
+export async function revokePasskey(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user?.id) {
+      res.status(401).json({ success: false, message: "Authentication required" });
+      return;
+    }
+    const passkeyId = String(req.params.id || "").trim();
+    if (!passkeyId) {
+      res.status(400).json({ success: false, message: "Passkey ID is required" });
+      return;
+    }
+    const result = await webauthnService.revokePasskey(req.user.id, passkeyId);
+    res.json({
+      success: true,
+      message: "Passkey revoked",
+      data: result,
+    });
+  } catch (error) {
+    if (error instanceof AuthConflictError) {
+      res.status(409).json({ success: false, message: error.message });
+      return;
+    }
+    if (error instanceof AuthNotFoundError) {
+      res.status(404).json({ success: false, message: error.message });
+      return;
+    }
+    next(error);
+  }
+}

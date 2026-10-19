@@ -95,6 +95,18 @@ export interface AuthUser {
   role: Role;
 }
 
+/** Summary of a registered WebAuthn passkey returned to the owner */
+export interface PasskeySummary {
+  id: string;
+  credentialId: string;
+  name: string;
+  deviceType: string;
+  backedUp: boolean;
+  transports: string[];
+  createdAt: Date;
+  lastUsedAt: Date | null;
+}
+
 /** Safe user representation returned across public and auth endpoints */
 export interface SafeUser {
   id: string;
@@ -102,10 +114,11 @@ export interface SafeUser {
   username: string;
   name?: string | null;
   role: UserRole;
-  /** Sign-in methods available to the account (email/password and/or Google) */
+  /** Sign-in methods available to the account (email/password, Google, and/or Passkeys) */
   authProviders: {
     password: boolean;
     google: boolean;
+    passkeys?: boolean;
   };
   createdAt: Date;
   updatedAt: Date;

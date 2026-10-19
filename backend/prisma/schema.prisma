@@ -162,12 +162,35 @@ model User {
   transactions       Transaction[]
   referrer           User?               @relation("UserReferrals", fields: [referrerId], references: [id])
   referrees          User[]              @relation("UserReferrals")
-  createdInvitations LeagueInvitation[]  @relation("InvitationCreator")
-  usedInvitations    LeagueInvitation[]  @relation("InvitationUser")
+  createdInvitations LeagueInvitation[]   @relation("InvitationCreator")
+  usedInvitations    LeagueInvitation[]   @relation("InvitationUser")
   chatMessages       LeagueChatMessage[]
+  passkeys           WebAuthnCredential[]
 
   @@map("users")
 }
+
+/// A WebAuthn / Passkey credential registered by a user for passwordless authentication.
+model WebAuthnCredential {
+  id           String    @id @default(uuid())
+  userId       String    @map("user_id")
+  credentialId String    @unique @map("credential_id")
+  publicKey    String    @map("public_key")
+  counter      Int       @default(0)
+  deviceType   String    @default("multiDevice") @map("device_type")
+  backedUp     Boolean   @default(false) @map("backed_up")
+  transports   String[]  @default([])
+  algorithm    Int       @default(-7)
+  name         String    @default("Passkey")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  lastUsedAt   DateTime? @map("last_used_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("webauthn_credentials")
+}
+
 
 /// A Stellar wallet linked to a user for USDC payments.
 /// Optional — users can use the platform without one.
