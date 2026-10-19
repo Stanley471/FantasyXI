@@ -558,6 +558,43 @@ export class StellarService {
   }
 
   /**
+   * Freezes a league's escrow pool on-chain when a formal payment or scoring dispute is raised (#364).
+   */
+  public async freezeLeagueEscrow(
+    leagueId: number | bigint,
+    reason?: string
+  ): Promise<InvocationResult> {
+    const client = this.getSorobanClient();
+    if (!client) {
+      throw new Error("Soroban contract client is not configured");
+    }
+    const adminSecret = process.env.TESTNET_ADMIN_SECRET;
+    if (!adminSecret) {
+      throw new Error("TESTNET_ADMIN_SECRET is required to freeze league escrow");
+    }
+    const adminPublic = Keypair.fromSecret(adminSecret).publicKey();
+    return client.freezeLeague(adminSecret, adminPublic, leagueId, reason);
+  }
+
+  /**
+   * Unfreezes a league's escrow pool on-chain after administrative dispute resolution (#364).
+   */
+  public async unfreezeLeagueEscrow(
+    leagueId: number | bigint
+  ): Promise<InvocationResult> {
+    const client = this.getSorobanClient();
+    if (!client) {
+      throw new Error("Soroban contract client is not configured");
+    }
+    const adminSecret = process.env.TESTNET_ADMIN_SECRET;
+    if (!adminSecret) {
+      throw new Error("TESTNET_ADMIN_SECRET is required to unfreeze league escrow");
+    }
+    const adminPublic = Keypair.fromSecret(adminSecret).publicKey();
+    return client.unfreezeLeague(adminSecret, adminPublic, leagueId);
+  }
+
+  /**
    * Reconcile database expectations with live on-chain Soroban escrow state.
    */
   public async reconcileWithContract(
@@ -576,7 +613,7 @@ export class StellarService {
     const countMatches = state.participant_count === dbParticipantCount;
     const isBalanced = discrepancyUsdc < 0.0001 && countMatches;
 
-    const statusNames = ["Upcoming", "Active", "Settled", "Cancelled"];
+    const statusNames = ["Upcoming", "Active", "Settled", "Cancelled", "Frozen"];
 
     return {
       onChainBalanced: isBalanced,
@@ -589,3 +626,4 @@ export class StellarService {
 }
 
 export const stellarService = new StellarService();
+

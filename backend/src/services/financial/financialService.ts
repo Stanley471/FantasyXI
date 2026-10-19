@@ -702,6 +702,32 @@ export class FinancialService {
   }
 
   /**
+   * Checks whether a league's escrow is currently frozen due to an unresolved dispute (#364).
+   */
+  public async isLeagueEscrowFrozen(league: {
+    id: string;
+    escrowFrozen?: boolean;
+  }): Promise<boolean> {
+    if (league.escrowFrozen) {
+      return true;
+    }
+    if (typeof this.db?.paymentDispute?.count === "function") {
+      try {
+        const activeCount = await this.db.paymentDispute.count({
+          where: {
+            leagueId: league.id,
+            status: { in: ["OPEN", "UNDER_REVIEW"] },
+          },
+        });
+        return activeCount > 0;
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Prepares a deterministic settlement plan for a completed league.
    * Calculates gross total, platform fee, and 60/30/10 prize amounts using PrizeService.
    */
@@ -744,6 +770,23 @@ export class FinancialService {
         winners: [],
         canSettle: false,
         unsettledReason: "League was cancelled. Funds must be refunded, not settled.",
+      };
+    }
+
+    if (await this.isLeagueEscrowFrozen(league)) {
+      return {
+        leagueId: league.id,
+        leagueName: league.name,
+        status: league.status,
+        totalParticipants: 0,
+        entryFee: league.entryFee,
+        grossPool: 0,
+        platformFee: 0,
+        netPrizePool: 0,
+        winners: [],
+        canSettle: false,
+        unsettledReason:
+          "League escrow is frozen due to an active payment or scoring dispute.",
       };
     }
 
@@ -885,6 +928,11 @@ export class FinancialService {
     }
     if (league.status === LeagueStatus.CANCELLED) {
       throw new FinancialValidationError("Cancelled leagues cannot be settled");
+    }
+    if (await this.isLeagueEscrowFrozen(league)) {
+      throw new FinancialConflictError(
+        "League escrow is frozen due to an active dispute. Resolve all disputes before executing settlement."
+      );
     }
     if (!league.endGameweek?.isFinished) {
       throw new FinancialValidationError(

@@ -20,6 +20,13 @@ import {
   getCoordinatedTransaction,
   runRetroactiveAdjustment,
 } from "../controllers/financialIntegrity.controller.js";
+import {
+  listAdminDisputes,
+  getAdminDispute,
+  reviewAdminDispute,
+  resolveAdminDispute,
+  verifyDisputeRulingLog,
+} from "../controllers/dispute.controller.js";
 import { idempotency } from "../middleware/idempotency.js";
 import { requireAuth, requirePermission } from "../middleware/authMiddleware.js";
 import { Permission } from "../types/index.js";
@@ -44,6 +51,20 @@ router.post("/payouts/dead-letter/:id/retry", requirePermission(Permission.PAYOU
 
 // POST /api/v1/admin/payouts/dead-letter/:id/discard (ADMIN only)
 router.post("/payouts/dead-letter/:id/discard", requirePermission(Permission.PAYOUT_MANAGE), discardFailedPayout);
+
+// ============================================================
+// Payment Dispute Resolution & Automated Escrow Freeze (issue #364)
+// ============================================================
+router.get("/disputes", listAdminDisputes);
+router.get("/disputes/:disputeId", getAdminDispute);
+router.get("/disputes/:disputeId/verify-log", verifyDisputeRulingLog);
+router.post("/disputes/:disputeId/review", idempotency, reviewAdminDispute);
+router.post(
+  "/disputes/:disputeId/resolve",
+  requirePermission(Permission.PAYOUT_MANAGE),
+  idempotency,
+  resolveAdminDispute
+);
 
 // GET /api/v1/admin/audit/financial (ADMIN only: exposes every user's ledger history)
 router.get("/audit/financial", requirePermission(Permission.FINANCIAL_AUDIT_READ), listFinancialAuditLog);

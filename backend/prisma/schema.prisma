@@ -118,6 +118,14 @@ enum CoordinatedTransactionStatus {
   DROPPED
 }
 
+/// Lifecycle state machine for payment & scoring disputes (#364)
+enum DisputeStatus {
+  OPEN
+  UNDER_REVIEW
+  RESOLVED_PAYOUT
+  RESOLVED_REFUND
+}
+
 /// Financial operations recorded in the append-only audit log
 enum FinancialAuditAction {
   DEPOSIT_SUBMITTED
@@ -132,6 +140,12 @@ enum FinancialAuditAction {
   PAYOUT_DISCARDED
   RECONCILIATION_BALANCED
   RECONCILIATION_DISCREPANCY
+  DISPUTE_OPENED
+  DISPUTE_UNDER_REVIEW
+  DISPUTE_RESOLVED_PAYOUT
+  DISPUTE_RESOLVED_REFUND
+  ESCROW_FROZEN
+  ESCROW_UNFROZEN
 }
 
 // ============================================================
@@ -377,6 +391,8 @@ model League {
   scoringType     ScoringType  @default(CLASSIC) @map("scoring_type")
   /// Private leagues are hidden from public search and joinable only via invitation
   isPrivate       Boolean      @default(false) @map("is_private")
+  /// Set to true when an active payment or scoring dispute freezes the league escrow (#364)
+  escrowFrozen    Boolean      @default(false) @map("escrow_frozen")
   startGameweekId Int          @map("start_gameweek_id")
   endGameweekId   Int          @map("end_gameweek_id")
   createdAt       DateTime     @default(now()) @map("created_at")
@@ -392,6 +408,7 @@ model League {
   invitations   LeagueInvitation[]
   chatMessages  LeagueChatMessage[]
   seasons       LeagueSeason[]
+  disputes      PaymentDispute[]
 
   @@index([status, isPrivate])
   @@index([entryFee])
@@ -851,3 +868,57 @@ model ScoreAdjustmentLog {
   @@index([runId])
   @@map("score_adjustment_logs")
 }
+
+/// Formal dispute raised regarding league payouts or scoring anomalies (#364).
+/// Filing a dispute triggers an automated escrow freeze on the target league.
+model PaymentDispute {
+  id                  String        @id @default(uuid())
+  leagueId            String        @map("league_id")
+  reporterId          String        @map("reporter_id")
+  category            String        @default("PAYOUT_ANOMALY")
+  reason              String
+  evidence            Json?
+  status              DisputeStatus @default(OPEN)
+  escrowFrozen        Boolean       @default(true) @map("escrow_frozen")
+  freezeTxHash        String?       @map("freeze_tx_hash")
+  reviewedById        String?       @map("reviewed_by_id")
+  reviewedAt          DateTime?     @map("reviewed_at")
+  resolvedById        String?       @map("resolved_by_id")
+  resolvedAt          DateTime?     @map("resolved_at")
+  rulingJustification String?       @map("ruling_justification")
+  resolutionTxHash    String?       @map("resolution_tx_hash")
+  resolutionMetadata  Json?         @map("resolution_metadata")
+  createdAt           DateTime      @default(now()) @map("created_at")
+  updatedAt           DateTime      @updatedAt @map("updated_at")
+
+  league     League             @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+  rulingLogs DisputeRulingLog[]
+
+  @@index([leagueId, status])
+  @@index([status, createdAt])
+  @@map("payment_disputes")
+}
+
+/// Immutable append-only log of dispute state transitions, admin rulings, and justifications (#364).
+model DisputeRulingLog {
+  id               String         @id @default(uuid())
+  disputeId        String         @map("dispute_id")
+  leagueId         String         @map("league_id")
+  actorId          String         @map("actor_id")
+  actorRole        UserRole       @map("actor_role")
+  fromStatus       DisputeStatus? @map("from_status")
+  toStatus         DisputeStatus  @map("to_status")
+  justification    String
+  evidenceSnapshot Json?          @map("evidence_snapshot")
+  executionTxHash  String?        @map("execution_tx_hash")
+  entryHash        String         @map("entry_hash")
+  previousHash     String?        @map("previous_hash")
+  createdAt        DateTime       @default(now()) @map("created_at")
+
+  dispute PaymentDispute @relation(fields: [disputeId], references: [id], onDelete: Cascade)
+
+  @@index([disputeId, createdAt])
+  @@index([leagueId, createdAt])
+  @@map("dispute_ruling_logs")
+}
+

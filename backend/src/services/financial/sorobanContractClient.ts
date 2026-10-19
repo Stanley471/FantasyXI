@@ -642,6 +642,39 @@ export class SorobanContractClient {
   }
 
   /**
+   * Admin freezes a league's escrow pool on-chain during an active payment or scoring dispute (#364).
+   */
+  public async freezeLeague(
+    adminSecret: string,
+    adminPublic: string,
+    leagueId: number | bigint,
+    reason?: string
+  ): Promise<InvocationResult> {
+    const args: xdr.ScVal[] = [
+      SorobanContractClient.address(adminPublic),
+      SorobanContractClient.u64(leagueId),
+    ];
+    if (reason) {
+      args.push(nativeToScVal(reason.slice(0, 128), { type: "string" }));
+    }
+    return this.invoke(adminSecret, this.escrowContractId, "freeze_league", args);
+  }
+
+  /**
+   * Admin unfreezes a league's escrow pool on-chain once all active disputes are resolved (#364).
+   */
+  public async unfreezeLeague(
+    adminSecret: string,
+    adminPublic: string,
+    leagueId: number | bigint
+  ): Promise<InvocationResult> {
+    return this.invoke(adminSecret, this.escrowContractId, "unfreeze_league", [
+      SorobanContractClient.address(adminPublic),
+      SorobanContractClient.u64(leagueId),
+    ]);
+  }
+
+  /**
    * Query USDC SAC balance for any account (or contract ID).
    */
   public async getTokenBalance(addressOrContractId: string): Promise<bigint> {
@@ -651,3 +684,4 @@ export class SorobanContractClient {
     return result.success ? BigInt((result.returnValue as bigint) ?? 0) : 0n;
   }
 }
+

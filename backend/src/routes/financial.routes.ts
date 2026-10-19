@@ -9,6 +9,10 @@ import {
   reconcileLeague,
   getAffiliateDashboard,
 } from "../controllers/financial.controller.js";
+import {
+  fileLeagueDispute,
+  listLeagueDisputes,
+} from "../controllers/dispute.controller.js";
 import { requireAuth, requirePermission, requireRole } from "../middleware/authMiddleware.js";
 import { Permission, UserRole } from "../types/index.js";
 import { financialRateLimiter, mutationRateLimiter } from "../middleware/rateLimiter.js";
@@ -36,6 +40,10 @@ router.get("/affiliate-dashboard", requirePermission(Permission.AFFILIATE_READ_O
 // Self-service recovery: checks the escrow contract directly for the caller's own
 // deposit when the wallet's success callback never reached submit/verify above.
 router.post("/reconcile-deposit", mutationRateLimiter, requirePermission(Permission.PAYMENT_MANAGE_OWN), reconcileDeposit);
+
+// Payment dispute filing and inspection (issue #364)
+router.get("/disputes", listLeagueDisputes);
+router.post("/disputes", mutationRateLimiter, fileLeagueDispute);
 
 // Reconciliation exposes sensitive league financial reports and requires the
 // financial:reconcile permission (ADMIN, MODERATOR and SERVICE roles).
