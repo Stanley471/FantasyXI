@@ -5,7 +5,6 @@ import express from "express";
 import type { AddressInfo } from "net";
 import type { Server } from "http";
 import {
-  generateOAuthNonce,
   generateOAuthState,
   generateLinkTicket,
   verifyOAuthState,
@@ -13,7 +12,7 @@ import {
   OAUTH_NONCE_COOKIE,
   OAuthIntent,
 } from "../config/google.js";
-import { getJwtSecret, verifyAccessToken } from "../config/jwt.js";
+import { verifyAccessToken } from "../config/jwt.js";
 import {
   AuthService,
   AuthValidationError,
@@ -98,20 +97,37 @@ function createUserStore(initialUsers: StoredUser[] = []) {
   };
 }
 
-/** Signs arbitrary OAuth state payloads for testing expired, future, or custom states. */
-function createSignedOAuthState(payload: {
-  nonce: string;
-  timestamp: number;
-  returnTo?: string;
-  intent?: OAuthIntent;
-  userId?: string;
-}): string {
-  const jsonPayload = Buffer.from(JSON.stringify(payload)).toString("base64url");
-  const signature = crypto
-    .createHmac("sha256", getJwtSecret())
-    .update(jsonPayload)
-    .digest("base64url");
-  return `${jsonPayload}.${signature}`;
+/** Generates an expired OAuth state by temporally shifting the timestamp backwards. */
+function createExpiredOAuthState(options: { nonce: string; minutesAgo?: number }): string {
+  const originalNow = Date.now;
+  try {
+    Date.now = () => originalNow() - (options.minutesAgo ?? 15) * 60 * 1000;
+    return generateOAuthState({ nonce: options.nonce });
+  } finally {
+    Date.now = originalNow;
+  }
+}
+
+/** Generates a future OAuth state exceeding allowed clock skew tolerance. */
+function createFutureOAuthState(options: { nonce: string; minutesAhead?: number }): string {
+  const originalNow = Date.now;
+  try {
+    Date.now = () => originalNow() + (options.minutesAhead ?? 5) * 60 * 1000;
+    return generateOAuthState({ nonce: options.nonce });
+  } finally {
+    Date.now = originalNow;
+  }
+}
+
+/** Generates an expired link ticket by temporally shifting the timestamp backwards. */
+function createExpiredLinkTicket(userId: string, minutesAgo: number = 5): string {
+  const originalNow = Date.now;
+  try {
+    Date.now = () => originalNow() - minutesAgo * 60 * 1000;
+    return generateLinkTicket(userId);
+  } finally {
+    Date.now = originalNow;
+  }
 }
 
 describe("Google OAuth Callback Error States (Integration)", () => {
@@ -271,18 +287,11 @@ describe("Google OAuth Callback Error States (Integration)", () => {
 
   describe("Invalid, Expired, or Mismatched State Parameter (CSRF Protection)", () => {
     it("redirects to /login with error=oauth_state_invalid when state is expired (> 10 minutes)", async () => {
-      const nonce = generateOAuthNonce();
-      const expiredTimestamp = Date.now() - 15 * 60 * 1000; // 15 minutes ago
-      const expiredState = createSignedOAuthState({
-        nonce,
-        timestamp: expiredTimestamp,
-        returnTo: "/",
-        intent: "login",
-      });
+      const expiredState = createExpiredOAuthState({ nonce: "test-expired-nonce" });
 
       const res = await get(
         `/api/v1/auth/google/callback?code=valid-code&state=${encodeURIComponent(expiredState)}`,
-        { Cookie: `fxi_oauth_nonce=${nonce}` }
+        { Cookie: "fxi_oauth_nonce=test-expired-nonce" }
       );
       assert.equal(res.status, 302);
       const landing = new URL(res.headers.get("location")!);
@@ -295,18 +304,11 @@ describe("Google OAuth Callback Error States (Integration)", () => {
     });
 
     it("returns 400 Bad Request for expired state when client requests JSON", async () => {
-      const nonce = generateOAuthNonce();
-      const expiredTimestamp = Date.now() - 11 * 60 * 1000; // 11 minutes ago
-      const expiredState = createSignedOAuthState({
-        nonce,
-        timestamp: expiredTimestamp,
-        returnTo: "/",
-        intent: "login",
-      });
+      const expiredState = createExpiredOAuthState({ nonce: "test-expired-json-nonce", minutesAgo: 11 });
 
       const res = await get(
         `/api/v1/auth/google/callback?code=valid-code&state=${encodeURIComponent(expiredState)}`,
-        { Cookie: `fxi_oauth_nonce=${nonce}`, Accept: "application/json" }
+        { Cookie: "fxi_oauth_nonce=test-expired-json-nonce", Accept: "application/json" }
       );
       assert.equal(res.status, 400);
       const data = await res.json();
@@ -319,18 +321,11 @@ describe("Google OAuth Callback Error States (Integration)", () => {
     });
 
     it("rejects state token issued with timestamp in future beyond clock skew", async () => {
-      const nonce = generateOAuthNonce();
-      const futureTimestamp = Date.now() + 5 * 60 * 1000; // 5 minutes in future
-      const futureState = createSignedOAuthState({
-        nonce,
-        timestamp: futureTimestamp,
-        returnTo: "/",
-        intent: "login",
-      });
+      const futureState = createFutureOAuthState({ nonce: "test-future-nonce" });
 
       const res = await get(
         `/api/v1/auth/google/callback?code=valid-code&state=${encodeURIComponent(futureState)}`,
-        { Cookie: `fxi_oauth_nonce=${nonce}` }
+        { Cookie: "fxi_oauth_nonce=test-future-nonce" }
       );
       assert.equal(res.status, 302);
       const landing = new URL(res.headers.get("location")!);
@@ -339,20 +334,11 @@ describe("Google OAuth Callback Error States (Integration)", () => {
     });
 
     it("rejects state parameter when browser nonce cookie is mismatched (login CSRF)", async () => {
-      const stateNonce = generateOAuthNonce();
-      const cookieNonce = generateOAuthNonce();
-      assert.notEqual(stateNonce, cookieNonce);
-
-      const state = createSignedOAuthState({
-        nonce: stateNonce,
-        timestamp: Date.now(),
-        returnTo: "/",
-        intent: "login",
-      });
+      const state = generateOAuthState({ nonce: "state-nonce-mismatch-1" });
 
       const res = await get(
         `/api/v1/auth/google/callback?code=valid-code&state=${encodeURIComponent(state)}`,
-        { Cookie: `fxi_oauth_nonce=${cookieNonce}` }
+        { Cookie: "fxi_oauth_nonce=cookie-nonce-mismatch-2" }
       );
       assert.equal(res.status, 302);
       const landing = new URL(res.headers.get("location")!);
@@ -364,19 +350,11 @@ describe("Google OAuth Callback Error States (Integration)", () => {
     });
 
     it("returns 400 Bad Request for mismatched nonce when client requests JSON", async () => {
-      const stateNonce = generateOAuthNonce();
-      const cookieNonce = generateOAuthNonce();
-
-      const state = createSignedOAuthState({
-        nonce: stateNonce,
-        timestamp: Date.now(),
-        returnTo: "/",
-        intent: "login",
-      });
+      const state = generateOAuthState({ nonce: "state-nonce-json-1" });
 
       const res = await get(
         `/api/v1/auth/google/callback?code=valid-code&state=${encodeURIComponent(state)}`,
-        { Cookie: `fxi_oauth_nonce=${cookieNonce}`, Accept: "application/json" }
+        { Cookie: "fxi_oauth_nonce=cookie-nonce-json-2", Accept: "application/json" }
       );
       assert.equal(res.status, 400);
       const data = await res.json();
@@ -410,24 +388,18 @@ describe("Google OAuth Callback Error States (Integration)", () => {
     });
 
     it("rejects state parameter with tampered payload", async () => {
-      const nonce = generateOAuthNonce();
-      const legitState = createSignedOAuthState({
-        nonce,
-        timestamp: Date.now(),
-        returnTo: "/safe",
-        intent: "login",
-      });
+      const legitState = generateOAuthState({ returnTo: "/safe", nonce: "test-tamper-nonce" });
       const [, signature] = legitState.split(".");
 
       // Tamper the payload with different returnTo or nonce
       const tamperedPayload = Buffer.from(
-        JSON.stringify({ nonce, timestamp: Date.now(), returnTo: "/evil", intent: "login" })
+        JSON.stringify({ nonce: "test-tamper-nonce", timestamp: Date.now(), returnTo: "/evil", intent: "login" })
       ).toString("base64url");
       const forgedState = `${tamperedPayload}.${signature}`;
 
       const res = await get(
         `/api/v1/auth/google/callback?code=valid-code&state=${encodeURIComponent(forgedState)}`,
-        { Cookie: `fxi_oauth_nonce=${nonce}` }
+        { Cookie: "fxi_oauth_nonce=test-tamper-nonce" }
       );
       assert.equal(res.status, 302);
       const landing = new URL(res.headers.get("location")!);
@@ -468,17 +440,17 @@ describe("Google OAuth Callback Error States (Integration)", () => {
     });
 
     it("rejects an account linking state that lacks a userId", async () => {
-      const nonce = generateOAuthNonce();
-      const stateWithoutUser = createSignedOAuthState({
-        nonce,
-        timestamp: Date.now(),
-        intent: "link",
-        // userId omitted
-      });
+      const legitState = generateOAuthState({ nonce: "test-link-nonce" });
+      const [payloadStr, sig] = legitState.split(".");
+      const decoded = JSON.parse(Buffer.from(payloadStr, "base64url").toString("utf-8"));
+      decoded.intent = "link";
+      delete decoded.userId;
+      const forgedPayload = Buffer.from(JSON.stringify(decoded)).toString("base64url");
+      const stateWithoutUser = `${forgedPayload}.${sig}`;
 
       const res = await get(
         `/api/v1/auth/google/callback?code=valid-code&state=${encodeURIComponent(stateWithoutUser)}`,
-        { Cookie: `fxi_oauth_nonce=${nonce}` }
+        { Cookie: "fxi_oauth_nonce=test-link-nonce" }
       );
       assert.equal(res.status, 302);
       const landing = new URL(res.headers.get("location")!);
@@ -519,10 +491,8 @@ describe("Google OAuth Callback Error States (Integration)", () => {
     });
 
     it("redirects to /profile with linkError=google_denied when consent is denied during linking flow", async () => {
-      const nonce = generateOAuthNonce();
-      const linkState = createSignedOAuthState({
-        nonce,
-        timestamp: Date.now(),
+      const linkState = generateOAuthState({
+        nonce: "test-link-denied-nonce",
         intent: "link",
         userId: "usr_existing_1",
         returnTo: "/profile",
@@ -530,7 +500,7 @@ describe("Google OAuth Callback Error States (Integration)", () => {
 
       const res = await get(
         `/api/v1/auth/google/callback?error=access_denied&state=${encodeURIComponent(linkState)}`,
-        { Cookie: `fxi_oauth_nonce=${nonce}` }
+        { Cookie: "fxi_oauth_nonce=test-link-denied-nonce" }
       );
       assert.equal(res.status, 302);
       const landing = new URL(res.headers.get("location")!);
@@ -871,16 +841,7 @@ describe("Google OAuth Callback Error States (Integration)", () => {
     });
 
     it("redirects to /profile with linkError=link_ticket_invalid when ticket is expired (> 2 minutes)", async () => {
-      // Craft expired link ticket (2 minutes TTL)
-      const expiredTimestamp = Date.now() - 5 * 60 * 1000;
-      const payload = Buffer.from(
-        JSON.stringify({ purpose: "google-link", userId: "usr_1", timestamp: expiredTimestamp })
-      ).toString("base64url");
-      const signature = crypto
-        .createHmac("sha256", getJwtSecret())
-        .update(`google-link:${payload}`)
-        .digest("base64url");
-      const expiredTicket = `${payload}.${signature}`;
+      const expiredTicket = createExpiredLinkTicket("usr_1", 5);
 
       const res = await get(
         `/api/v1/auth/google/link/start?ticket=${encodeURIComponent(expiredTicket)}`
