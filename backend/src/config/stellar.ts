@@ -42,11 +42,40 @@ export const stellarConfig: StellarConfig = {
     "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 };
 
+import {
+  StellarNodeFailoverPool,
+  parseEndpointList,
+} from "../services/financial/horizonFailoverPool.js";
+
 /**
- * Lazy-initialized Horizon Server client.
+ * Lazy-initialized Horizon Server client (backed by failover pool when multiple endpoints are configured).
  */
 let _horizonServer: Horizon.Server | null = null;
+let _horizonPool: StellarNodeFailoverPool<Horizon.Server> | null = null;
+
+export function getHorizonFailoverPool(): StellarNodeFailoverPool<Horizon.Server> {
+  if (!_horizonPool) {
+    const urls = parseEndpointList(
+      process.env.STELLAR_HORIZON_URLS,
+      stellarConfig.horizonUrl
+    );
+    _horizonPool = new StellarNodeFailoverPool<Horizon.Server>({
+      nodes: urls,
+      createClient: (url) => new Horizon.Server(url),
+      probe: async (client) => {
+        const page = await client.ledgers().order("desc").limit(1).call();
+        const sequence = Number(page.records?.[0]?.sequence ?? 0);
+        return { ledgerSequence: sequence };
+      },
+    });
+  }
+  return _horizonPool;
+}
+
 export function getHorizonServer(): Horizon.Server {
+  if (_horizonPool) {
+    return _horizonPool.selectHealthyNode().client;
+  }
   if (!_horizonServer) {
     _horizonServer = new Horizon.Server(stellarConfig.horizonUrl);
   }
@@ -57,7 +86,30 @@ export function getHorizonServer(): Horizon.Server {
  * Lazy-initialized Soroban RPC Server client.
  */
 let _sorobanRpcServer: rpc.Server | null = null;
+let _sorobanRpcPool: StellarNodeFailoverPool<rpc.Server> | null = null;
+
+export function getSorobanRpcFailoverPool(): StellarNodeFailoverPool<rpc.Server> {
+  if (!_sorobanRpcPool) {
+    const urls = parseEndpointList(
+      process.env.STELLAR_SOROBAN_RPC_URLS,
+      stellarConfig.sorobanRpcUrl
+    );
+    _sorobanRpcPool = new StellarNodeFailoverPool<rpc.Server>({
+      nodes: urls,
+      createClient: (url) => new rpc.Server(url),
+      probe: async (client) => {
+        const latest = await client.getLatestLedger();
+        return { ledgerSequence: Number(latest.sequence ?? 0) };
+      },
+    });
+  }
+  return _sorobanRpcPool;
+}
+
 export function getSorobanRpcServer(): rpc.Server {
+  if (_sorobanRpcPool) {
+    return _sorobanRpcPool.selectHealthyNode().client;
+  }
   if (!_sorobanRpcServer) {
     _sorobanRpcServer = new rpc.Server(stellarConfig.sorobanRpcUrl);
   }
