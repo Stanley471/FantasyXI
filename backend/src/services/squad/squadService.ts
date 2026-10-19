@@ -136,9 +136,7 @@ export class SquadService {
    * Creates a new 15-player squad for a user.
    */
   public async createSquad(input: CreateSquadInput) {
-    if (!input.name || input.name.trim().length === 0) {
-      throw new SquadValidationError("Squad name is required");
-    }
+    const name = SquadValidator.sanitizeSquadName(input.name);
 
     // Verify user exists
     const user = await prisma.user.findUnique({
@@ -182,7 +180,7 @@ export class SquadService {
       const created = await tx.squad.create({
         data: {
           userId: input.userId,
-          name: input.name.trim(),
+          name,
           budgetRemaining,
         },
       });
@@ -244,6 +242,8 @@ export class SquadService {
     if (!existing) {
       throw new SquadValidationError(`Squad ${squadId} not found`);
     }
+
+    const name = input.name !== undefined ? SquadValidator.sanitizeSquadName(input.name) : undefined;
 
     if (requestingUserId && existing.userId !== requestingUserId) {
       throw new SquadForbiddenError(
@@ -391,7 +391,7 @@ export class SquadService {
       await tx.squad.update({
         where: { id: squadId },
         data: {
-          name: input.name ? input.name.trim() : squad.name,
+          name: name ?? squad.name,
           budgetRemaining,
           ...(transferGameweek && {
             freeTransfers: freeTransfersLeft,

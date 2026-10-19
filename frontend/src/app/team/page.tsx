@@ -16,6 +16,7 @@ import { Squad, Player, Position, SQUAD_RULES, ChipType, SquadChipUsage } from "
 import { Pitch } from "@/components/pitch/Pitch";
 import { Bench } from "@/components/pitch/Bench";
 import { BudgetBar } from "@/components/team/BudgetBar";
+import { CountdownTimer } from "@/components/team/CountdownTimer";
 import { PlayerPickerModal } from "@/components/team/PlayerPickerModal";
 import { validateCompleteSquad, detectFormation } from "@/lib/formation";
 import {
@@ -145,6 +146,7 @@ export default function TeamPage() {
   // Wildcard chip state
   const [isWildcardActive, setIsWildcardActive] = useState<boolean>(false);
   const [currentGameweek, setCurrentGameweek] = useState<{ id: number; name: string; deadline: string } | null>(null);
+  const [isDeadlinePassed, setIsDeadlinePassed] = useState(false);
   const [chipUsages, setChipUsages] = useState<SquadChipUsage[]>([]);
   const [isActivatingChip, setIsActivatingChip] = useState<boolean>(false);
 
@@ -264,7 +266,11 @@ export default function TeamPage() {
 
   // Validation
   const validation = validateCompleteSquad(players);
-  const canSave = players.length === 15 && validation.valid && totalSpent <= SQUAD_RULES.STARTING_BUDGET * 10;
+  const canSave =
+    players.length === 15 &&
+    validation.valid &&
+    totalSpent <= SQUAD_RULES.STARTING_BUDGET * 10 &&
+    !isDeadlinePassed;
 
   // Selected player object
   const selectedPlayer = players.find((p) => p.playerId === selectedPlayerId);
@@ -737,7 +743,10 @@ export default function TeamPage() {
           </div>
 
           {/* Formation & Rules status */}
-          <div className="flex items-center gap-4 text-xs font-mono">
+          <div className="flex flex-wrap items-center gap-4 text-xs font-mono">
+            {currentGameweek && (
+              <CountdownTimer deadline={currentGameweek.deadline} onExpiredChange={setIsDeadlinePassed} />
+            )}
             <div className="flex items-center gap-2">
               <span className="text-slate-400 uppercase tracking-wider text-[11px]">Formation</span>
               <span className="text-emerald-400 font-bold text-sm">

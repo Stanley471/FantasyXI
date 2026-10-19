@@ -17,6 +17,7 @@ import { LeagueChat } from "@/components/chat/LeagueChat";
 import { PrizeCalculator } from "@/components/leagues/PrizeCalculator";
 import { PaymentModal } from "@/components/leagues/PaymentModal";
 import { InvitationManager } from "@/components/leagues/InvitationManager";
+import { CopyButton } from "@/components/ui/CopyButton";
 import { getOnChainLeague, OnChainLeagueState } from "@/lib/stellar/sorobanAudit";
 import { LiveMatchdayBar } from "@/components/live/LiveMatchdayBar";
 import { LiveSquadModal } from "@/components/live/LiveSquadModal";
@@ -26,7 +27,6 @@ import { Button } from "@/components/ui/Button";
 import { useToast } from "@/context/ToastContext";
 import {
   IconTrophy,
-  IconCopy,
   IconCheck,
   IconAlertCircle,
   IconChevronLeft,
@@ -53,7 +53,6 @@ export default function LeagueDetailPage({
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isJoining, setIsJoining] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [copiedCode, setCopiedCode] = useState<boolean>(false);
   const [showPaymentModal, setShowPaymentModal] = useState<boolean>(false);
   const [liveSquadUserId, setLiveSquadUserId] = useState<string | null>(null);
   const [onChainLeague, setOnChainLeague] = useState<OnChainLeagueState | null>(null);
@@ -189,15 +188,6 @@ export default function LeagueDetailPage({
       cancelled = true;
     };
   }, [league, leagueId, escrowContractId]);
-
-  const copyInviteCode = () => {
-    if (league?.inviteCode) {
-      navigator.clipboard.writeText(league.inviteCode);
-      setCopiedCode(true);
-      toast.success("League invite code copied to clipboard!");
-      setTimeout(() => setCopiedCode(false), 2000);
-    }
-  };
 
   // Join league
   const handleJoinLeague = async () => {
@@ -350,16 +340,7 @@ export default function LeagueDetailPage({
                   {league.inviteCode}
                 </div>
               </div>
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                onClick={copyInviteCode}
-                className="text-xs"
-                title="Copy Invite Code"
-              >
-                {copiedCode ? <IconCheck className="w-3.5 h-3.5 text-emerald-400" /> : <IconCopy className="w-3.5 h-3.5" />}
-              </Button>
+              <CopyButton value={league.inviteCode} ariaLabel="Copy invite code" />
             </div>
           )}
         </div>

@@ -10,6 +10,7 @@
  * - Enforces zero lost cents via PrizeService.
  */
 
+import { StrKey } from "@stellar/stellar-sdk";
 import { prisma } from "../../config/db.js";
 import { stellarConfig } from "../../config/stellar.js";
 import { StellarService, stellarService } from "./stellarService.js";
@@ -604,6 +605,11 @@ export class FinancialService {
         error:
           "No wallet address is on record for this membership yet. Submit the deposit first.",
       };
+    }
+
+    // Reject malformed keys before spending an RPC round-trip on them.
+    if (!StrKey.isValidEd25519PublicKey(member.stellarAddress)) {
+      throw new FinancialValidationError("Invalid Stellar public key format");
     }
 
     let onChainStroops: bigint;

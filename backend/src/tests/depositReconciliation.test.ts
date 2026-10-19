@@ -1,7 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { Keypair } from "@stellar/stellar-sdk";
-import { FinancialService, FinancialNotFoundError } from "../services/financial/financialService.js";
+import {
+  FinancialService,
+  FinancialNotFoundError,
+  FinancialValidationError,
+} from "../services/financial/financialService.js";
 import { LeagueStatus, MembershipStatus, PaymentStatus, TransactionType, TransactionStatus } from "../types/index.js";
 
 const wallet = Keypair.random().publicKey();
@@ -90,6 +94,42 @@ describe("FinancialService.reconcileDeposit", () => {
     const result = await service.reconcileDeposit("user1", LEAGUE_ID);
     assert.equal(result.success, false);
     assert.match(result.error!, /No wallet address/);
+  });
+
+  it("rejects a malformed public key without querying the escrow contract", async () => {
+    for (const stellarAddress of ["not-a-key", wallet.toLowerCase(), wallet.slice(0, -1)]) {
+      const db = createMockDb(baseMember({ stellarAddress }));
+      let rpcCalls = 0;
+      const stellar = {
+        getContractDeposit: async () => {
+          rpcCalls++;
+          return 50_000_000n;
+        },
+      } as any;
+      const service = new FinancialService(db, stellar);
+
+      await assert.rejects(
+        service.reconcileDeposit("user1", LEAGUE_ID),
+        (err: unknown) =>
+          err instanceof FinancialValidationError && err.message === "Invalid Stellar public key format"
+      );
+      assert.equal(rpcCalls, 0);
+      assert.equal(db.state.member.paymentStatus, PaymentStatus.PAYMENT_SUBMITTED);
+    }
+  });
+
+  it("passes a valid G... public key through to the contract query", async () => {
+    const db = createMockDb(baseMember());
+    let queried: string | undefined;
+    const stellar = {
+      getContractDeposit: async (_leagueId: unknown, address: string) => {
+        queried = address;
+        return 50_000_000n;
+      },
+    } as any;
+    const result = await new FinancialService(db, stellar).reconcileDeposit("user1", LEAGUE_ID);
+    assert.equal(result.success, true);
+    assert.equal(queried, wallet);
   });
 
   it("fails when the on-chain deposit is below the entry fee", async () => {
