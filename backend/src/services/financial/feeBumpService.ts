@@ -288,7 +288,7 @@ export class AutomatedFeeBumpService {
     }
 
     const innerTx = parsed as Transaction;
-    const innerTxHash = innerTx.hash().toString("hex");
+    const innerTxHash = Buffer.from(innerTx.hash()).toString("hex");
     const initialFeeStroops = Number(innerTx.fee);
     const operationCount = Math.max(1, innerTx.operations.length);
     const currentPerOpFeeStroops = Math.ceil(initialFeeStroops / operationCount);
@@ -490,7 +490,7 @@ export class AutomatedFeeBumpService {
     }
 
     const previousTotalFeeStroops = tx.currentTotalFeeStroops;
-    const feeBumpHash = sendRes.hash || feeBumpTx.hash().toString("hex");
+    const feeBumpHash = sendRes.hash || Buffer.from(feeBumpTx.hash()).toString("hex");
     const nowDate = this.now();
 
     tx.latestTxHash = feeBumpHash;

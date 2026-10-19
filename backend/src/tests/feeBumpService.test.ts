@@ -48,7 +48,7 @@ function buildSignedInnerTxXdr(options?: {
 
   return {
     xdr: tx.toXDR(),
-    hash: tx.hash().toString("hex"),
+    hash: Buffer.from(tx.hash()).toString("hex"),
     keypair,
   };
 }
@@ -85,7 +85,7 @@ describe("AutomatedFeeBumpService — Stellar SEP-0015 Fee-Bump (Issue #363)", (
       sendFeeBumpTransaction: async (feeBumpTx: FeeBumpTransaction) => {
         submittedFeeBumps.push(feeBumpTx);
         return {
-          hash: feeBumpTx.hash().toString("hex"),
+          hash: Buffer.from(feeBumpTx.hash()).toString("hex"),
           status: "PENDING",
         };
       },
@@ -136,7 +136,7 @@ describe("AutomatedFeeBumpService — Stellar SEP-0015 Fee-Bump (Issue #363)", (
     const submittedFb = submittedFeeBumps[0];
     assert.equal(submittedFb.feeSource, sponsorKeypair.publicKey());
     assert.equal(
-      submittedFb.innerTransaction.hash().toString("hex"),
+      Buffer.from(submittedFb.innerTransaction.hash()).toString("hex"),
       hash,
       "FeeBumpTransaction must wrap the original signed inner transaction"
     );
@@ -148,7 +148,7 @@ describe("AutomatedFeeBumpService — Stellar SEP-0015 Fee-Bump (Issue #363)", (
     assert.equal(Number(submittedFb.fee), 1_000);
 
     // Once the bumped hash lands on-chain, the next poll marks it CONFIRMED
-    const bumpedHash = submittedFb.hash().toString("hex");
+    const bumpedHash = Buffer.from(submittedFb.hash()).toString("hex");
     txStatusByHash.set(bumpedHash, { status: "SUCCESS", ledger: 551234 });
 
     const confirmPoll = await service.pollMempoolOnce();
