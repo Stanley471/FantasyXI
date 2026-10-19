@@ -15,6 +15,8 @@ const PERSISTENT_LIFETIME_THRESHOLD: u32 = 14 * DAY_IN_LEDGERS;
 const EMERGENCY_REFUND_TIMELOCK_SECONDS: u64 = 14 * 24 * 60 * 60;
 pub const PARTICIPANTS_PER_PAGE: u32 = 50;
 pub const TIMELOCK_DELAY_LEDGERS: u32 = 2 * DAY_IN_LEDGERS; // 34,560 ledgers (48 hours)
+pub const UPGRADE_TIMELOCK_LEDGERS: u32 = TIMELOCK_DELAY_LEDGERS;
+pub const EMERGENCY_UNPAUSE_DELAY_SECONDS: u64 = 24 * 60 * 60;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -45,11 +47,13 @@ pub enum EscrowError {
     LeagueNotCancelled = 23,
     AlreadyClaimed = 24,
     InvalidFeeShare = 25,
-    HashMismatch = 23,
-    TimelockActive = 23,
-    ProposalNotFound = 24,
-    AlreadyApproved = 25,
-    ProposalExecuted = 26,
+    HashMismatch = 26,
+    TimelockActive = 27,
+    ProposalNotFound = 28,
+    AlreadyApproved = 29,
+    ProposalExecuted = 30,
+    UpgradeNotProposed = 31,
+    InvalidFederationPeer = 32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -100,6 +104,14 @@ pub struct TimelockProposal {
     pub executed: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct UpgradeProposal {
+    pub wasm_hash: BytesN<32>,
+    pub proposer: Address,
+    pub unlock_ledger: u32,
+}
+
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
@@ -114,6 +126,10 @@ pub enum DataKey {
     ParticipantPage(u64, u32),
     SettlementHash(u64),
     TimelockProposal(u64),
+    PendingUpgrade,
+    Guardian,
+    FederationPeers,
+    EmergencyUnpauseAfter,
 }
 
 /// # Issue #83: Soroban Escrow Smart Contract for Fantasy Leagues
@@ -129,6 +145,42 @@ impl FantasyXIEscrow {
             .instance()
             .get(&DataKey::IsPaused)
             .unwrap_or(false)
+    }
+
+    fn federation_peers(env: &Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::FederationPeers)
+            .unwrap_or_else(|| Vec::new(env))
+    }
+
+    /// Rejects value-moving operations while this contract or any linked
+    /// federation peer is paused, closing the window in which funds could
+    /// migrate between linked escrow and treasury instances.
+    fn ensure_operational(env: &Env) -> Result<(), EscrowError> {
+        if Self::is_paused(env) {
+            return Err(EscrowError::ContractPaused);
+        }
+        for peer in Self::federation_peers(env).iter() {
+            if FantasyXIEscrowClient::new(env, &peer).is_paused_view() {
+                return Err(EscrowError::ContractPaused);
+            }
+        }
+        Ok(())
+    }
+
+    fn engage_emergency_pause(env: &Env) {
+        let now = env.ledger().timestamp();
+        if !Self::is_paused(env) {
+            env.storage().instance().set(&DataKey::IsPaused, &true);
+            env.storage().instance().set(&DataKey::PausedAt, &now);
+        }
+        let unpause_after = now.saturating_add(EMERGENCY_UNPAUSE_DELAY_SECONDS);
+        env.storage()
+            .instance()
+            .set(&DataKey::EmergencyUnpauseAfter, &unpause_after);
+        env.events()
+            .publish((Symbol::new(env, "EmergencyPause"),), unpause_after);
     }
 
     fn require_admin(env: &Env, admin: &Address) -> Result<(), EscrowError> {
@@ -219,8 +271,20 @@ impl FantasyXIEscrow {
         }
 
         let unpaused_at = env.ledger().timestamp();
+        if let Some(unpause_after) = env
+            .storage()
+            .instance()
+            .get::<_, u64>(&DataKey::EmergencyUnpauseAfter)
+        {
+            if unpaused_at < unpause_after {
+                return Err(EscrowError::TimelockNotElapsed);
+            }
+        }
         env.storage().instance().set(&DataKey::IsPaused, &false);
         env.storage().instance().remove(&DataKey::PausedAt);
+        env.storage()
+            .instance()
+            .remove(&DataKey::EmergencyUnpauseAfter);
         env.events()
             .publish((Symbol::new(&env, "ContractUnpaused"),), unpaused_at);
         Ok(())
@@ -229,6 +293,79 @@ impl FantasyXIEscrow {
     /// Returns whether the escrow is currently paused.
     pub fn is_paused_view(env: Env) -> bool {
         Self::is_paused(&env)
+    }
+
+    /// Admin quorum appoints the guardian allowed to trigger a federated emergency pause.
+    pub fn set_guardian(
+        env: Env,
+        approvals: Vec<Address>,
+        guardian: Address,
+    ) -> Result<(), EscrowError> {
+        Self::authorize_signers(&env, &approvals)?;
+        env.storage().instance().set(&DataKey::Guardian, &guardian);
+        env.events()
+            .publish((Symbol::new(&env, "GuardianSet"),), guardian);
+        Ok(())
+    }
+
+    /// Admin quorum links a peer contract (e.g. treasury) into the pause federation.
+    /// Links are directional, so each side must register the other.
+    pub fn link_federation_peer(
+        env: Env,
+        approvals: Vec<Address>,
+        peer: Address,
+    ) -> Result<(), EscrowError> {
+        Self::authorize_signers(&env, &approvals)?;
+        if peer == env.current_contract_address() {
+            return Err(EscrowError::InvalidFederationPeer);
+        }
+        let mut peers = Self::federation_peers(&env);
+        if !peers.contains(&peer) {
+            peers.push_back(peer.clone());
+            env.storage()
+                .instance()
+                .set(&DataKey::FederationPeers, &peers);
+        }
+        env.events()
+            .publish((Symbol::new(&env, "FederationPeerLinked"),), peer);
+        Ok(())
+    }
+
+    pub fn get_federation_peers(env: Env) -> Vec<Address> {
+        Self::federation_peers(&env)
+    }
+
+    /// Guardian freezes this contract and atomically propagates the pause to
+    /// every linked peer. If any peer rejects the propagation the whole
+    /// invocation reverts, so the federation never ends up half-paused.
+    pub fn emergency_pause(env: Env, guardian: Address) -> Result<(), EscrowError> {
+        guardian.require_auth();
+        let stored_guardian: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Guardian)
+            .ok_or(EscrowError::NotAuthorized)?;
+        if guardian != stored_guardian {
+            return Err(EscrowError::NotAuthorized);
+        }
+
+        Self::engage_emergency_pause(&env);
+        let source = env.current_contract_address();
+        for peer in Self::federation_peers(&env).iter() {
+            FantasyXIEscrowClient::new(&env, &peer).federated_pause(&source);
+        }
+        Ok(())
+    }
+
+    /// Receives a pause propagated from a linked peer contract. `source` must
+    /// be the invoking contract and must be registered as a peer here.
+    pub fn federated_pause(env: Env, source: Address) -> Result<(), EscrowError> {
+        source.require_auth();
+        if !Self::federation_peers(&env).contains(&source) {
+            return Err(EscrowError::NotAuthorized);
+        }
+        Self::engage_emergency_pause(&env);
+        Ok(())
     }
 
     /// Registers a new competition partition identified by `league_id`.
@@ -281,9 +418,7 @@ impl FantasyXIEscrow {
 
     /// Participant deposits their entry fee into the league escrow partition.
     pub fn deposit(env: Env, participant: Address, league_id: u64) -> Result<(), EscrowError> {
-        if Self::is_paused(&env) {
-            return Err(EscrowError::ContractPaused);
-        }
+        Self::ensure_operational(&env)?;
         participant.require_auth();
 
         let league_key = DataKey::League(league_id);
@@ -417,9 +552,6 @@ impl FantasyXIEscrow {
         platform_treasury: Address,
         platform_fee: i128,
     ) -> Result<(), EscrowError> {
-        if Self::is_paused(&env) {
-            return Err(EscrowError::ContractPaused);
-        }
         let mut approvals = Vec::new(&env);
         approvals.push_back(admin);
         Self::settle_internal(
@@ -559,9 +691,6 @@ impl FantasyXIEscrow {
         platform_fee: i128,
         settlement_hash: BytesN<32>,
     ) -> Result<(), EscrowError> {
-        if Self::is_paused(&env) {
-            return Err(EscrowError::ContractPaused);
-        }
         let mut approvals = Vec::new(&env);
         approvals.push_back(admin);
         Self::settle_internal(
@@ -614,6 +743,7 @@ impl FantasyXIEscrow {
         proof: Option<BytesN<32>>,
         settlement_hash: Option<BytesN<32>>,
     ) -> Result<(), EscrowError> {
+        Self::ensure_operational(&env)?;
         Self::authorize_signers(&env, &approvals)?;
 
         if let Some(ref expected_hash) = settlement_hash {
@@ -854,6 +984,10 @@ impl FantasyXIEscrow {
             .persistent()
             .get(&league_key)
             .ok_or(EscrowError::LeagueNotFound)?;
+        // Settled deposits have already been redistributed as prizes and fees.
+        if league.status == LeagueStatus::Settled {
+            return Err(EscrowError::AlreadySettled);
+        }
         let deposit_key = DataKey::Deposit(league_id, participant.clone());
         let amount: i128 = env
             .storage()
@@ -1034,25 +1168,75 @@ impl FantasyXIEscrow {
         Ok(())
     }
 
-    /// Admin upgrades the executing contract to a new WASM executable.
+    /// A configured signer proposes a WASM upgrade, starting the upgrade timelock.
+    /// A new proposal replaces any pending one and restarts the timelock.
+    pub fn propose_upgrade(
+        env: Env,
+        proposer: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), EscrowError> {
+        proposer.require_auth();
+        let config: AdminConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminConfig)
+            .ok_or(EscrowError::NotInitialized)?;
+        if !config.signers.contains(&proposer) {
+            return Err(EscrowError::NotAuthorized);
+        }
+
+        let unlock_ledger = env.ledger().sequence() + UPGRADE_TIMELOCK_LEDGERS;
+        env.storage().instance().set(
+            &DataKey::PendingUpgrade,
+            &UpgradeProposal {
+                wasm_hash: new_wasm_hash.clone(),
+                proposer: proposer.clone(),
+                unlock_ledger,
+            },
+        );
+        env.events().publish(
+            (Symbol::new(&env, "upgrade_proposed"), proposer),
+            (new_wasm_hash, unlock_ledger),
+        );
+        Ok(())
+    }
+
+    pub fn get_pending_upgrade(env: Env) -> Option<UpgradeProposal> {
+        env.storage().instance().get(&DataKey::PendingUpgrade)
+    }
+
+    /// Upgrades the executing contract to a new WASM executable.
     ///
+    /// Requires an M-of-N quorum of configured signers (each must authorize the
+    /// invocation) and a matching proposal whose timelock has elapsed.
     /// Uses Soroban's WASM hash substitution via `update_current_contract_wasm`:
     /// `new_wasm_hash` must already be uploaded to the ledger beforehand. The
     /// contract address and all existing state (admin, leagues, deposits,
     /// prizes) are preserved across the upgrade.
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), EscrowError> {
-        admin.require_auth();
+    pub fn upgrade(
+        env: Env,
+        approvals: Vec<Address>,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), EscrowError> {
+        Self::authorize_signers(&env, &approvals)?;
 
-        let stored_admin: Address = env
+        let pending: UpgradeProposal = env
             .storage()
             .instance()
-            .get(&DataKey::Admin)
-            .ok_or(EscrowError::NotInitialized)?;
-
-        if admin != stored_admin {
-            return Err(EscrowError::NotAuthorized);
+            .get(&DataKey::PendingUpgrade)
+            .ok_or(EscrowError::UpgradeNotProposed)?;
+        if pending.wasm_hash != new_wasm_hash {
+            return Err(EscrowError::HashMismatch);
+        }
+        if env.ledger().sequence() < pending.unlock_ledger {
+            return Err(EscrowError::TimelockActive);
         }
 
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        env.events().publish(
+            (Symbol::new(&env, "upgrade_executed"),),
+            (new_wasm_hash.clone(), approvals),
+        );
         env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
     }
@@ -1102,6 +1286,7 @@ impl FantasyXIEscrow {
 
     /// Winner claims their prize for a settled league.
     pub fn claim_prize(env: Env, winner: Address, league_id: u64) -> Result<(), EscrowError> {
+        Self::ensure_operational(&env)?;
         winner.require_auth();
 
         let claim_key = DataKey::ClaimablePrize(league_id, winner.clone());
@@ -1354,6 +1539,8 @@ impl FantasyXIEscrow {
         if env.ledger().sequence() < proposal.unlock_ledger {
             return Err(EscrowError::TimelockActive);
         }
+
+        Self::ensure_operational(&env)?;
 
         let required_threshold = if config.signers.len() >= 2 && config.threshold < 2 {
             2
@@ -2015,6 +2202,31 @@ mod test {
     }
 
     #[test]
+    fn test_emergency_refund_rejected_after_settlement() {
+        let (env, admin, token_addr, client) = setup_test();
+        let user = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        token::StellarAssetClient::new(&env, &token_addr).mint(&user, &50_000_000);
+        client.create_league(&admin, &822, &50_000_000, &token_addr);
+        client.deposit(&user, &822);
+        let winners = vec![
+            &env,
+            WinnerPayout {
+                winner: user.clone(),
+                amount: 47_500_000,
+            },
+        ];
+        client.settle(&admin, &822, &winners, &treasury, &2_500_000);
+
+        client.pause(&admin);
+        env.ledger().set_timestamp(14 * 24 * 60 * 60);
+        assert_eq!(
+            client.try_emergency_refund_league(&user, &822),
+            Err(Ok(EscrowError::AlreadySettled))
+        );
+    }
+
+    #[test]
     fn test_only_admin_can_pause_and_unpause() {
         let (env, admin, _token_addr, client) = setup_test();
         let attacker = Address::generate(&env);
@@ -2102,8 +2314,15 @@ mod test {
 
         // Upload a new WASM executable and perform the V1 -> V2 upgrade via
         // WASM hash substitution. State must survive the upgrade.
+        env.ledger().with_mut(|li| {
+            li.min_persistent_entry_ttl = 2 * UPGRADE_TIMELOCK_LEDGERS;
+        });
         let new_wasm_hash = env.deployer().upload_contract_wasm(release_wasm());
-        client.upgrade(&admin, &new_wasm_hash);
+        client.propose_upgrade(&admin, &new_wasm_hash);
+        env.ledger().with_mut(|li| {
+            li.sequence_number += UPGRADE_TIMELOCK_LEDGERS;
+        });
+        client.upgrade(&vec![&env, admin.clone()], &new_wasm_hash);
 
         let after = client
             .get_league(&810)
@@ -2140,10 +2359,21 @@ mod test {
 
         client.create_league(&admin, &811, &50_000_000, &token_addr);
 
+        env.ledger().with_mut(|li| {
+            li.min_persistent_entry_ttl = 2 * UPGRADE_TIMELOCK_LEDGERS;
+        });
         let new_wasm_hash = env.deployer().upload_contract_wasm(release_wasm());
 
-        // A non-admin cannot trigger the upgrade
-        let result = client.try_upgrade(&attacker, &new_wasm_hash);
+        // A non-admin can neither propose nor trigger the upgrade
+        assert_eq!(
+            client.try_propose_upgrade(&attacker, &new_wasm_hash),
+            Err(Ok(EscrowError::NotAuthorized))
+        );
+        client.propose_upgrade(&admin, &new_wasm_hash);
+        env.ledger().with_mut(|li| {
+            li.sequence_number += UPGRADE_TIMELOCK_LEDGERS;
+        });
+        let result = client.try_upgrade(&vec![&env, attacker.clone()], &new_wasm_hash);
         assert_eq!(result, Err(Ok(EscrowError::NotAuthorized)));
 
         // A doomed upgrade must not disturb existing state
@@ -2426,6 +2656,9 @@ mod test {
         let league = client.get_league(&702).unwrap();
         assert_eq!(league.status, LeagueStatus::Upcoming);
         assert_eq!(client.get_settlement_hash(&702), None);
+    }
+
+    #[test]
     fn test_multisig_timelock_fee_withdrawal_lifecycle() {
         let env = Env::default();
         env.mock_all_auths();

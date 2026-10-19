@@ -275,3 +275,122 @@ proptest! {
         );
     }
 }
+
+fn release_wasm() -> &'static [u8] {
+    include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/target/wasm32-unknown-unknown/release/fantasyxi_escrow.wasm"
+    ))
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    /// Upgrade governance: an M-of-N quorum (M >= 2) is the only path to a WASM
+    /// upgrade. Any approval set that is short of quorum, padded with duplicates,
+    /// or contains an outsider is rejected with an explicit error and leaves the
+    /// pending proposal untouched; the full quorum then upgrades successfully.
+    #[test]
+    fn prop_upgrade_requires_signature_threshold(
+        signer_count in 2u32..=5u32,
+        threshold_seed in any::<u32>(),
+        short_by_seed in any::<u32>(),
+        pad_with_duplicate in any::<bool>(),
+        include_outsider in any::<bool>(),
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let threshold = 2 + threshold_seed % (signer_count - 1);
+        let signers: std::vec::Vec<Address> =
+            (0..signer_count).map(|_| Address::generate(&env)).collect();
+        let mut signer_vec = vec![&env];
+        for signer in &signers {
+            signer_vec.push_back(signer.clone());
+        }
+
+        let contract_address = env.register(FantasyXIEscrow, ());
+        let client = FantasyXIEscrowClient::new(&env, &contract_address);
+        client.initialize_multisig(&signer_vec, &threshold);
+
+        // Keep the uploaded code live across the upgrade timelock.
+        env.ledger().with_mut(|li| {
+            li.min_persistent_entry_ttl = 2 * fantasyxi_escrow::UPGRADE_TIMELOCK_LEDGERS;
+        });
+        let wasm_hash = env.deployer().upload_contract_wasm(release_wasm());
+
+        // Executing without a proposal is impossible even with full quorum.
+        prop_assert_eq!(
+            client.try_upgrade(&signer_vec, &wasm_hash),
+            Err(Ok(EscrowError::UpgradeNotProposed))
+        );
+
+        client.propose_upgrade(&signers[0], &wasm_hash);
+
+        // Full quorum is still blocked until the timelock elapses.
+        prop_assert_eq!(
+            client.try_upgrade(&signer_vec, &wasm_hash),
+            Err(Ok(EscrowError::TimelockActive))
+        );
+        env.ledger().with_mut(|li| {
+            li.sequence_number += fantasyxi_escrow::UPGRADE_TIMELOCK_LEDGERS;
+        });
+
+        // Single signature never suffices.
+        for signer in &signers {
+            prop_assert_eq!(
+                client.try_upgrade(&vec![&env, signer.clone()], &wasm_hash),
+                Err(Ok(EscrowError::InvalidMultisig))
+            );
+        }
+
+        // Any sub-quorum set, optionally padded to quorum size with a duplicate
+        // or an outsider, is rejected.
+        let short_len = 1 + short_by_seed % (threshold - 1);
+        let mut insufficient = vec![&env];
+        for signer in signers.iter().take(short_len as usize) {
+            insufficient.push_back(signer.clone());
+        }
+        prop_assert_eq!(
+            client.try_upgrade(&insufficient, &wasm_hash),
+            Err(Ok(EscrowError::InvalidMultisig))
+        );
+        while insufficient.len() < threshold {
+            if include_outsider {
+                insufficient.push_back(Address::generate(&env));
+            } else if pad_with_duplicate {
+                insufficient.push_back(signers[0].clone());
+            } else {
+                break;
+            }
+        }
+        if insufficient.len() >= threshold {
+            let expected = if include_outsider {
+                EscrowError::NotAuthorized
+            } else {
+                EscrowError::InvalidMultisig
+            };
+            prop_assert_eq!(client.try_upgrade(&insufficient, &wasm_hash), Err(Ok(expected)));
+        }
+
+        // Quorum approving a different hash than the one proposed is rejected.
+        let mut quorum = vec![&env];
+        for signer in signers.iter().take(threshold as usize) {
+            quorum.push_back(signer.clone());
+        }
+        let other_hash = soroban_sdk::BytesN::from_array(&env, &[9; 32]);
+        prop_assert_eq!(
+            client.try_upgrade(&quorum, &other_hash),
+            Err(Ok(EscrowError::HashMismatch))
+        );
+        prop_assert!(client.get_pending_upgrade().is_some());
+
+        // Exactly M distinct signers succeed and consume the proposal.
+        client.upgrade(&quorum, &wasm_hash);
+        prop_assert!(client.get_pending_upgrade().is_none());
+        prop_assert_eq!(
+            client.try_upgrade(&quorum, &wasm_hash),
+            Err(Ok(EscrowError::UpgradeNotProposed))
+        );
+    }
+}
