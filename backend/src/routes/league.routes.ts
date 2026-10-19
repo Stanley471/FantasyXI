@@ -15,6 +15,12 @@ import {
   previewLeagueInvitation,
   acceptLeagueInvitation,
 } from "../controllers/league.controller.js";
+import {
+  getLeagueAuditSeal,
+  exportLeagueAuditJson,
+  exportLeagueAuditPdf,
+  verifyLeagueAuditPackage,
+} from "../controllers/leagueAudit.controller.js";
 import { requireAuth, requirePermission, optionalAuth, requireRole } from "../middleware/authMiddleware.js";
 import { Permission, UserRole } from "../types/index.js";
 import { authenticatedRateLimiter, mutationRateLimiter } from "../middleware/rateLimiter.js";
@@ -87,6 +93,21 @@ router.delete(
 // Real-time delivery: WebSocket at /api/v1/leagues/:leagueId/chat/ws (see realtime/chatSocketServer.ts)
 router.get("/:leagueId/chat/messages", primaryReads, requireAuth, getChatMessages);
 router.post("/:leagueId/chat/messages", requireAuth, postChatMessage);
+
+// ============================================================
+// League Audit Trail & Cryptographic Merkle Seal Routes (#361)
+// ============================================================
+// GET /api/v1/leagues/:id/audit/seal (Public: inspect gameweek Merkle seal)
+router.get("/:id/audit/seal", primaryReads, getLeagueAuditSeal);
+
+// GET /api/v1/leagues/:id/audit/export/json (Public: download audit package)
+router.get("/:id/audit/export/json", primaryReads, exportLeagueAuditJson);
+
+// GET /api/v1/leagues/:id/audit/export/pdf (Public: download PDF audit certificate)
+router.get("/:id/audit/export/pdf", primaryReads, exportLeagueAuditPdf);
+
+// POST /api/v1/leagues/:id/audit/verify (Public: mathematically verify audit package)
+router.post("/:id/audit/verify", verifyLeagueAuditPackage);
 
 // ============================================================
 // Financial & Stellar Escrow Routes
