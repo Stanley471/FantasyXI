@@ -45,11 +45,11 @@ pub enum EscrowError {
     LeagueNotCancelled = 23,
     AlreadyClaimed = 24,
     InvalidFeeShare = 25,
-    HashMismatch = 23,
-    TimelockActive = 23,
-    ProposalNotFound = 24,
-    AlreadyApproved = 25,
-    ProposalExecuted = 26,
+    HashMismatch = 26,
+    TimelockActive = 27,
+    ProposalNotFound = 28,
+    AlreadyApproved = 29,
+    ProposalExecuted = 30,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -100,6 +100,25 @@ pub struct TimelockProposal {
     pub executed: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[contracttype]
+#[repr(u32)]
+pub enum PauseAction {
+    Pause = 1,
+    Unpause = 2,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct PauseProposal {
+    pub id: u64,
+    pub proposer: Address,
+    pub action: PauseAction,
+    pub unlock_ledger: u32,
+    pub approvals: Vec<Address>,
+    pub executed: bool,
+}
+
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
@@ -114,6 +133,7 @@ pub enum DataKey {
     ParticipantPage(u64, u32),
     SettlementHash(u64),
     TimelockProposal(u64),
+    PauseProposal(u64),
 }
 
 /// # Issue #83: Soroban Escrow Smart Contract for Fantasy Leagues
@@ -196,9 +216,9 @@ impl FantasyXIEscrow {
         Ok(())
     }
 
-    /// Pauses deposits and settlement while leaving refunds available.
-    pub fn pause(env: Env, admin: Address) -> Result<(), EscrowError> {
-        Self::require_admin(&env, &admin)?;
+    /// Direct M-of-N multi-party authorization to pause contract operations.
+    pub fn pause_with_multisig(env: Env, approvals: Vec<Address>) -> Result<(), EscrowError> {
+        Self::authorize_signers(&env, &approvals)?;
         if Self::is_paused(&env) {
             return Err(EscrowError::AlreadyPaused);
         }
@@ -211,9 +231,9 @@ impl FantasyXIEscrow {
         Ok(())
     }
 
-    /// Resumes deposits and settlement after an emergency pause.
-    pub fn unpause(env: Env, admin: Address) -> Result<(), EscrowError> {
-        Self::require_admin(&env, &admin)?;
+    /// Direct M-of-N multi-party authorization to unpause contract operations.
+    pub fn unpause_with_multisig(env: Env, approvals: Vec<Address>) -> Result<(), EscrowError> {
+        Self::authorize_signers(&env, &approvals)?;
         if !Self::is_paused(&env) {
             return Err(EscrowError::NotPaused);
         }
@@ -224,6 +244,20 @@ impl FantasyXIEscrow {
         env.events()
             .publish((Symbol::new(&env, "ContractUnpaused"),), unpaused_at);
         Ok(())
+    }
+
+    /// Pauses deposits and settlement via admin or multisig threshold.
+    pub fn pause(env: Env, admin: Address) -> Result<(), EscrowError> {
+        let mut approvals = Vec::new(&env);
+        approvals.push_back(admin);
+        Self::pause_with_multisig(env, approvals)
+    }
+
+    /// Resumes deposits and settlement after an emergency pause.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), EscrowError> {
+        let mut approvals = Vec::new(&env);
+        approvals.push_back(admin);
+        Self::unpause_with_multisig(env, approvals)
     }
 
     /// Returns whether the escrow is currently paused.
@@ -239,6 +273,9 @@ impl FantasyXIEscrow {
         entry_fee: i128,
         asset: Address,
     ) -> Result<(), EscrowError> {
+        if Self::is_paused(&env) {
+            return Err(EscrowError::ContractPaused);
+        }
         creator.require_auth();
 
         if entry_fee < 0 {
@@ -373,6 +410,9 @@ impl FantasyXIEscrow {
         gameweek_id: u64,
         result_hash: BytesN<32>,
     ) -> Result<(), EscrowError> {
+        if Self::is_paused(&env) {
+            return Err(EscrowError::ContractPaused);
+        }
         let mut approvals = Vec::new(&env);
         approvals.push_back(admin);
         Self::authorize_signers(&env, &approvals)?;
@@ -614,6 +654,9 @@ impl FantasyXIEscrow {
         proof: Option<BytesN<32>>,
         settlement_hash: Option<BytesN<32>>,
     ) -> Result<(), EscrowError> {
+        if Self::is_paused(&env) {
+            return Err(EscrowError::ContractPaused);
+        }
         Self::authorize_signers(&env, &approvals)?;
 
         if let Some(ref expected_hash) = settlement_hash {
@@ -887,17 +930,7 @@ impl FantasyXIEscrow {
         league_id: u64,
         participants: Vec<Address>,
     ) -> Result<(), EscrowError> {
-        admin.require_auth();
-
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(EscrowError::NotInitialized)?;
-
-        if admin != stored_admin {
-            return Err(EscrowError::NotAuthorized);
-        }
+        Self::require_admin(&env, &admin)?;
 
         let league_key = DataKey::League(league_id);
         let mut league: LeagueState = env
@@ -954,6 +987,9 @@ impl FantasyXIEscrow {
     /// Cancels an un-settled league so enrolled participants can claim refunds.
     /// Caller must be either admin or league creator.
     pub fn cancel_league(env: Env, caller: Address, league_id: u64) -> Result<(), EscrowError> {
+        if Self::is_paused(&env) {
+            return Err(EscrowError::ContractPaused);
+        }
         caller.require_auth();
 
         let league_key = DataKey::League(league_id);
@@ -1041,17 +1077,7 @@ impl FantasyXIEscrow {
     /// contract address and all existing state (admin, leagues, deposits,
     /// prizes) are preserved across the upgrade.
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), EscrowError> {
-        admin.require_auth();
-
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(EscrowError::NotInitialized)?;
-
-        if admin != stored_admin {
-            return Err(EscrowError::NotAuthorized);
-        }
+        Self::require_admin(&env, &admin)?;
 
         env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
@@ -1102,6 +1128,9 @@ impl FantasyXIEscrow {
 
     /// Winner claims their prize for a settled league.
     pub fn claim_prize(env: Env, winner: Address, league_id: u64) -> Result<(), EscrowError> {
+        if Self::is_paused(&env) {
+            return Err(EscrowError::ContractPaused);
+        }
         winner.require_auth();
 
         let claim_key = DataKey::ClaimablePrize(league_id, winner.clone());
@@ -1391,6 +1420,216 @@ impl FantasyXIEscrow {
     /// Retrieves a timelock proposal by id.
     pub fn get_timelock_proposal(env: Env, proposal_id: u64) -> Option<TimelockProposal> {
         let key = DataKey::TimelockProposal(proposal_id);
+        env.storage().persistent().get(&key)
+    }
+
+    /// Proposes an emergency pause action subject to multisig approval.
+    pub fn propose_pause(env: Env, caller: Address, proposal_id: u64) -> Result<(), EscrowError> {
+        Self::propose_pause_action_internal(&env, caller, proposal_id, PauseAction::Pause, 0)
+    }
+
+    /// Proposes an unpause action subject to multisig approval.
+    pub fn propose_unpause(env: Env, caller: Address, proposal_id: u64) -> Result<(), EscrowError> {
+        Self::propose_pause_action_internal(&env, caller, proposal_id, PauseAction::Unpause, 0)
+    }
+
+    /// Proposes a pause/unpause action with an explicit timelock delay in ledgers.
+    pub fn propose_pause_with_timelock(
+        env: Env,
+        caller: Address,
+        proposal_id: u64,
+        action: PauseAction,
+        timelock_ledgers: u32,
+    ) -> Result<(), EscrowError> {
+        Self::propose_pause_action_internal(&env, caller, proposal_id, action, timelock_ledgers)
+    }
+
+    fn propose_pause_action_internal(
+        env: &Env,
+        caller: Address,
+        proposal_id: u64,
+        action: PauseAction,
+        timelock_ledgers: u32,
+    ) -> Result<(), EscrowError> {
+        caller.require_auth();
+
+        let config: AdminConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminConfig)
+            .ok_or(EscrowError::NotInitialized)?;
+
+        if !config.signers.iter().any(|s| s == caller) {
+            return Err(EscrowError::NotAuthorized);
+        }
+
+        let key = DataKey::PauseProposal(proposal_id);
+        if env.storage().persistent().has(&key) {
+            return Err(EscrowError::AlreadyInitialized);
+        }
+
+        let unlock_ledger = env.ledger().sequence().saturating_add(timelock_ledgers);
+        let mut approvals = Vec::new(env);
+        approvals.push_back(caller.clone());
+
+        let proposal = PauseProposal {
+            id: proposal_id,
+            proposer: caller.clone(),
+            action,
+            unlock_ledger,
+            approvals,
+            executed: false,
+        };
+
+        env.storage().persistent().set(&key, &proposal);
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        env.events().publish(
+            (Symbol::new(env, "PauseProposalCreated"), proposal_id),
+            (caller, action as u32),
+        );
+
+        Ok(())
+    }
+
+    /// Approves a proposed pause or unpause action.
+    pub fn approve_pause_proposal(
+        env: Env,
+        caller: Address,
+        proposal_id: u64,
+    ) -> Result<(), EscrowError> {
+        caller.require_auth();
+
+        let config: AdminConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminConfig)
+            .ok_or(EscrowError::NotInitialized)?;
+
+        if !config.signers.iter().any(|s| s == caller) {
+            return Err(EscrowError::NotAuthorized);
+        }
+
+        let key = DataKey::PauseProposal(proposal_id);
+        let mut proposal: PauseProposal = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(EscrowError::ProposalNotFound)?;
+
+        if proposal.executed {
+            return Err(EscrowError::ProposalExecuted);
+        }
+
+        if proposal.approvals.iter().any(|s| s == caller) {
+            return Err(EscrowError::AlreadyApproved);
+        }
+
+        proposal.approvals.push_back(caller.clone());
+        env.storage().persistent().set(&key, &proposal);
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "PauseProposalApproved"), proposal_id),
+            caller,
+        );
+
+        Ok(())
+    }
+
+    /// Executes an approved pause/unpause proposal once threshold approvals and timelock conditions are satisfied.
+    pub fn execute_pause_proposal(
+        env: Env,
+        caller: Address,
+        proposal_id: u64,
+    ) -> Result<(), EscrowError> {
+        caller.require_auth();
+
+        let config: AdminConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminConfig)
+            .ok_or(EscrowError::NotInitialized)?;
+
+        if !config.signers.iter().any(|s| s == caller) {
+            return Err(EscrowError::NotAuthorized);
+        }
+
+        let key = DataKey::PauseProposal(proposal_id);
+        let mut proposal: PauseProposal = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(EscrowError::ProposalNotFound)?;
+
+        if proposal.executed {
+            return Err(EscrowError::ProposalExecuted);
+        }
+
+        if env.ledger().sequence() < proposal.unlock_ledger {
+            return Err(EscrowError::TimelockActive);
+        }
+
+        let required_threshold = if config.signers.len() >= 2 && config.threshold < 2 {
+            2
+        } else {
+            config.threshold
+        };
+
+        if proposal.approvals.len() < required_threshold {
+            return Err(EscrowError::InvalidMultisig);
+        }
+
+        match proposal.action {
+            PauseAction::Pause => {
+                if Self::is_paused(&env) {
+                    return Err(EscrowError::AlreadyPaused);
+                }
+                let paused_at = env.ledger().timestamp();
+                env.storage().instance().set(&DataKey::IsPaused, &true);
+                env.storage().instance().set(&DataKey::PausedAt, &paused_at);
+                env.events()
+                    .publish((Symbol::new(&env, "ContractPaused"),), paused_at);
+            }
+            PauseAction::Unpause => {
+                if !Self::is_paused(&env) {
+                    return Err(EscrowError::NotPaused);
+                }
+                let unpaused_at = env.ledger().timestamp();
+                env.storage().instance().set(&DataKey::IsPaused, &false);
+                env.storage().instance().remove(&DataKey::PausedAt);
+                env.events()
+                    .publish((Symbol::new(&env, "ContractUnpaused"),), unpaused_at);
+            }
+        }
+
+        proposal.executed = true;
+        env.storage().persistent().set(&key, &proposal);
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "PauseProposalExecuted"), proposal_id),
+            (caller, proposal.action as u32),
+        );
+
+        Ok(())
+    }
+
+    /// Retrieves a pause proposal by id.
+    pub fn get_pause_proposal(env: Env, proposal_id: u64) -> Option<PauseProposal> {
+        let key = DataKey::PauseProposal(proposal_id);
         env.storage().persistent().get(&key)
     }
 }
@@ -2426,6 +2665,9 @@ mod test {
         let league = client.get_league(&702).unwrap();
         assert_eq!(league.status, LeagueStatus::Upcoming);
         assert_eq!(client.get_settlement_hash(&702), None);
+    }
+
+    #[test]
     fn test_multisig_timelock_fee_withdrawal_lifecycle() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2543,5 +2785,229 @@ mod test {
 
         let re_approve = client.try_approve_fee_withdrawal(&signer_three, &proposal_id);
         assert_eq!(re_approve, Err(Ok(EscrowError::ProposalExecuted)));
+    }
+
+    #[test]
+    fn test_multisig_emergency_pause_prevents_unilateral_admin_and_restores_operations() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(FantasyXIEscrow, ());
+        let client = FantasyXIEscrowClient::new(&env, &contract_id);
+
+        let signer_one = Address::generate(&env);
+        let signer_two = Address::generate(&env);
+        let signer_three = Address::generate(&env);
+
+        let signers = vec![
+            &env,
+            signer_one.clone(),
+            signer_two.clone(),
+            signer_three.clone(),
+        ];
+        // Threshold: 2 of 3
+        client.initialize_multisig(&signers, &2);
+
+        // 1. Unilateral pause by single admin fails InvalidMultisig
+        let unilateral_pause = client.try_pause(&signer_one);
+        assert_eq!(unilateral_pause, Err(Ok(EscrowError::InvalidMultisig)));
+        assert!(!client.is_paused_view());
+
+        // 2. Direct multisig pause with only 1 approval fails InvalidMultisig
+        let one_approval = vec![&env, signer_one.clone()];
+        let direct_one_pause = client.try_pause_with_multisig(&one_approval);
+        assert_eq!(direct_one_pause, Err(Ok(EscrowError::InvalidMultisig)));
+        assert!(!client.is_paused_view());
+
+        // 3. Direct multisig pause with threshold approvals (2-of-3) succeeds
+        let two_approvals = vec![&env, signer_one.clone(), signer_two.clone()];
+        client.pause_with_multisig(&two_approvals);
+        assert!(client.is_paused_view());
+
+        // 4. Pausing again returns AlreadyPaused
+        let repeat_pause = client.try_pause_with_multisig(&two_approvals);
+        assert_eq!(repeat_pause, Err(Ok(EscrowError::AlreadyPaused)));
+
+        // 5. Unilateral unpause fails InvalidMultisig
+        let unilateral_unpause = client.try_unpause(&signer_one);
+        assert_eq!(unilateral_unpause, Err(Ok(EscrowError::InvalidMultisig)));
+        assert!(client.is_paused_view());
+
+        // 6. Direct multisig unpause with threshold approvals (2-of-3) succeeds
+        let unpause_approvals = vec![&env, signer_two.clone(), signer_three.clone()];
+        client.unpause_with_multisig(&unpause_approvals);
+        assert!(!client.is_paused_view());
+
+        // 7. Unpausing again returns NotPaused
+        let repeat_unpause = client.try_unpause_with_multisig(&unpause_approvals);
+        assert_eq!(repeat_unpause, Err(Ok(EscrowError::NotPaused)));
+    }
+
+    #[test]
+    fn test_pause_governance_proposal_lifecycle_and_timelock() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(FantasyXIEscrow, ());
+        let client = FantasyXIEscrowClient::new(&env, &contract_id);
+
+        let signer_one = Address::generate(&env);
+        let signer_two = Address::generate(&env);
+        let signer_three = Address::generate(&env);
+        let non_signer = Address::generate(&env);
+
+        let signers = vec![
+            &env,
+            signer_one.clone(),
+            signer_two.clone(),
+            signer_three.clone(),
+        ];
+        client.initialize_multisig(&signers, &2);
+
+        let proposal_id = 101u64;
+
+        // 1. Non-signer cannot propose
+        let unauthorized = client.try_propose_pause(&non_signer, &proposal_id);
+        assert_eq!(unauthorized, Err(Ok(EscrowError::NotAuthorized)));
+
+        // 2. Propose pause with timelock delay of 50 ledgers
+        client.propose_pause_with_timelock(&signer_one, &proposal_id, &PauseAction::Pause, &50);
+
+        let proposal = client.get_pause_proposal(&proposal_id).unwrap();
+        assert_eq!(proposal.id, proposal_id);
+        assert_eq!(proposal.proposer, signer_one);
+        assert_eq!(proposal.action, PauseAction::Pause);
+        assert_eq!(proposal.approvals.len(), 1);
+        assert!(!proposal.executed);
+
+        // 3. Duplicate proposal ID fails
+        let dup = client.try_propose_pause(&signer_two, &proposal_id);
+        assert_eq!(dup, Err(Ok(EscrowError::AlreadyInitialized)));
+
+        // 4. Execution before timelock expiry fails TimelockActive
+        let premature = client.try_execute_pause_proposal(&signer_one, &proposal_id);
+        assert_eq!(premature, Err(Ok(EscrowError::TimelockActive)));
+
+        // 5. Advance ledger past timelock
+        env.ledger().with_mut(|li| {
+            li.sequence_number += 51;
+        });
+
+        // 6. Attempt execution with only 1 approval fails InvalidMultisig
+        let single_exec = client.try_execute_pause_proposal(&signer_one, &proposal_id);
+        assert_eq!(single_exec, Err(Ok(EscrowError::InvalidMultisig)));
+
+        // 7. Non-signer cannot approve
+        let bad_approve = client.try_approve_pause_proposal(&non_signer, &proposal_id);
+        assert_eq!(bad_approve, Err(Ok(EscrowError::NotAuthorized)));
+
+        // 8. Signer one duplicate approval fails AlreadyApproved
+        let dup_approve = client.try_approve_pause_proposal(&signer_one, &proposal_id);
+        assert_eq!(dup_approve, Err(Ok(EscrowError::AlreadyApproved)));
+
+        // 9. Signer two approves proposal
+        client.approve_pause_proposal(&signer_two, &proposal_id);
+        let proposal_after_approval = client.get_pause_proposal(&proposal_id).unwrap();
+        assert_eq!(proposal_after_approval.approvals.len(), 2);
+
+        // 10. Execute pause proposal successfully
+        client.execute_pause_proposal(&signer_one, &proposal_id);
+        assert!(client.is_paused_view());
+
+        let final_proposal = client.get_pause_proposal(&proposal_id).unwrap();
+        assert!(final_proposal.executed);
+
+        // 11. Already executed proposal cannot be executed again
+        let re_exec = client.try_execute_pause_proposal(&signer_two, &proposal_id);
+        assert_eq!(re_exec, Err(Ok(EscrowError::ProposalExecuted)));
+
+        // 12. Propose unpause (default 0 delay for rapid recovery once multisig threshold achieved)
+        let unpause_id = 102u64;
+        client.propose_unpause(&signer_two, &unpause_id);
+        client.approve_pause_proposal(&signer_three, &unpause_id);
+        client.execute_pause_proposal(&signer_three, &unpause_id);
+        assert!(!client.is_paused_view());
+
+        let unpause_prop = client.get_pause_proposal(&unpause_id).unwrap();
+        assert!(unpause_prop.executed);
+        assert_eq!(unpause_prop.action, PauseAction::Unpause);
+    }
+
+    #[test]
+    fn test_paused_state_blocks_all_modifying_methods_and_permits_emergency_refund() {
+        let (env, admin, token_addr, client) = setup_test();
+        let user1 = Address::generate(&env);
+        let user2 = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let token_admin = token::StellarAssetClient::new(&env, &token_addr);
+
+        token_admin.mint(&user1, &100_000_000);
+        token_admin.mint(&user2, &100_000_000);
+
+        let league_id = 910u64;
+        client.create_league(&admin, &league_id, &50_000_000, &token_addr);
+        client.deposit(&user1, &league_id);
+
+        // Emergency pause
+        client.pause(&admin);
+        assert!(client.is_paused_view());
+
+        // 1. create_league rejected with ContractPaused
+        let err_create = client.try_create_league(&admin, &911, &50_000_000, &token_addr);
+        assert_eq!(err_create, Err(Ok(EscrowError::ContractPaused)));
+
+        // 2. deposit rejected with ContractPaused
+        let err_deposit = client.try_deposit(&user2, &league_id);
+        assert_eq!(err_deposit, Err(Ok(EscrowError::ContractPaused)));
+
+        // 3. publish_gameweek_result rejected with ContractPaused
+        let dummy_hash = BytesN::from_array(&env, &[1u8; 32]);
+        let err_publish = client.try_publish_gameweek_result(&admin, &1, &dummy_hash);
+        assert_eq!(err_publish, Err(Ok(EscrowError::ContractPaused)));
+
+        // 4. settle rejected with ContractPaused
+        let winners = vec![
+            &env,
+            WinnerPayout {
+                winner: user1.clone(),
+                amount: 47_500_000,
+            },
+        ];
+        let err_settle = client.try_settle(&admin, &league_id, &winners, &treasury, &2_500_000);
+        assert_eq!(err_settle, Err(Ok(EscrowError::ContractPaused)));
+
+        // 5. settle_with_multisig rejected with ContractPaused
+        let err_settle_multi = client.try_settle_with_multisig(
+            &vec![&env, admin.clone()],
+            &league_id,
+            &winners,
+            &treasury,
+            &2_500_000,
+        );
+        assert_eq!(err_settle_multi, Err(Ok(EscrowError::ContractPaused)));
+
+        // 6. claim_prize rejected with ContractPaused
+        let err_claim = client.try_claim_prize(&user1, &league_id);
+        assert_eq!(err_claim, Err(Ok(EscrowError::ContractPaused)));
+
+        // 7. cancel_league rejected with ContractPaused
+        let err_cancel = client.try_cancel_league(&admin, &league_id);
+        assert_eq!(err_cancel, Err(Ok(EscrowError::ContractPaused)));
+
+        // 8. Emergency refund is permitted once timelock elapses while paused
+        env.ledger().set_timestamp(14 * 24 * 60 * 60);
+        let token_client = token::Client::new(&env, &token_addr);
+        assert_eq!(token_client.balance(&user1), 50_000_000); // 100M - 50M deposit
+        client.emergency_refund_league(&user1, &league_id);
+        assert_eq!(token_client.balance(&user1), 100_000_000); // recovered!
+
+        // 9. Unpause restores normal contract operations
+        client.unpause(&admin);
+        assert!(!client.is_paused_view());
+
+        let new_league_id = 912u64;
+        client.create_league(&admin, &new_league_id, &50_000_000, &token_addr);
+        client.deposit(&user2, &new_league_id);
+        assert_eq!(client.get_deposit(&new_league_id, &user2), 50_000_000);
     }
 }
