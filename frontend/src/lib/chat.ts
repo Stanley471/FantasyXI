@@ -1,7 +1,10 @@
-import { ChatEntry } from "@/types";
+import { ChatEntry, ChatMessage, ChatReactionState } from "@/types";
 
 /** Matches the server's limit (services/chat/chatService.ts) */
 export const MAX_CHAT_MESSAGE_LENGTH = 500;
+
+/** Quick-reaction emojis available on league chat messages */
+export const DEFAULT_CHAT_REACTIONS = ["🔥", "😂", "👏", "⚽"] as const;
 
 /** WebSocket URL for a league's chat, derived from the REST API base URL */
 export function chatSocketUrl(apiBaseUrl: string, leagueId: string): string {
@@ -20,11 +23,19 @@ export function mergeMessages(existing: ChatEntry[], incoming: ChatEntry[]): Cha
   const keyOf = (m: ChatEntry) => (m.status ? `client:${m.clientId}` : `id:${m.id}`);
 
   for (const message of [...existing, ...incoming]) {
+    let preservedReactions: Record<string, ChatReactionState> | undefined;
     if (!message.status && message.clientId) {
+      const draftCopy = byKey.get(`client:${message.clientId}`);
+      preservedReactions = draftCopy?.reactions;
       // A confirmed message replaces its optimistic copy
       byKey.delete(`client:${message.clientId}`);
     }
-    byKey.set(keyOf(message), message);
+    const existingById = byKey.get(keyOf(message));
+    const mergedReactions = message.reactions ?? existingById?.reactions ?? preservedReactions;
+    byKey.set(
+      keyOf(message),
+      mergedReactions ? { ...message, reactions: mergedReactions } : message
+    );
   }
 
   const all = [...byKey.values()];
@@ -33,6 +44,187 @@ export function mergeMessages(existing: ChatEntry[], incoming: ChatEntry[]): Cha
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
   const pending = all.filter((m) => m.status);
   return [...confirmed, ...pending];
+}
+
+/**
+ * Creates a client-side optimistic chat message with a temporary UUID and
+ * `status: "sending"` for immediate insertion into the chat feed.
+ */
+export function createOptimisticMessage(params: {
+  leagueId: string;
+  userId: string;
+  username: string;
+  body: string;
+  clientId?: string;
+  createdAt?: string;
+}): ChatEntry {
+  const clientId = params.clientId ?? createClientId();
+  return {
+    id: clientId,
+    clientId,
+    leagueId: params.leagueId,
+    userId: params.userId,
+    username: params.username,
+    body: params.body.trim(),
+    createdAt: params.createdAt ?? new Date().toISOString(),
+    status: "sending",
+  };
+}
+
+/**
+ * Reconciles an optimistic message with the server's canonical message (`id`, `createdAt`)
+ * upon receiving the server acknowledgement or broadcast.
+ */
+export function reconcileOptimisticMessage(
+  messages: ChatEntry[],
+  canonicalMessage: ChatMessage,
+  clientId?: string
+): ChatEntry[] {
+  return mergeMessages(messages, [{ ...canonicalMessage, clientId }]);
+}
+
+/**
+ * Transitions an in-flight optimistic message to the `"failed"` state with an error reason.
+ */
+export function markMessageFailed(
+  messages: ChatEntry[],
+  clientId: string,
+  error: string,
+  lostInFlight = false
+): ChatEntry[] {
+  return messages.map((m) =>
+    m.clientId === clientId && m.status === "sending"
+      ? { ...m, status: "failed" as const, error, lostInFlight }
+      : m
+  );
+}
+
+/**
+ * Rolls back (removes) an optimistic message that failed to send when the user dismisses it.
+ */
+export function rollbackFailedMessage(messages: ChatEntry[], clientId: string): ChatEntry[] {
+  return messages.filter((m) => !(m.clientId === clientId && m.status === "failed"));
+}
+
+function cloneReactions(
+  reactions: Record<string, ChatReactionState> | undefined
+): Record<string, ChatReactionState> | undefined {
+  if (!reactions) return undefined;
+  const copy: Record<string, ChatReactionState> = {};
+  for (const [emoji, state] of Object.entries(reactions)) {
+    copy[emoji] = {
+      emoji: state.emoji,
+      count: state.count,
+      userIds: [...state.userIds],
+      ...(state.pending !== undefined ? { pending: state.pending } : {}),
+    };
+  }
+  return copy;
+}
+
+/**
+ * Optimistically toggles a user's emoji reaction on a message, immediately
+ * incrementing (or decrementing if already reacted) the counter and returning
+ * a snapshot of the previous reactions map for rollback if the request fails.
+ */
+export function applyOptimisticReaction(
+  messages: ChatEntry[],
+  messageId: string,
+  emoji: string,
+  userId: string
+): {
+  messages: ChatEntry[];
+  previousReactions: Record<string, ChatReactionState> | undefined;
+  added: boolean;
+} {
+  let previousReactions: Record<string, ChatReactionState> | undefined;
+  let added = false;
+
+  const updated = messages.map((m) => {
+    if (m.id !== messageId) return m;
+    previousReactions = cloneReactions(m.reactions);
+
+    const nextReactions: Record<string, ChatReactionState> = cloneReactions(m.reactions) ?? {};
+    const current = nextReactions[emoji] ?? { emoji, count: 0, userIds: [] };
+    const alreadyReacted = current.userIds.includes(userId);
+
+    if (alreadyReacted) {
+      const nextUsers = current.userIds.filter((id) => id !== userId);
+      const nextCount = Math.max(0, current.count - 1);
+      if (nextCount === 0) {
+        delete nextReactions[emoji];
+      } else {
+        nextReactions[emoji] = {
+          emoji,
+          count: nextCount,
+          userIds: nextUsers,
+          pending: true,
+        };
+      }
+      added = false;
+    } else {
+      nextReactions[emoji] = {
+        emoji,
+        count: current.count + 1,
+        userIds: [...current.userIds, userId],
+        pending: true,
+      };
+      added = true;
+    }
+
+    return {
+      ...m,
+      reactions: Object.keys(nextReactions).length > 0 ? nextReactions : undefined,
+    };
+  });
+
+  return { messages: updated, previousReactions, added };
+}
+
+/**
+ * Clears the pending flag (or applies the canonical server reaction state) once
+ * a reaction API/socket request succeeds.
+ */
+export function reconcileReactionSuccess(
+  messages: ChatEntry[],
+  messageId: string,
+  emoji: string,
+  serverReactions?: Record<string, ChatReactionState>
+): ChatEntry[] {
+  return messages.map((m) => {
+    if (m.id !== messageId) return m;
+    if (serverReactions) {
+      return {
+        ...m,
+        reactions: Object.keys(serverReactions).length > 0 ? cloneReactions(serverReactions) : undefined,
+      };
+    }
+    if (!m.reactions || !m.reactions[emoji]) return m;
+    const nextReactions = cloneReactions(m.reactions)!;
+    const target = nextReactions[emoji];
+    if (target) {
+      delete target.pending;
+    }
+    return { ...m, reactions: nextReactions };
+  });
+}
+
+/**
+ * Rolls back a message's emoji reactions to the snapshot captured before the
+ * optimistic update when the server rejects or fails to process the reaction.
+ */
+export function rollbackOptimisticReaction(
+  messages: ChatEntry[],
+  messageId: string,
+  previousReactions: Record<string, ChatReactionState> | undefined
+): ChatEntry[] {
+  return messages.map((m) => {
+    if (m.id !== messageId) return m;
+    return {
+      ...m,
+      reactions: cloneReactions(previousReactions),
+    };
+  });
 }
 
 /**

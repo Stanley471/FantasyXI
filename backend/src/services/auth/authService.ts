@@ -18,6 +18,11 @@ import {
   loginSecurityService as defaultLoginSecurityService,
   LoginSecurityService,
 } from "../security/loginSecurityService.js";
+import {
+  sessionService as defaultSessionService,
+  SessionService,
+  ActiveSessionMetadata,
+} from "./sessionService.js";
 
 /** Request-derived context used for anomalous-login detection (issue #117). */
 export interface AuthRequestContext {
@@ -117,7 +122,8 @@ export class AuthService {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     private readonly db: any = defaultPrisma,
     private readonly events: EventBus = eventBus,
-    private readonly security: LoginSecurityService = defaultLoginSecurityService
+    private readonly security: LoginSecurityService = defaultLoginSecurityService,
+    private readonly sessions: SessionService = defaultSessionService
   ) {}
 
   /**
@@ -253,6 +259,11 @@ export class AuthService {
       role: user.role ?? UserRole.USER,
     });
 
+    await this.sessions.recordSession({
+      userId: user.id,
+      token,
+    });
+
     // Best-effort: a signup analytics/notification subscriber failing must
     // never fail registration itself, so this uses `publish` (which never
     // throws) rather than `publishOrThrow` - see events/eventBus.ts.
@@ -327,6 +338,13 @@ export class AuthService {
       email: user.email,
       username: user.username,
       role: user.role ?? UserRole.USER,
+    });
+
+    await this.sessions.recordSession({
+      userId: user.id,
+      token,
+      ip: context?.ip,
+      userAgent: context?.userAgent,
     });
 
     return {
@@ -576,7 +594,36 @@ export class AuthService {
       where: { id: userId },
       data: { passwordHash },
     });
+
+    // Password changes automatically invalidate all prior sessions for this user
+    await this.sessions.revokeAllUserSessions(userId);
+
     return toSafeUser(updated);
+  }
+
+  /**
+   * Lists active device sessions for `userId`.
+   */
+  public async listSessions(userId: string): Promise<ActiveSessionMetadata[]> {
+    return this.sessions.listActiveSessions(userId);
+  }
+
+  /**
+   * Revokes a specific session (`jti`) belonging to `userId`.
+   */
+  public async revokeSession(userId: string, jti: string): Promise<{ revoked: boolean }> {
+    const revoked = await this.sessions.revokeSession(userId, jti);
+    return { revoked };
+  }
+
+  /**
+   * Revokes all active sessions for `userId` (`POST /api/v1/auth/logout-all`).
+   */
+  public async logoutAll(
+    userId: string,
+    currentToken?: string
+  ): Promise<{ revokedCount: number; revokedJtis: string[] }> {
+    return this.sessions.revokeAllUserSessions(userId, currentToken);
   }
 
   /**

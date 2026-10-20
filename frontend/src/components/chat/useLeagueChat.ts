@@ -3,14 +3,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, API_BASE_URL, ApiError } from "@/lib/api";
 import {
+  applyOptimisticReaction,
   chatSocketUrl,
   createClientId,
   dropDeliveredDrafts,
   mergeMessages,
   reconnectDelay,
+  reconcileReactionSuccess,
+  rollbackFailedMessage,
+  rollbackOptimisticReaction,
   TERMINAL_CLOSE_CODES,
 } from "@/lib/chat";
-import { ChatConnectionState, ChatEntry, ChatMessage } from "@/types";
+import { ChatConnectionState, ChatEntry, ChatMessage, ChatReactionState } from "@/types";
 
 interface HistoryResponse {
   success: boolean;
@@ -22,6 +26,7 @@ type ServerFrame =
   | { type: "ready"; leagueId: string; userId: string }
   | { type: "message"; message: ChatMessage }
   | { type: "ack"; clientId?: string; message: ChatMessage }
+  | { type: "reaction"; messageId: string; emoji: string; reactions: Record<string, ChatReactionState> }
   | { type: "error"; code: string; message: string; clientId?: string; retryAfterMs?: number };
 
 const UNAVAILABLE_REASONS: Record<number, string> = {
@@ -41,6 +46,8 @@ export interface UseLeagueChatResult {
   isLoadingOlder: boolean;
   send: (body: string) => void;
   retry: (clientId: string) => void;
+  rollback: (clientId: string) => void;
+  reactToMessage: (messageId: string, emoji: string) => Promise<void>;
   loadOlder: () => void;
 }
 
@@ -140,6 +147,11 @@ export function useLeagueChat(leagueId: string, currentUser: { id: string; usern
           case "ack":
             merge([{ ...frame.message, clientId: frame.clientId }]);
             break;
+          case "reaction":
+            setMessages((current) =>
+              reconcileReactionSuccess(current, frame.messageId, frame.emoji, frame.reactions)
+            );
+            break;
           case "error":
             if (frame.clientId) markFailed((m) => m.clientId === frame.clientId, frame.message);
             break;
@@ -228,6 +240,38 @@ export function useLeagueChat(leagueId: string, currentUser: { id: string; usern
     [deliver]
   );
 
+  const rollback = useCallback((clientId: string) => {
+    setMessages((current) => rollbackFailedMessage(current, clientId));
+  }, []);
+
+  const reactToMessage = useCallback(
+    async (messageId: string, emoji: string) => {
+      let snapshot: Record<string, ChatReactionState> | undefined;
+      setMessages((current) => {
+        const result = applyOptimisticReaction(current, messageId, emoji, userRef.current.id);
+        snapshot = result.previousReactions;
+        return result.messages;
+      });
+
+      try {
+        const res = await api.post<{
+          success: boolean;
+          data?: { reactions?: Record<string, ChatReactionState> };
+        }>(
+          `/api/v1/leagues/${encodeURIComponent(leagueId)}/chat/messages/${encodeURIComponent(messageId)}/reactions`,
+          { emoji }
+        );
+        setMessages((current) =>
+          reconcileReactionSuccess(current, messageId, emoji, res.data?.reactions)
+        );
+      } catch {
+        // Automatic rollback to pre-click reaction state on API error
+        setMessages((current) => rollbackOptimisticReaction(current, messageId, snapshot));
+      }
+    },
+    [leagueId]
+  );
+
   const loadOlder = useCallback(() => {
     const oldest = messagesRef.current.find((m) => !m.status);
     if (!oldest || isLoadingOlder) return;
@@ -244,5 +288,17 @@ export function useLeagueChat(leagueId: string, currentUser: { id: string; usern
       .finally(() => setIsLoadingOlder(false));
   }, [leagueId, merge, isLoadingOlder]);
 
-  return { messages, connection, unavailableReason, historyError, hasMore, isLoadingOlder, send, retry, loadOlder };
+  return {
+    messages,
+    connection,
+    unavailableReason,
+    historyError,
+    hasMore,
+    isLoadingOlder,
+    send,
+    retry,
+    rollback,
+    reactToMessage,
+    loadOlder,
+  };
 }

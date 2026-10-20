@@ -1,11 +1,13 @@
 import React from "react";
 import { ChatEntry } from "@/types";
-import { formatMessageTime } from "@/lib/chat";
+import { DEFAULT_CHAT_REACTIONS, formatMessageTime } from "@/lib/chat";
 
 export interface ChatMessageListProps {
   messages: ChatEntry[];
   currentUserId: string;
   onRetry?: (clientId: string) => void;
+  onRollback?: (clientId: string) => void;
+  onReact?: (messageId: string, emoji: string) => void;
   now?: Date;
 }
 
@@ -13,13 +15,21 @@ export interface ChatMessageListProps {
  * Chat transcript. Rendered as an ARIA log so screen readers announce new
  * messages politely; message bodies are plain text (never HTML).
  */
-export const ChatMessageList: React.FC<ChatMessageListProps> = ({ messages, currentUserId, onRetry, now }) => (
+export const ChatMessageList: React.FC<ChatMessageListProps> = ({
+  messages,
+  currentUserId,
+  onRetry,
+  onRollback,
+  onReact,
+  now,
+}) => (
   <ol role="log" aria-live="polite" aria-relevant="additions" aria-label="Chat messages" className="space-y-3">
     {messages.map((message, index) => {
       const isOwn = message.userId === currentUserId;
       const previous = messages[index - 1];
       // Consecutive messages from the same person share one name label
       const showAuthor = !previous || previous.userId !== message.userId;
+      const activeReactions = message.reactions ? Object.values(message.reactions).filter((r) => r.count > 0) : [];
 
       return (
         <li
@@ -37,6 +47,35 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({ messages, curr
             {!showAuthor && <span className="sr-only">{isOwn ? "You: " : `@${message.username}: `}</span>}
             <p className="whitespace-pre-wrap [overflow-wrap:anywhere]">{message.body}</p>
           </div>
+          {!message.status && (activeReactions.length > 0 || onReact) && (
+            <div className="mt-1 flex flex-wrap items-center gap-1 px-1" aria-label="Message reactions">
+              {(onReact
+                ? Array.from(new Set([...DEFAULT_CHAT_REACTIONS, ...activeReactions.map((r) => r.emoji)]))
+                : activeReactions.map((r) => r.emoji)
+              ).map((emoji) => {
+                const reaction = message.reactions?.[emoji];
+                const count = reaction?.count ?? 0;
+                const reacted = reaction?.userIds.includes(currentUserId) ?? false;
+                return (
+                  <button
+                    key={emoji}
+                    type="button"
+                    aria-pressed={reacted}
+                    aria-label={`React with ${emoji}${count > 0 ? ` (${count})` : ""}`}
+                    onClick={() => onReact?.(message.id, emoji)}
+                    className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] transition-colors ${
+                      reacted
+                        ? "border-emerald-500/60 bg-emerald-950/60 text-emerald-200"
+                        : "border-slate-700/80 bg-slate-900/60 text-slate-300 hover:border-slate-600"
+                    } ${reaction?.pending ? "opacity-80" : ""}`}
+                  >
+                    <span>{emoji}</span>
+                    {count > 0 && <span className="font-semibold">{count}</span>}
+                  </button>
+                );
+              })}
+            </div>
+          )}
           <div className="mt-0.5 flex items-center gap-2 px-1 text-[11px] text-slate-400">
             {message.status === "sending" ? (
               <span>Sending…</span>
@@ -50,6 +89,15 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({ messages, curr
                     className="rounded font-semibold text-emerald-300 underline underline-offset-2 hover:text-emerald-200 focus-visible:outline-2 focus-visible:outline-emerald-400"
                   >
                     Retry
+                  </button>
+                )}
+                {onRollback && message.clientId && (
+                  <button
+                    type="button"
+                    onClick={() => onRollback(message.clientId!)}
+                    className="rounded font-semibold text-slate-300 underline underline-offset-2 hover:text-white focus-visible:outline-2 focus-visible:outline-slate-400"
+                  >
+                    Dismiss
                   </button>
                 )}
               </>

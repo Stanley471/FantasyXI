@@ -103,7 +103,13 @@ export const LeagueChat: React.FC<LeagueChatProps> = ({ leagueId, currentUser })
         {chat.messages.length === 0 ? (
           <p className="py-16 text-center text-sm text-slate-400">No messages yet. Get the banter started!</p>
         ) : (
-          <ChatMessageList messages={chat.messages} currentUserId={currentUser.id} onRetry={chat.retry} />
+          <ChatMessageList
+            messages={chat.messages}
+            currentUserId={currentUser.id}
+            onRetry={chat.retry}
+            onRollback={chat.rollback}
+            onReact={chat.reactToMessage}
+          />
         )}
       </div>
 

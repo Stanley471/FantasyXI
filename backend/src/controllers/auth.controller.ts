@@ -440,5 +440,97 @@ export async function getUserReferralCode(
   }
 }
 
+/**
+ * GET /api/v1/auth/sessions (Protected)
+ * Lists all active device sessions for the authenticated user.
+ */
+export async function getActiveSessions(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user?.id) {
+      res.status(401).json({ success: false, message: "Authentication required" });
+      return;
+    }
+
+    const sessions = await authService.listSessions(req.user.id);
+    res.json({
+      success: true,
+      data: {
+        sessions,
+        currentJti: req.user.jti ?? null,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * DELETE /api/v1/auth/sessions/:jti (Protected)
+ * Revokes a specific active device session by its `jti`.
+ */
+export async function revokeActiveSession(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user?.id) {
+      res.status(401).json({ success: false, message: "Authentication required" });
+      return;
+    }
+
+    const jti = String(req.params.jti || "").trim();
+    if (!jti) {
+      res.status(400).json({ success: false, message: "Session jti is required" });
+      return;
+    }
+
+    const result = await authService.revokeSession(req.user.id, jti);
+    res.json({
+      success: true,
+      message: "Session revoked successfully",
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * POST /api/v1/auth/logout-all (Protected)
+ * Revokes all active sessions for the authenticated user and blacklists their JTI claims.
+ */
+export async function logoutAll(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user?.id) {
+      res.status(401).json({ success: false, message: "Authentication required" });
+      return;
+    }
+
+    const authHeader = req.headers.authorization;
+    const currentToken =
+      typeof authHeader === "string" && authHeader.toLowerCase().startsWith("bearer ")
+        ? authHeader.slice(7).trim()
+        : undefined;
+
+    const result = await authService.logoutAll(req.user.id, currentToken);
+    res.json({
+      success: true,
+      message: "All active sessions have been revoked",
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 
 

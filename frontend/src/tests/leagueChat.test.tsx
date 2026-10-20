@@ -3,16 +3,23 @@ import assert from "node:assert/strict";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
+  applyOptimisticReaction,
   chatSocketUrl,
+  createOptimisticMessage,
   dropDeliveredDrafts,
   formatMessageTime,
+  markMessageFailed,
   mergeMessages,
+  reconcileOptimisticMessage,
+  reconcileReactionSuccess,
   reconnectDelay,
+  rollbackFailedMessage,
+  rollbackOptimisticReaction,
   MAX_CHAT_MESSAGE_LENGTH,
 } from "../lib/chat";
 import { ChatMessageList } from "../components/chat/ChatMessageList";
 import { ChatComposer } from "../components/chat/ChatComposer";
-import { LeagueChat } from "../components/chat/LeagueChat";
+import { LeagueChat } from "../components/league/LeagueChat";
 import type { ChatEntry } from "../types";
 
 function msg(id: string, createdAt: string, extra: Partial<ChatEntry> = {}): ChatEntry {
@@ -169,5 +176,121 @@ describe("LeagueChat", () => {
     assert.match(html, /<p role="status"[^>]*>.*Connecting…<\/p>/);
     assert.match(html, /No messages yet\. Get the banter started!/);
     assert.match(html, /tabindex="0" aria-label="Chat history"/);
+  });
+});
+
+describe("Optimistic UI updates & rollback for messages and reactions (Issue #229)", () => {
+  it("immediately appends an optimistic message with status=sending and reconciles on server ack", () => {
+    const initial = [msg("srv-0", "2026-09-26T12:00:00Z")];
+    const optimistic = createOptimisticMessage({
+      leagueId: "league-1",
+      userId: "alice",
+      username: "alice",
+      body: "  Captain Haaland triple captain!  ",
+      clientId: "uuid-opt-1",
+      createdAt: "2026-09-26T12:01:00.000Z",
+    });
+
+    assert.equal(optimistic.id, "uuid-opt-1");
+    assert.equal(optimistic.clientId, "uuid-opt-1");
+    assert.equal(optimistic.status, "sending");
+    assert.equal(optimistic.body, "Captain Haaland triple captain!");
+
+    const withOptimistic = mergeMessages(initial, [optimistic]);
+    assert.equal(withOptimistic.length, 2);
+    assert.equal(withOptimistic[1].status, "sending");
+
+    // Reconcile when server ack arrives with canonical id and createdAt
+    const reconciled = reconcileOptimisticMessage(
+      withOptimistic,
+      {
+        id: "srv-canonical-99",
+        leagueId: "league-1",
+        userId: "alice",
+        username: "alice",
+        body: "Captain Haaland triple captain!",
+        createdAt: "2026-09-26T12:01:00.250Z",
+      },
+      "uuid-opt-1"
+    );
+
+    assert.equal(reconciled.length, 2);
+    assert.equal(reconciled[1].id, "srv-canonical-99");
+    assert.equal(reconciled[1].createdAt, "2026-09-26T12:01:00.250Z");
+    assert.equal(reconciled[1].status, undefined);
+  });
+
+  it("marks failed optimistic messages and supports rollback removal", () => {
+    const optimistic = createOptimisticMessage({
+      leagueId: "league-1",
+      userId: "alice",
+      username: "alice",
+      body: "Unlucky bench boost",
+      clientId: "uuid-fail-1",
+    });
+    const list = mergeMessages([msg("srv-1", "2026-09-26T12:00:00Z")], [optimistic]);
+
+    const failedList = markMessageFailed(list, "uuid-fail-1", "Network timeout");
+    assert.equal(failedList[1].status, "failed");
+    assert.equal(failedList[1].error, "Network timeout");
+
+    // Render Retry and Dismiss (rollback) buttons for failed message
+    const failedHtml = renderToStaticMarkup(
+      <ChatMessageList
+        messages={failedList}
+        currentUserId="alice"
+        onRetry={() => {}}
+        onRollback={() => {}}
+      />
+    );
+    assert.match(failedHtml, /<button type="button"[^>]*>Retry<\/button>/);
+    assert.match(failedHtml, /<button type="button"[^>]*>Dismiss<\/button>/);
+
+    // Rollback removes the failed message cleanly
+    const rolledBack = rollbackFailedMessage(failedList, "uuid-fail-1");
+    assert.deepEqual(rolledBack.map((m) => m.id), ["srv-1"]);
+  });
+
+  it("increments emoji reactions optimistically on click and rolls back on API failure", () => {
+    const initial: ChatEntry[] = [
+      msg("srv-1", "2026-09-26T12:00:00Z", {
+        reactions: {
+          "🔥": { emoji: "🔥", count: 2, userIds: ["bob", "charlie"] },
+        },
+      }),
+    ];
+
+    // Alice clicks 🔥 -> immediately increments to 3 and marks pending
+    const { messages: afterClick, previousReactions, added } = applyOptimisticReaction(
+      initial,
+      "srv-1",
+      "🔥",
+      "alice"
+    );
+    assert.equal(added, true);
+    assert.equal(afterClick[0].reactions?.["🔥"]?.count, 3);
+    assert.deepEqual(afterClick[0].reactions?.["🔥"]?.userIds, ["bob", "charlie", "alice"]);
+    assert.equal(afterClick[0].reactions?.["🔥"]?.pending, true);
+
+    // Render reaction badge showing updated count=3 and aria-pressed="true" for alice
+    const optimisticHtml = renderToStaticMarkup(
+      <ChatMessageList messages={afterClick} currentUserId="alice" onReact={() => {}} />
+    );
+    assert.match(optimisticHtml, /aria-pressed="true" aria-label="React with 🔥 \(3\)"/);
+
+    // Simulate API failure -> roll back to previousReactions snapshot (count=2, without alice)
+    const rolledBack = rollbackOptimisticReaction(afterClick, "srv-1", previousReactions);
+    assert.equal(rolledBack[0].reactions?.["🔥"]?.count, 2);
+    assert.deepEqual(rolledBack[0].reactions?.["🔥"]?.userIds, ["bob", "charlie"]);
+    assert.equal(rolledBack[0].reactions?.["🔥"]?.pending, undefined);
+
+    // Simulate API success on a new reaction ⚽ -> clears pending flag
+    const { messages: afterGoalClick } = applyOptimisticReaction(rolledBack, "srv-1", "⚽", "alice");
+    assert.equal(afterGoalClick[0].reactions?.["⚽"]?.count, 1);
+    assert.equal(afterGoalClick[0].reactions?.["⚽"]?.pending, true);
+
+    const confirmed = reconcileReactionSuccess(afterGoalClick, "srv-1", "⚽");
+    assert.equal(confirmed[0].reactions?.["⚽"]?.count, 1);
+    assert.equal(confirmed[0].reactions?.["⚽"]?.pending, undefined);
   });
 });
