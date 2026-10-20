@@ -641,6 +641,36 @@ export class SorobanContractClient {
     return result.success ? BigInt((result.returnValue as bigint) ?? 0) : 0n;
   }
 
+  private async simulateI128OrThrow(
+    contractId: string,
+    method: string,
+    args: xdr.ScVal[]
+  ): Promise<bigint> {
+    const result = await this.simulateView(contractId, method, args);
+    if (!result.success) {
+      throw new Error(`${method} read failed: ${result.error}`);
+    }
+    return BigInt((result.returnValue as bigint) ?? 0);
+  }
+
+  /**
+   * Like `getDeposit`, but throws on RPC failure instead of reading 0, so an
+   * outage can never be mistaken for a missing deposit (proof-of-reserve).
+   */
+  public async getDepositStrict(leagueId: number | bigint, participantPublic: string): Promise<bigint> {
+    return this.simulateI128OrThrow(this.escrowContractId, "get_deposit", [
+      SorobanContractClient.u64(leagueId),
+      SorobanContractClient.address(participantPublic),
+    ]);
+  }
+
+  /** Token reserve held by the escrow contract in the USDC SAC; throws on RPC failure. */
+  public async getEscrowReserveBalance(): Promise<bigint> {
+    return this.simulateI128OrThrow(this.usdcContractId, "balance", [
+      SorobanContractClient.address(this.escrowContractId),
+    ]);
+  }
+
   /**
    * Query USDC SAC balance for any account (or contract ID).
    */

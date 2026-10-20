@@ -403,8 +403,10 @@ export class DepositVerificationService {
       .forTransaction(cleanHash)
       .call();
 
-    const paymentOps = opsPage.records.filter(
-      (op: any) => op.type === "payment"
+    // Path payments report the delivered (destination) asset and amount in the
+    // same fields as plain payments, so DEX-routed deposits verify identically.
+    const paymentOps = opsPage.records.filter((op: any) =>
+      ["payment", "path_payment_strict_receive", "path_payment_strict_send"].includes(op.type)
     );
 
     if (paymentOps.length === 0) {

@@ -232,6 +232,8 @@ export interface CreateLeagueInput {
   squadId: string; // Creator's initial squad
   scoringType?: ScoringType; // default CLASSIC
   isPrivate?: boolean; // default false: private leagues are invitation-only
+  minBuyIn?: number; // private leagues only: deposits must prove a stake >= minBuyIn (USDC)
+  maxBuyIn?: number; // private leagues only: deposits must prove a stake <= maxBuyIn (USDC)
 }
 
 export interface CreateLeagueTierGroupInput {

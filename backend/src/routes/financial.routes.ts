@@ -13,8 +13,11 @@ import { requireAuth, requirePermission, requireRole } from "../middleware/authM
 import { Permission, UserRole } from "../types/index.js";
 import { financialRateLimiter, mutationRateLimiter } from "../middleware/rateLimiter.js";
 import { idempotency } from "../middleware/idempotency.js";
+import { requireDepositRangeProof } from "../middleware/depositRangeProof.js";
 
 const router = Router({ mergeParams: true });
+// Private high-roller leagues require a ZK buy-in range proof with each deposit
+const depositRangeProof = requireDepositRangeProof();
 
 // All financial actions require valid JWT authentication and are protected by financial rate limits
 router.use(requireAuth);
@@ -23,13 +26,13 @@ router.use(financialRateLimiter);
 router.use(idempotency);
 
 router.get("/requirement", getPaymentRequirement);
-router.post("/submit", submitPayment);
+router.post("/submit", depositRangeProof, submitPayment);
 router.post("/verify", verifyPayment);
 router.get("/settlement-plan", getSettlementPlan);
 router.post("/settle", requireRole(UserRole.ADMIN), executeSettlement);
 router.get("/affiliate-dashboard", getAffiliateDashboard);
 router.get("/requirement", requirePermission(Permission.PAYMENT_MANAGE_OWN), getPaymentRequirement);
-router.post("/submit", mutationRateLimiter, requirePermission(Permission.PAYMENT_MANAGE_OWN), submitPayment);
+router.post("/submit", mutationRateLimiter, requirePermission(Permission.PAYMENT_MANAGE_OWN), depositRangeProof, submitPayment);
 router.post("/verify", mutationRateLimiter, requirePermission(Permission.PAYMENT_MANAGE_OWN), verifyPayment);
 router.get("/settlement-plan", requirePermission(Permission.SETTLEMENT_READ), getSettlementPlan);
 router.get("/affiliate-dashboard", requirePermission(Permission.AFFILIATE_READ_OWN), getAffiliateDashboard);

@@ -423,6 +423,24 @@ export class LeagueService {
       throw new LeagueValidationError("isPrivate must be a boolean");
     }
 
+    const hasBuyInRange = input.minBuyIn !== undefined || input.maxBuyIn !== undefined;
+    if (hasBuyInRange) {
+      const { minBuyIn, maxBuyIn } = input;
+      if (!input.isPrivate) {
+        throw new LeagueValidationError("Buy-in ranges are only supported for private leagues");
+      }
+      if (
+        typeof minBuyIn !== "number" ||
+        typeof maxBuyIn !== "number" ||
+        !Number.isFinite(minBuyIn) ||
+        !Number.isFinite(maxBuyIn) ||
+        minBuyIn <= 0 ||
+        maxBuyIn < minBuyIn
+      ) {
+        throw new LeagueValidationError("Buy-in range requires 0 < minBuyIn <= maxBuyIn");
+      }
+    }
+
     const maxMembers = input.maxMembers ?? 20;
     const minMembers = input.minMembers ?? 2;
 
@@ -506,6 +524,7 @@ export class LeagueService {
           status: LeagueStatus.UPCOMING,
           scoringType,
           isPrivate: input.isPrivate ?? false,
+          ...(hasBuyInRange && { minBuyIn: input.minBuyIn, maxBuyIn: input.maxBuyIn }),
           startGameweekId: startGw.id,
           endGameweekId: endGw.id,
         },

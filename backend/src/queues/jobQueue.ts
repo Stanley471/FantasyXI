@@ -5,6 +5,7 @@ import { settleCompletedGameweeks } from "../jobs/gameweekSettlement.js";
 import { processLeagueRefunds } from "../jobs/leagueRefunds.js";
 import { syncDailyPlayerPrices } from "../jobs/priceSync.js";
 import { runLedgerReconciliationJob } from "../jobs/ledgerReconciliation.js";
+import { runProofOfReserveJob } from "../jobs/proofOfReserve.js";
 import { applyRetroactiveBpsAdjustments } from "../jobs/retroactiveBpsAdjustments.js";
 import {
   executeFplSyncTask,
@@ -51,6 +52,7 @@ export const JOB_DEFINITIONS: JobDefinition[] = [
   { name: "league-refunds", cron: "*/5 * * * *", handler: () => processLeagueRefunds() },
   { name: "price-sync", cron: "0 3 * * *", handler: () => syncDailyPlayerPrices() },
   { name: "ledger-reconciliation", cron: "30 2 * * *", handler: () => runLedgerReconciliationJob() },
+  { name: "proof-of-reserve", cron: "*/15 * * * *", handler: () => runProofOfReserveJob() },
   { name: "retroactive-bps", cron: "*/30 * * * *", handler: () => applyRetroactiveBpsAdjustments() },
 ];
 

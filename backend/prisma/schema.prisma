@@ -377,6 +377,10 @@ model League {
   scoringType     ScoringType  @default(CLASSIC) @map("scoring_type")
   /// Private leagues are hidden from public search and joinable only via invitation
   isPrivate       Boolean      @default(false) @map("is_private")
+  /// Private high-roller leagues: deposits must carry a zero-knowledge proof
+  /// that the committed stake lies within [minBuyIn, maxBuyIn]
+  minBuyIn        Decimal?     @map("min_buy_in") @db.Decimal(10, 2)
+  maxBuyIn        Decimal?     @map("max_buy_in") @db.Decimal(10, 2)
   startGameweekId Int          @map("start_gameweek_id")
   endGameweekId   Int          @map("end_gameweek_id")
   createdAt       DateTime     @default(now()) @map("created_at")
@@ -795,6 +799,25 @@ model FinancialAuditLog {
   @@index([leagueId, createdAt])
   @@index([action, createdAt])
   @@map("financial_audit_logs")
+}
+
+/// Hash-chained, tamper-evident audit trail (see services/audit/cryptoAuditLog.ts).
+/// Each row's hash covers the previous row's hash, so any edit breaks the chain.
+model CryptoAuditLogEntry {
+  id           String @id @default(uuid())
+  sequence     Int    @unique
+  action       String
+  actorId      String @map("actor_id")
+  entityType   String @map("entity_type")
+  entityId     String @map("entity_id")
+  payload      Json
+  /// ISO-8601 string exactly as hashed
+  timestamp    String
+  previousHash String @map("previous_hash")
+  hash         String @unique
+
+  @@index([entityType, entityId])
+  @@map("crypto_audit_log")
 }
 
 /// An on-chain transaction whose finality is tracked by TransactionCoordinatorService.

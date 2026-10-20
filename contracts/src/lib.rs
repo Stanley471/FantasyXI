@@ -15,6 +15,7 @@ const PERSISTENT_LIFETIME_THRESHOLD: u32 = 14 * DAY_IN_LEDGERS;
 const EMERGENCY_REFUND_TIMELOCK_SECONDS: u64 = 14 * 24 * 60 * 60;
 pub const PARTICIPANTS_PER_PAGE: u32 = 50;
 pub const TIMELOCK_DELAY_LEDGERS: u32 = 2 * DAY_IN_LEDGERS; // 34,560 ledgers (48 hours)
+pub const MAX_DISPUTE_PERIOD_SECONDS: u64 = 30 * 24 * 60 * 60;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -45,11 +46,18 @@ pub enum EscrowError {
     LeagueNotCancelled = 23,
     AlreadyClaimed = 24,
     InvalidFeeShare = 25,
-    HashMismatch = 23,
-    TimelockActive = 23,
-    ProposalNotFound = 24,
-    AlreadyApproved = 25,
-    ProposalExecuted = 26,
+    HashMismatch = 26,
+    TimelockActive = 27,
+    ProposalNotFound = 28,
+    AlreadyApproved = 29,
+    ProposalExecuted = 30,
+    DisputeWindowOpen = 33,
+    DisputeWindowClosed = 34,
+    DisputeActive = 35,
+    NoDispute = 36,
+    InsufficientStake = 37,
+    DisputeNotExpired = 38,
+    InvalidDisputeConfig = 39,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -100,6 +108,28 @@ pub struct TimelockProposal {
     pub executed: bool,
 }
 
+/// Settlement challenge parameters. A zero `window_seconds` disables disputes,
+/// making settled prizes claimable immediately.
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct DisputeConfig {
+    /// Time after settlement during which a challenge may be opened.
+    pub window_seconds: u64,
+    /// Time the admin quorum has to rule on an open challenge before it expires.
+    pub resolution_seconds: u64,
+    /// Minimum challenger stake, in basis points of the league's total deposits.
+    pub min_stake_bps: u32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct Dispute {
+    pub challenger: Address,
+    pub stake: i128,
+    pub opened_at: u64,
+    pub resolve_by: u64,
+}
+
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
@@ -114,6 +144,10 @@ pub enum DataKey {
     ParticipantPage(u64, u32),
     SettlementHash(u64),
     TimelockProposal(u64),
+    DisputeConfig,
+    SettledAt(u64),
+    SettledWinners(u64),
+    Dispute(u64),
 }
 
 /// # Issue #83: Soroban Escrow Smart Contract for Fantasy Leagues
@@ -674,55 +708,8 @@ impl FantasyXIEscrow {
 
         // Calculate expected distributions based on prize curve rules
         let prize_pool = league.total_deposited - platform_fee;
-        let mut expected_payouts = Vec::new(&env);
-        let mut tied_first_payouts = Vec::new(&env);
-        if winners.len() == 1 {
-            expected_payouts.push_back(prize_pool);
-        } else if winners.len() == 2 {
-            let p1 = (prize_pool * 70) / 100;
-            let p2 = prize_pool - p1;
-            expected_payouts.push_back(p1);
-            expected_payouts.push_back(p2);
-            let tied_first = prize_pool / 2;
-            tied_first_payouts.push_back(tied_first);
-            tied_first_payouts.push_back(prize_pool - tied_first);
-        } else if winners.len() >= 3 {
-            let p1 = (prize_pool * 60) / 100;
-            let p2 = (prize_pool * 30) / 100;
-            let p3 = prize_pool - p1 - p2;
-            expected_payouts.push_back(p1);
-            expected_payouts.push_back(p2);
-            expected_payouts.push_back(p3);
-            let tied_first = (p1 + p2) / 2;
-            tied_first_payouts.push_back(tied_first);
-            tied_first_payouts.push_back(p1 + p2 - tied_first);
-            tied_first_payouts.push_back(p3);
-            for _ in 3..winners.len() {
-                expected_payouts.push_back(0);
-                tied_first_payouts.push_back(0);
-            }
-        } else {
-            return Err(EscrowError::InvalidPrizeDistribution);
-        }
-
-        let uses_tied_first = winners.len() >= 2
-            && !tied_first_payouts.is_empty()
-            && winners.get(0).unwrap().amount == tied_first_payouts.get(0).unwrap()
-            && winners.get(1).unwrap().amount == tied_first_payouts.get(1).unwrap();
-
-        let mut total_payout = platform_fee;
-        for (i, winner) in winners.iter().enumerate() {
-            if winner.amount < 0 {
-                return Err(EscrowError::InvalidAmount);
-            }
-            let matches_standard = winner.amount == expected_payouts.get(i as u32).unwrap();
-            let matches_tied_first =
-                uses_tied_first && winner.amount == tied_first_payouts.get(i as u32).unwrap();
-            if !matches_standard && !matches_tied_first {
-                return Err(EscrowError::InvalidPrizeDistribution);
-            }
-            total_payout += winner.amount;
-        }
+        let total_payout =
+            platform_fee + Self::validate_prize_distribution(&env, prize_pool, &winners)?;
 
         if total_payout != league.total_deposited {
             return Err(EscrowError::PayoutExceedsDeposits);
@@ -769,6 +756,15 @@ impl FantasyXIEscrow {
 
         league.status = LeagueStatus::Settled;
         env.storage().persistent().set(&league_key, &league);
+
+        if Self::dispute_config(&env).window_seconds > 0 {
+            Self::persist(
+                &env,
+                &DataKey::SettledAt(league_id),
+                &env.ledger().timestamp(),
+            );
+            Self::persist(&env, &DataKey::SettledWinners(league_id), &winners);
+        }
 
         env.storage().persistent().extend_ttl(
             &league_key,
@@ -1103,6 +1099,7 @@ impl FantasyXIEscrow {
     /// Winner claims their prize for a settled league.
     pub fn claim_prize(env: Env, winner: Address, league_id: u64) -> Result<(), EscrowError> {
         winner.require_auth();
+        Self::ensure_settlement_final(&env, league_id)?;
 
         let claim_key = DataKey::ClaimablePrize(league_id, winner.clone());
         let amount: i128 = env
@@ -1388,6 +1385,182 @@ impl FantasyXIEscrow {
         Ok(())
     }
 
+    /// Admin quorum configures the settlement challenge window, resolution
+    /// deadline and minimum challenger stake. A zero window disables disputes.
+    pub fn set_dispute_config(
+        env: Env,
+        approvals: Vec<Address>,
+        config: DisputeConfig,
+    ) -> Result<(), EscrowError> {
+        Self::authorize_signers(&env, &approvals)?;
+        let enabled = config.window_seconds > 0;
+        if config.window_seconds > MAX_DISPUTE_PERIOD_SECONDS
+            || config.resolution_seconds > MAX_DISPUTE_PERIOD_SECONDS
+            || config.min_stake_bps > 10_000
+            || (enabled && (config.resolution_seconds == 0 || config.min_stake_bps == 0))
+        {
+            return Err(EscrowError::InvalidDisputeConfig);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::DisputeConfig, &config);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        Ok(())
+    }
+
+    pub fn get_dispute_config(env: Env) -> DisputeConfig {
+        Self::dispute_config(&env)
+    }
+
+    pub fn get_dispute(env: Env, league_id: u64) -> Option<Dispute> {
+        env.storage().persistent().get(&DataKey::Dispute(league_id))
+    }
+
+    /// Challenges a settlement during its dispute window by escrowing a stake
+    /// in the league asset. Prize claims are frozen until the dispute is
+    /// resolved or expires.
+    pub fn open_dispute(
+        env: Env,
+        challenger: Address,
+        league_id: u64,
+        stake: i128,
+    ) -> Result<(), EscrowError> {
+        challenger.require_auth();
+        let league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&DataKey::League(league_id))
+            .ok_or(EscrowError::LeagueNotFound)?;
+        if env.storage().persistent().has(&DataKey::Dispute(league_id)) {
+            return Err(EscrowError::DisputeActive);
+        }
+
+        let config = Self::dispute_config(&env);
+        let settled_at: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SettledAt(league_id))
+            .ok_or(EscrowError::DisputeWindowClosed)?;
+        let now = env.ledger().timestamp();
+        if now >= settled_at.saturating_add(config.window_seconds) {
+            return Err(EscrowError::DisputeWindowClosed);
+        }
+
+        let min_stake = ((league.total_deposited * config.min_stake_bps as i128) / 10_000).max(1);
+        if stake < min_stake {
+            return Err(EscrowError::InsufficientStake);
+        }
+        token::Client::new(&env, &league.asset).transfer(
+            &challenger,
+            &env.current_contract_address(),
+            &stake,
+        );
+
+        let dispute = Dispute {
+            challenger: challenger.clone(),
+            stake,
+            opened_at: now,
+            resolve_by: now.saturating_add(config.resolution_seconds),
+        };
+        Self::persist(&env, &DataKey::Dispute(league_id), &dispute);
+        env.events().publish(
+            (Symbol::new(&env, "dispute_opened"), league_id),
+            (challenger, stake, dispute.resolve_by),
+        );
+        Ok(())
+    }
+
+    /// Admin quorum rules on an open dispute before it expires.
+    ///
+    /// Upheld: the stake is returned to the challenger and, when
+    /// `corrected_winners` is non-empty, the claimable prizes are replaced by
+    /// the corrected distribution of the same prize pool.
+    /// Rejected: the stake is slashed and distributed to the settled winners
+    /// pro rata (or burned when nobody won a prize).
+    pub fn resolve_dispute(
+        env: Env,
+        approvals: Vec<Address>,
+        league_id: u64,
+        upheld: bool,
+        corrected_winners: Vec<WinnerPayout>,
+    ) -> Result<(), EscrowError> {
+        Self::authorize_signers(&env, &approvals)?;
+        let dispute: Dispute = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Dispute(league_id))
+            .ok_or(EscrowError::NoDispute)?;
+        if env.ledger().timestamp() >= dispute.resolve_by {
+            return Err(EscrowError::DisputeWindowClosed);
+        }
+        let league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&DataKey::League(league_id))
+            .ok_or(EscrowError::LeagueNotFound)?;
+
+        if !upheld {
+            Self::slash_dispute_stake(&env, league_id, &league, &dispute);
+        } else {
+            if !corrected_winners.is_empty() {
+                let original: Vec<WinnerPayout> = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::SettledWinners(league_id))
+                    .unwrap_or_else(|| Vec::new(&env));
+                let prize_pool: i128 = original.iter().map(|w| w.amount).sum();
+                if Self::validate_prize_distribution(&env, prize_pool, &corrected_winners)?
+                    != prize_pool
+                {
+                    return Err(EscrowError::PayoutExceedsDeposits);
+                }
+                for winner in original.iter() {
+                    env.storage()
+                        .persistent()
+                        .remove(&DataKey::ClaimablePrize(league_id, winner.winner));
+                }
+                for winner in corrected_winners.iter() {
+                    Self::add_claimable(&env, league_id, &winner.winner, winner.amount);
+                }
+            }
+            token::Client::new(&env, &league.asset).transfer(
+                &env.current_contract_address(),
+                &dispute.challenger,
+                &dispute.stake,
+            );
+        }
+
+        Self::close_dispute(&env, league_id);
+        env.events().publish(
+            (Symbol::new(&env, "dispute_resolved"), league_id),
+            (dispute.challenger, upheld),
+        );
+        Ok(())
+    }
+
+    /// Permissionless: once the resolution deadline passes without a ruling,
+    /// the challenge fails and its stake is slashed.
+    pub fn expire_dispute(env: Env, league_id: u64) -> Result<(), EscrowError> {
+        let dispute: Dispute = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Dispute(league_id))
+            .ok_or(EscrowError::NoDispute)?;
+        if env.ledger().timestamp() < dispute.resolve_by {
+            return Err(EscrowError::DisputeNotExpired);
+        }
+        let league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&DataKey::League(league_id))
+            .ok_or(EscrowError::LeagueNotFound)?;
+        Self::slash_dispute_stake(&env, league_id, &league, &dispute);
+        Self::close_dispute(&env, league_id);
+        Ok(())
+    }
+
     /// Retrieves a timelock proposal by id.
     pub fn get_timelock_proposal(env: Env, proposal_id: u64) -> Option<TimelockProposal> {
         let key = DataKey::TimelockProposal(proposal_id);
@@ -1396,6 +1569,176 @@ impl FantasyXIEscrow {
 }
 
 impl FantasyXIEscrow {
+    fn persist<V: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(
+        env: &Env,
+        key: &DataKey,
+        value: &V,
+    ) {
+        env.storage().persistent().set(key, value);
+        env.storage().persistent().extend_ttl(
+            key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+
+    fn dispute_config(env: &Env) -> DisputeConfig {
+        env.storage()
+            .instance()
+            .get(&DataKey::DisputeConfig)
+            .unwrap_or(DisputeConfig {
+                window_seconds: 0,
+                resolution_seconds: 0,
+                min_stake_bps: 0,
+            })
+    }
+
+    /// Prizes become claimable only once the settlement can no longer be
+    /// challenged. An expired dispute is slashed here automatically.
+    fn ensure_settlement_final(env: &Env, league_id: u64) -> Result<(), EscrowError> {
+        if let Some(dispute) = env
+            .storage()
+            .persistent()
+            .get::<_, Dispute>(&DataKey::Dispute(league_id))
+        {
+            if env.ledger().timestamp() < dispute.resolve_by {
+                return Err(EscrowError::DisputeActive);
+            }
+            let league: LeagueState = env
+                .storage()
+                .persistent()
+                .get(&DataKey::League(league_id))
+                .ok_or(EscrowError::LeagueNotFound)?;
+            Self::slash_dispute_stake(env, league_id, &league, &dispute);
+            Self::close_dispute(env, league_id);
+        }
+        if let Some(settled_at) = env
+            .storage()
+            .persistent()
+            .get::<_, u64>(&DataKey::SettledAt(league_id))
+        {
+            let window = Self::dispute_config(env).window_seconds;
+            if env.ledger().timestamp() < settled_at.saturating_add(window) {
+                return Err(EscrowError::DisputeWindowOpen);
+            }
+        }
+        Ok(())
+    }
+
+    fn add_claimable(env: &Env, league_id: u64, winner: &Address, amount: i128) {
+        if amount <= 0 {
+            return;
+        }
+        let key = DataKey::ClaimablePrize(league_id, winner.clone());
+        let current: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        Self::persist(env, &key, &(current + amount));
+    }
+
+    /// Distributes a failed challenger's stake to the settled winners pro rata
+    /// to their prizes (rounding remainder to the first winner), or burns it
+    /// when no winner received a prize.
+    fn slash_dispute_stake(env: &Env, league_id: u64, league: &LeagueState, dispute: &Dispute) {
+        let winners: Vec<WinnerPayout> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SettledWinners(league_id))
+            .unwrap_or_else(|| Vec::new(env));
+        let total: i128 = winners.iter().map(|w| w.amount.max(0)).sum();
+        if total == 0 {
+            token::Client::new(env, &league.asset)
+                .burn(&env.current_contract_address(), &dispute.stake);
+        } else {
+            let mut distributed = 0;
+            for winner in winners.iter() {
+                let share = dispute.stake * winner.amount.max(0) / total;
+                Self::add_claimable(env, league_id, &winner.winner, share);
+                distributed += share;
+            }
+            let first = winners
+                .iter()
+                .find(|w| w.amount > 0)
+                .map(|w| w.winner)
+                .unwrap();
+            Self::add_claimable(env, league_id, &first, dispute.stake - distributed);
+        }
+        env.events().publish(
+            (Symbol::new(env, "dispute_slashed"), league_id),
+            (dispute.challenger.clone(), dispute.stake),
+        );
+    }
+
+    /// Ends the dispute and makes the settlement final.
+    fn close_dispute(env: &Env, league_id: u64) {
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Dispute(league_id));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::SettledAt(league_id));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::SettledWinners(league_id));
+    }
+
+    /// Checks `winners` against the standard (or tied-first) prize curve for
+    /// `prize_pool` and returns the sum of their payouts.
+    fn validate_prize_distribution(
+        env: &Env,
+        prize_pool: i128,
+        winners: &Vec<WinnerPayout>,
+    ) -> Result<i128, EscrowError> {
+        let mut expected_payouts = Vec::new(env);
+        let mut tied_first_payouts = Vec::new(env);
+        if winners.len() == 1 {
+            expected_payouts.push_back(prize_pool);
+        } else if winners.len() == 2 {
+            let p1 = (prize_pool * 70) / 100;
+            let p2 = prize_pool - p1;
+            expected_payouts.push_back(p1);
+            expected_payouts.push_back(p2);
+            let tied_first = prize_pool / 2;
+            tied_first_payouts.push_back(tied_first);
+            tied_first_payouts.push_back(prize_pool - tied_first);
+        } else if winners.len() >= 3 {
+            let p1 = (prize_pool * 60) / 100;
+            let p2 = (prize_pool * 30) / 100;
+            let p3 = prize_pool - p1 - p2;
+            expected_payouts.push_back(p1);
+            expected_payouts.push_back(p2);
+            expected_payouts.push_back(p3);
+            let tied_first = (p1 + p2) / 2;
+            tied_first_payouts.push_back(tied_first);
+            tied_first_payouts.push_back(p1 + p2 - tied_first);
+            tied_first_payouts.push_back(p3);
+            for _ in 3..winners.len() {
+                expected_payouts.push_back(0);
+                tied_first_payouts.push_back(0);
+            }
+        } else {
+            return Err(EscrowError::InvalidPrizeDistribution);
+        }
+
+        let uses_tied_first = winners.len() >= 2
+            && !tied_first_payouts.is_empty()
+            && winners.get(0).unwrap().amount == tied_first_payouts.get(0).unwrap()
+            && winners.get(1).unwrap().amount == tied_first_payouts.get(1).unwrap();
+
+        let mut total_payout = 0;
+        for (i, winner) in winners.iter().enumerate() {
+            if winner.amount < 0 {
+                return Err(EscrowError::InvalidAmount);
+            }
+            let matches_standard = winner.amount == expected_payouts.get(i as u32).unwrap();
+            let matches_tied_first =
+                uses_tied_first && winner.amount == tied_first_payouts.get(i as u32).unwrap();
+            if !matches_standard && !matches_tied_first {
+                return Err(EscrowError::InvalidPrizeDistribution);
+            }
+            total_payout += winner.amount;
+        }
+        Ok(total_payout)
+    }
+
     /// Internal helper that computes SHA-256 hash over winner addresses, payout amounts, and platform fee.
     pub fn compute_settlement_hash_internal(
         env: &Env,
@@ -2426,6 +2769,9 @@ mod test {
         let league = client.get_league(&702).unwrap();
         assert_eq!(league.status, LeagueStatus::Upcoming);
         assert_eq!(client.get_settlement_hash(&702), None);
+    }
+
+    #[test]
     fn test_multisig_timelock_fee_withdrawal_lifecycle() {
         let env = Env::default();
         env.mock_all_auths();
