@@ -21,6 +21,8 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Prisma } from "@prisma/client";
+import { PrimaryReadGuard } from "./primaryReadGuard.js";
+import { mutationWindow, type MutationWindow } from "./mutationWindow.js";
 
 // ============================================================
 // Configuration
@@ -72,8 +74,8 @@ export function loadReadReplicaConfig(env: NodeJS.ProcessEnv = process.env): Rea
   return {
     appRegion: env.APP_REGION?.trim() || null,
     replicas: parseReplicaDefinitions(env.DATABASE_READ_REPLICAS),
-    maxLagMs: positiveInt(env.REPLICA_MAX_LAG_MS, 5_000),
-    healthCheckIntervalMs: positiveInt(env.REPLICA_HEALTH_CHECK_INTERVAL_MS, 10_000),
+    maxLagMs: positiveInt(env.REPLICA_MAX_LAG_MS, 200),
+    healthCheckIntervalMs: positiveInt(env.REPLICA_HEALTH_CHECK_INTERVAL_MS, 1_000),
     healthCheckTimeoutMs: positiveInt(env.REPLICA_HEALTH_CHECK_TIMEOUT_MS, 2_000),
   };
 }
@@ -87,18 +89,20 @@ export interface ReadConsistencyContext {
   allowReplica: boolean;
   /** Set after the first write so later reads see it (read-your-writes) */
   hasWritten: boolean;
+  userId?: () => string | undefined;
+  mutations?: MutationWindow;
 }
 
 export const readConsistencyStorage = new AsyncLocalStorage<ReadConsistencyContext>();
 
 /** Runs `fn` with reads allowed to go to replicas (e.g. a GET request). */
 export function runWithReplicaReads<T>(fn: () => T): T {
-  return readConsistencyStorage.run({ allowReplica: true, hasWritten: false }, fn);
+  return readConsistencyStorage.run({ ...readConsistencyStorage.getStore(), allowReplica: true, hasWritten: readConsistencyStorage.getStore()?.hasWritten ?? false }, fn);
 }
 
 /** Runs `fn` with every query pinned to the primary. */
 export function runOnPrimary<T>(fn: () => T): T {
-  return readConsistencyStorage.run({ allowReplica: false, hasWritten: false }, fn);
+  return readConsistencyStorage.run({ ...readConsistencyStorage.getStore(), allowReplica: false, hasWritten: readConsistencyStorage.getStore()?.hasWritten ?? false }, fn);
 }
 
 // ============================================================
@@ -140,14 +144,17 @@ export interface ReplicaStatus {
 export const REPLICATION_LAG_SQL = `
   SELECT CASE
     WHEN NOT pg_is_in_recovery() THEN 0
-    WHEN pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn() THEN 0
-    ELSE COALESCE(EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp())) * 1000, 0)
+    WHEN $1::pg_lsn IS NOT NULL AND pg_last_wal_replay_lsn() >= $1::pg_lsn THEN 0
+    WHEN $1::pg_lsn IS NULL AND pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn() THEN 0
+    ELSE COALESCE(EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp())) * 1000, 1e12)
   END::float8 AS lag_ms
 `;
 
 export class ReplicaRouter {
   public readonly nodes: ReplicaNode[];
   private timer: NodeJS.Timeout | null = null;
+  public readonly primaryReads = new PrimaryReadGuard();
+  private checking: Promise<void> | null = null;
 
   constructor(
     replicas: Array<{ region: string; client: ReplicaClient }>,
@@ -155,6 +162,7 @@ export class ReplicaRouter {
       appRegion: string | null;
       maxLagMs: number;
       healthCheckTimeoutMs?: number;
+      primary?: ReplicaClient;
     }
   ) {
     // Replicas start unhealthy: no traffic until the first successful health check
@@ -170,7 +178,9 @@ export class ReplicaRouter {
   }
 
   private isEligible(node: ReplicaNode): boolean {
-    return node.healthy && node.lagMs !== null && node.lagMs <= this.options.maxLagMs;
+    return node.healthy && node.lagMs !== null && node.lagMs >= 0 &&
+      node.lagMs <= this.options.maxLagMs && node.lastCheckedAt !== null &&
+      Date.now() - node.lastCheckedAt.getTime() <= 5_000;
   }
 
   /**
@@ -196,26 +206,27 @@ export class ReplicaRouter {
     console.warn(`[db] Read replica ${node.region} marked unhealthy: ${node.lastError}`);
   }
 
-  public async checkHealth(node: ReplicaNode): Promise<void> {
+  public async checkHealth(node: ReplicaNode, primaryLsn: string | null = null): Promise<void> {
     const startedAt = performance.now();
     const timeoutMs = this.options.healthCheckTimeoutMs ?? 2_000;
     let timeout: NodeJS.Timeout | undefined;
 
     try {
       const rows = await Promise.race([
-        node.client.$queryRawUnsafe<Array<{ lag_ms: number | string }>>(REPLICATION_LAG_SQL),
+        node.client.$queryRawUnsafe<Array<{ lag_ms: number | string }>>(REPLICATION_LAG_SQL, primaryLsn),
         new Promise<never>((_, reject) => {
           timeout = setTimeout(() => reject(new Error(`health check timed out after ${timeoutMs}ms`)), timeoutMs);
         }),
       ]);
-      const lagMs = Number(rows?.[0]?.lag_ms);
-      if (!Number.isFinite(lagMs)) {
+      const rawLag = rows?.[0]?.lag_ms;
+      const lagMs = rawLag === null ? NaN : Number(rawLag);
+      if (!Number.isFinite(lagMs) || lagMs < 0) {
         throw new Error("replica returned no replication lag");
       }
 
       const wasEligible = this.isEligible(node);
       node.latencyMs = Math.round((performance.now() - startedAt) * 100) / 100;
-      node.lagMs = Math.round(lagMs);
+      node.lagMs = lagMs;
       node.healthy = true;
       node.lastError = null;
       if (wasEligible && !this.isEligible(node)) {
@@ -233,7 +244,20 @@ export class ReplicaRouter {
   }
 
   public async checkAll(): Promise<void> {
-    await Promise.all(this.nodes.map((node) => this.checkHealth(node)));
+    if (!this.checking) {
+      this.checking = (async () => {
+        let lsn: string | null = null;
+        if (this.options.primary) {
+          const rows = await this.options.primary.$queryRawUnsafe<Array<{ lsn: string }>>("SELECT pg_current_wal_lsn()::text AS lsn");
+          lsn = rows[0]?.lsn;
+          if (!lsn) throw new Error("Primary WAL position unavailable");
+        }
+        await Promise.all(this.nodes.map(node => this.checkHealth(node, lsn)));
+      })().catch(error => {
+        for (const node of this.nodes) this.markUnhealthy(node, error);
+      }).finally(() => { this.checking = null; });
+    }
+    await this.checking;
   }
 
   public start(intervalMs: number): void {
@@ -285,7 +309,7 @@ export const READ_OPERATIONS = new Set([
  */
 function isReplicaFailure(error: unknown): boolean {
   const code = (error as { code?: unknown })?.code;
-  return !(typeof code === "string" && /^P2\d{3}$/.test(code));
+  return !(typeof code === "string" && /^P2\d{3}$/.test(code) && !["P2024", "P2028"].includes(code));
 }
 
 export interface RoutedOperation {
@@ -304,18 +328,30 @@ export async function routeOperation(router: ReplicaRouter, op: RoutedOperation)
   const isRead = READ_OPERATIONS.has(op.operation);
 
   if (!isRead) {
-    if (op.model && context) context.hasWritten = true;
+    if (op.model && context) {
+      context.hasWritten = true;
+      const userId = context.userId?.();
+      if (userId) {
+        const store = context.mutations ?? mutationWindow;
+        // Mark before dispatch and refresh on completion, including ambiguous failures.
+        // Refuse the write if we cannot publish its consistency fence.
+        await store.mark(userId);
+        try { return await op.query(op.args); }
+        finally { await store.mark(userId); }
+      }
+    }
     return op.query(op.args);
   }
 
   if (!op.model || !context?.allowReplica || context.hasWritten || op.__internalParams?.transaction) {
-    return op.query(op.args);
+    return op.__internalParams?.transaction ? op.query(op.args) : router.primaryReads.run(() => op.query(op.args));
   }
 
+  const primary = () => router.primaryReads.run(() => op.query(op.args));
+  const userId = context.userId?.();
+  if (userId && await (context.mutations ?? mutationWindow).recent(userId)) return primary();
   const node = router.pick();
-  if (!node) {
-    return op.query(op.args);
-  }
+  if (!node) return primary();
 
   const delegateName = op.model.charAt(0).toLowerCase() + op.model.slice(1);
   try {
@@ -323,7 +359,7 @@ export async function routeOperation(router: ReplicaRouter, op: RoutedOperation)
   } catch (error) {
     if (!isReplicaFailure(error)) throw error;
     router.markUnhealthy(node, error);
-    return op.query(op.args);
+    return primary();
   }
 }
 

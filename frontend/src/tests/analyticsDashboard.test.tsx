@@ -174,6 +174,8 @@ function gameweek(fplId: number, points: number, extra: Partial<GameweekPerforma
     differenceVsAverage: points - 50,
     chip: null,
     ...extra,
+    rank: extra.rank ?? null,
+    transferCount: extra.transferCount ?? 0,
   };
 }
 

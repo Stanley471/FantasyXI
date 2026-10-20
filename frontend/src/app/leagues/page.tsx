@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { api, ApiError } from "@/lib/api";
 import { League, Squad, LeagueStatus, LeagueSearchMeta, LeagueSortField } from "@/types";
-import { Badge, LeagueStatusBadge } from "@/components/ui/Badge";
+import { LeagueStatusBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
 import {
@@ -490,10 +490,10 @@ export default function LeaguesPage() {
                   <div className="flex flex-col items-end gap-1">
                     <LeagueStatusBadge status={lg.status} />
                     {lg.isPrivate && (
-                      <Badge variant="neutral" className="gap-1">
+                      <span className="inline-flex items-center gap-1 text-xs text-slate-400">
                         <IconShield className="w-3 h-3" />
                         <span>Private</span>
-                      </Badge>
+                      </span>
                     )}
                   </div>
                 </div>

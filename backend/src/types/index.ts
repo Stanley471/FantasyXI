@@ -290,6 +290,7 @@ export interface JoinLeagueInput {
 
 export interface LeagueStandingsEntry {
   rank: number;
+  rankChange?: number | null;
   userId: string;
   username: string;
   squadId: string;
@@ -355,6 +356,8 @@ export interface PaymentSubmissionInput {
 }
 
 export interface PaymentVerificationResult {
+  /** Verification unavailable; do not turn a transport failure into a payment failure. */
+  retryable?: boolean;
   success: boolean;
   txHash: string;
   ledgerSeq?: number;

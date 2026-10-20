@@ -267,6 +267,9 @@ For the current Next.js setup, `npm run dev` starts the local development server
 
 ## Testing & Quality Assurance
 
+See [backend resilience checks](backend/RESILIENCE.md) for financial chaos testing,
+read-replica consistency, Redis Streams fanout, and local k6 load testing.
+
 FantasyXI maintains automated test suites across all architectural layers.
 
 ### 1. Backend Automated Unit Tests (118 Tests)

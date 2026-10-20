@@ -3,7 +3,6 @@
 import React, { useState, useEffect } from "react";
 import { api } from "@/lib/api";
 import { Fixture, Gameweek } from "@/types";
-import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import {
   IconCalendar,
@@ -159,9 +158,9 @@ export default function FixturesPage() {
           </select>
 
           {selectedGw?.isCurrent && (
-            <Badge variant="success" size="sm">
-              Active Round
-            </Badge>
+            <span className="text-xs font-semibold text-emerald-400">
+              Active round
+            </span>
           )}
         </div>
 

@@ -1,10 +1,12 @@
 import { PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import pg from "pg";
+import { mutationWindow } from "./mutationWindow.js";
 import {
   ReplicaRouter,
   createReadReplicaExtension,
   loadReadReplicaConfig,
+  readConsistencyStorage,
 } from "./readReplicas.js";
 import {
   DatabaseClusterMonitor,
@@ -211,6 +213,7 @@ function getPrismaInstance(): PrismaClient {
       const router = new ReplicaRouter(
         replicaClients,
         {
+          primary,
           appRegion: replicaConfig.appRegion,
           maxLagMs: replicaConfig.maxLagMs,
           healthCheckTimeoutMs: replicaConfig.healthCheckTimeoutMs,
@@ -268,6 +271,17 @@ export function getReadReplicaStatus() {
 export const prisma = new Proxy({} as PrismaClient, {
   get(_target, prop, receiver) {
     const client = getPrismaInstance();
+    if (prop === "$transaction" && globalForPrisma.replicaRouter) {
+      return async (...args: unknown[]) => {
+        const context = readConsistencyStorage.getStore();
+        const userId = context?.userId?.();
+        if (context) context.hasWritten = true;
+        const store = context?.mutations ?? mutationWindow;
+        if (userId) await store.mark(userId);
+        try { return await (client.$transaction as Function).apply(client, args); }
+        finally { if (userId) await store.mark(userId); }
+      };
+    }
     const value = Reflect.get(client, prop, receiver);
     if (typeof value === "function") {
       return value.bind(client);

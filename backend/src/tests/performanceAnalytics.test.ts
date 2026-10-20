@@ -158,6 +158,7 @@ function createAnalyticsDb() {
     { squadId: "squad-other", gameweekId: 1, points: 40, benchPoints: 1, captainPoints: 4, transferCost: 0 },
     { squadId: "squad-other", gameweekId: 2, points: 55, benchPoints: 3, captainPoints: 12, transferCost: 0 },
   ];
+  const transfers = [{ squadId: "squad-old", gameweekId: 2 }, { squadId: "squad-old", gameweekId: 2 }];
   const chips = [{ squadId: "squad-old", gameweekId: 2, chipType: ChipType.BENCH_BOOST }];
   const calls = { groupBy: 0 };
 
@@ -174,17 +175,34 @@ function createAnalyticsDb() {
         scores
           .filter((s) => s.squadId === where.squadId)
           .map((s) => ({ ...s, gameweek: gameweeks.get(s.gameweekId) })),
-      groupBy: async ({ where }: any) => {
+      groupBy: async ({ by, where }: any) => {
         calls.groupBy++;
-        return where.gameweekId.in.map((gameweekId: number) => {
-          const rows = scores.filter((s) => s.gameweekId === gameweekId).map((s) => s.points);
+        if (by.length === 1) {
+          return where.gameweekId.in.map((gameweekId: number) => {
+            const rows = scores.filter((s) => s.gameweekId === gameweekId).map((s) => s.points);
+            return {
+              gameweekId,
+              _avg: { points: rows.reduce((a, b) => a + b, 0) / rows.length },
+              _max: { points: Math.max(...rows) },
+            };
+          });
+        }
+        const rows = scores.filter((s) => where.gameweekId.in.includes(s.gameweekId));
+        return [...new Set(rows.map((row) => `${row.gameweekId}:${row.points}`))].map((key) => {
+          const [gameweekId, points] = key.split(":").map(Number);
           return {
             gameweekId,
-            _avg: { points: rows.reduce((a, b) => a + b, 0) / rows.length },
-            _max: { points: Math.max(...rows) },
+            points,
+            _count: { _all: rows.filter((row) => row.gameweekId === gameweekId && row.points === points).length },
           };
         });
       },
+    },
+    squadTransfer: {
+      groupBy: async ({ where }: any) => where.gameweekId.in.map((gameweekId: number) => ({
+        gameweekId,
+        _count: { _all: transfers.filter((transfer) => transfer.squadId === where.squadId && transfer.gameweekId === gameweekId).length },
+      })),
     },
     squadChipUsage: {
       findMany: async ({ where }: any) =>
@@ -207,6 +225,8 @@ describe("AnalyticsService", () => {
     // GW1 average of 60 and 40; GW2 average of 45, 71 and 55
     assert.deepEqual(result.history.map((h) => h.averagePoints), [50, 57]);
     assert.deepEqual(result.history.map((h) => h.highestPoints), [60, 71]);
+    assert.deepEqual(result.history.map((h) => h.rank), [1, 3]);
+    assert.deepEqual(result.history.map((h) => h.transferCount), [0, 2]);
     assert.equal(result.history[1].chip, ChipType.BENCH_BOOST);
     assert.equal(result.summary.totalTransferCost, 4);
   });

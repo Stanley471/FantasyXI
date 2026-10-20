@@ -29,8 +29,9 @@ import {
   nativeToScVal,
   rpc,
   scValToNative,
+  StrKey,
   xdr,
-  type Transaction,
+  Transaction,
 } from "@stellar/stellar-sdk";
 import {
   LocalSecretTransactionSigner,
@@ -55,6 +56,7 @@ import {
   ESCROW_ERROR_CATALOG,
   type ParsedSorobanError,
 } from "./sorobanErrorRecovery.js";
+import { toContractLeagueId } from "./contractLeagueId.js";
 
 export {
   parseSorobanError,
@@ -89,7 +91,17 @@ export interface InvocationResult {
   contractErrorCode?: number;
   humanError?: string;
   isRetryable?: boolean;
+  uncertain?: boolean;
 }
+
+export type DepositSimulationResult =
+  | {
+      success: true;
+      minResourceFee: string;
+      needsRestoration: boolean;
+      estimatedFeeXlm: string;
+    }
+  | { success: false; error: string };
 
 export class SorobanContractClient {
   private static configuredSigner?: StellarTransactionSigner;
@@ -191,9 +203,9 @@ export class SorobanContractClient {
   /**
    * Submits a signed transaction and polls until it is final.
    */
-  private async sendAndPoll(tx: Transaction): Promise<InvocationResult> {
+  private async sendAndPoll(tx: StellarTransaction, beforeSubmit?: (hash: string, envelope: string) => Promise<void>): Promise<InvocationResult> {
     let submitted: StellarTransaction = tx;
-    if (this.feeBumpFeeSource) {
+    if (this.feeBumpFeeSource && tx instanceof Transaction) {
       const feeBump = TransactionBuilder.buildFeeBumpTransaction(
         await this.signer.publicKey(this.feeBumpFeeSource),
         Math.max(Number(BASE_FEE), Number(tx.fee)).toString(),
@@ -203,34 +215,42 @@ export class SorobanContractClient {
       await this.signer.sign(feeBump, this.feeBumpFeeSource);
       submitted = feeBump;
     }
-    const sent = await this.server.sendTransaction(submitted);
-    if (sent.status === "ERROR" || sent.status === "DUPLICATE") {
-      return this.failure(
-        `Transaction rejected (${sent.status}): ${sent.errorResult?.toXDR("base64") ?? "unknown"}`,
-        sent.hash
-      );
-    }
-
-    for (let attempt = 0; attempt < this.maxPollAttempts; attempt++) {
-      const result = await this.server.getTransaction(sent.hash);
-      if (result.status === rpc.Api.GetTransactionStatus.SUCCESS) {
-        return {
-          success: true,
-          txHash: sent.hash,
-          ledgerSeq: result.ledger,
-          returnValue: result.returnValue ? scValToNative(result.returnValue) : undefined,
-        };
-      }
-      if (result.status === rpc.Api.GetTransactionStatus.FAILED) {
+    const hash = Buffer.from(submitted.hash()).toString("hex");
+    // Persist the exact signed hash before any bytes can reach the RPC server.
+    // A journal failure prevents submission; a response loss must never rebuild a new tx.
+    await beforeSubmit?.(hash, submitted.toXDR());
+    try {
+      const sent = await this.server.sendTransaction(submitted);
+      if (sent.status === "ERROR") {
         return this.failure(
-          `Transaction failed: ${result.resultXdr.toXDR("base64")}`,
-          sent.hash
+          `Transaction rejected (${sent.status}): ${sent.errorResult?.toXDR("base64") ?? "unknown"}`,
+          hash
         );
       }
-      await new Promise((resolve) => setTimeout(resolve, this.pollIntervalMs));
-    }
 
-    return this.failure(`Transaction ${sent.hash} not confirmed in time`, sent.hash);
+      for (let attempt = 0; attempt < this.maxPollAttempts; attempt++) {
+        const result = await this.server.getTransaction(hash);
+        if (result.status === rpc.Api.GetTransactionStatus.SUCCESS) {
+          return {
+            success: true,
+            txHash: hash,
+            ledgerSeq: result.ledger,
+            returnValue: result.returnValue ? scValToNative(result.returnValue) : undefined,
+          };
+        }
+        if (result.status === rpc.Api.GetTransactionStatus.FAILED) {
+          return this.failure(
+            `Transaction failed: ${result.resultXdr.toXDR("base64")}`,
+            hash
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, this.pollIntervalMs));
+      }
+
+      return { ...this.failure(`Transaction ${hash} not confirmed in time`, hash), uncertain: true, isRetryable: false };
+    } catch (error) {
+      return { ...this.failure(`Submission outcome unknown: ${(error as Error).message}`, hash), isRetryable: false, uncertain: true };
+    }
   }
 
   /**
@@ -256,11 +276,18 @@ export class SorobanContractClient {
   /**
    * Full RPC pipeline for a state-changing contract call.
    */
+  /** Replay only the durable envelope: its hash/time bounds/sequence remain unchanged. */
+  public async resumeEnvelope(envelope: string): Promise<InvocationResult> {
+    const tx = TransactionBuilder.fromXDR(envelope, this.networkPassphrase);
+    return this.sendAndPoll(tx);
+  }
+
   public async invoke(
     sourceSecret: string,
     contractId: string,
     method: string,
-    args: xdr.ScVal[]
+    args: xdr.ScVal[],
+    beforeSubmit?: (hash: string, envelope: string) => Promise<void>
   ): Promise<InvocationResult> {
     return executeWithRetry(
       async () => {
@@ -290,8 +317,8 @@ export class SorobanContractClient {
 
           const prepared = rpc.assembleTransaction(tx, simulation).build();
           prepared.sign(keypair);
-          const pollRes = await this.sendAndPoll(prepared);
-          if (!pollRes.success && pollRes.isRetryable) {
+          const pollRes = await this.sendAndPoll(prepared, beforeSubmit);
+          if (!pollRes.success && pollRes.isRetryable && !pollRes.txHash) {
             throw new Error(pollRes.error || "Retryable transaction failure");
           }
           return pollRes;
@@ -403,6 +430,61 @@ export class SorobanContractClient {
     ]);
   }
 
+  /** Simulates a user's deposit without signing or submitting a transaction. */
+  public async simulateDepositTransaction(
+    participantPublic: string,
+    leagueId: number | bigint | string
+  ): Promise<DepositSimulationResult> {
+    if (!StrKey.isValidEd25519PublicKey(participantPublic)) {
+      return { success: false, error: "A valid Stellar public key is required." };
+    }
+
+    let contractLeagueId: bigint;
+    try {
+      contractLeagueId =
+        typeof leagueId === "string" && !/^\d+$/.test(leagueId)
+          ? toContractLeagueId(leagueId)
+          : BigInt(leagueId);
+    } catch {
+      return { success: false, error: "A valid league ID is required." };
+    }
+
+    try {
+      const account = await this.server.getAccount(participantPublic);
+      const transaction = this.buildInvocation(account, this.escrowContractId, "deposit", [
+        SorobanContractClient.address(participantPublic),
+        SorobanContractClient.u64(contractLeagueId),
+      ]);
+      const simulation = await this.server.simulateTransaction(transaction);
+      if (rpc.Api.isSimulationError(simulation)) {
+        return { success: false, error: `Simulation failed: ${simulation.error}` };
+      }
+
+      const needsRestoration = rpc.Api.isSimulationRestore(simulation);
+      const minResourceFee = BigInt(simulation.minResourceFee ?? "0");
+      const restorationResourceFee = needsRestoration
+        ? BigInt(simulation.restorePreamble.minResourceFee ?? "0")
+        : 0n;
+      const baseFees = BigInt(BASE_FEE) * (needsRestoration ? 2n : 1n);
+      const totalFeeStroops = baseFees + minResourceFee + restorationResourceFee;
+      const wholeXlm = totalFeeStroops / 10_000_000n;
+      const fractionalXlm = (totalFeeStroops % 10_000_000n)
+        .toString()
+        .padStart(7, "0")
+        .replace(/0+$/, "");
+
+      return {
+        success: true,
+        minResourceFee: minResourceFee.toString(),
+        needsRestoration,
+        estimatedFeeXlm: fractionalXlm ? `${wholeXlm}.${fractionalXlm}` : wholeXlm.toString(),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown Soroban RPC error";
+      return { success: false, error: `Unable to simulate deposit: ${message}` };
+    }
+  }
+
   /** Publishes a commitment to a finalized gameweek's score set on Soroban. */
   public async publishGameweekResult(
     adminKey: string,
@@ -428,7 +510,8 @@ export class SorobanContractClient {
     leagueId: number | bigint,
     winners: WinnerPayoutParam[],
     platformTreasury: string,
-    platformFeeStroops: bigint
+    platformFeeStroops: bigint,
+    beforeSubmit?: (hash: string, envelope: string) => Promise<void>
   ): Promise<InvocationResult> {
     const winnersScVal = SorobanContractClient.winnersScVal(winners);
 
@@ -438,7 +521,7 @@ export class SorobanContractClient {
       winnersScVal,
       SorobanContractClient.address(platformTreasury),
       SorobanContractClient.i128(platformFeeStroops),
-    ]);
+    ], beforeSubmit);
   }
 
   /** Settles with a required 32-byte commitment to the off-chain calculation. */
