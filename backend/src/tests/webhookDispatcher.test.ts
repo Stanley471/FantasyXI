@@ -5,7 +5,48 @@ import {
   WebhookDispatcher,
   calculateBackoffDelay,
   WebhookEndpoint,
+  findExistingWebhookSubscription,
+  normalizeWebhookUrl,
 } from "../services/webhooks/webhookDispatcher.js";
+
+describe("Webhook subscription URL uniqueness", () => {
+  it("normalizes whitespace, casing, and trailing slashes", () => {
+    assert.equal(
+      normalizeWebhookUrl("  HTTPS://Example.COM/hooks///  "),
+      "https://example.com/hooks"
+    );
+  });
+
+  it("matches an active same-user URL and rejects duplicate events", () => {
+    const endpoint: WebhookEndpoint = {
+      id: "existing",
+      url: "https://example.com/hooks/",
+      secret: "secret",
+      userId: "user-1",
+      events: ["league.created"],
+      isActive: true,
+    };
+
+    assert.throws(
+      () =>
+        findExistingWebhookSubscription(
+          [endpoint],
+          "user-1",
+          normalizeWebhookUrl("HTTPS://EXAMPLE.COM/hooks"),
+          ["league.created"]
+        ),
+      { message: "Webhook subscription already exists for this URL and event" }
+    );
+    assert.equal(
+      findExistingWebhookSubscription([endpoint], "user-1", normalizeWebhookUrl(endpoint.url), ["league.updated"]),
+      endpoint
+    );
+    assert.equal(
+      findExistingWebhookSubscription([endpoint], "another-user", normalizeWebhookUrl(endpoint.url), ["league.created"]),
+      undefined
+    );
+  });
+});
 
 describe("Webhook HMAC Signing & Verification (Issue 157)", () => {
   const secret = "whsec_test_secret_1234567890abcdef";

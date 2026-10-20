@@ -24,7 +24,7 @@ import {
   scValToNative,
   xdr,
 } from "@stellar/stellar-sdk";
-import { getHorizonServer, stellarConfig } from "../../config/stellar.js";
+import { stellarConfig, withHorizonFailover } from "../../config/stellar.js";
 import { toContractLeagueId } from "./contractLeagueId.js";
 
 export enum DepositVerificationErrorCode {
@@ -80,16 +80,20 @@ export interface VerificationFailure {
 export type DepositVerificationResult = VerificationSuccess | VerificationFailure;
 
 export class DepositVerificationService {
-  private server: Horizon.Server;
+  private customServer?: Horizon.Server;
   private networkPassphrase: string;
 
   constructor(customServer?: Horizon.Server, networkPassphrase?: string) {
-    this.server = customServer || getHorizonServer();
+    this.customServer = customServer;
     this.networkPassphrase =
       networkPassphrase ||
       process.env.STELLAR_NETWORK_PASSPHRASE ||
       stellarConfig.networkPassphrase ||
       Networks.TESTNET;
+  }
+
+  private runHorizon<T>(operation: (server: Horizon.Server) => Promise<T>): Promise<T> {
+    return this.customServer ? operation(this.customServer) : withHorizonFailover(operation);
   }
 
   /**
@@ -144,7 +148,9 @@ export class DepositVerificationService {
 
     try {
       // 2. Fetch transaction record from Stellar Horizon API
-      const tx = await this.server.transactions().transaction(cleanHash).call();
+      const tx = await this.runHorizon((server) =>
+        server.transactions().transaction(cleanHash).call()
+      );
 
       // 3. Confirm transaction was executed successfully on the ledger
       if (!tx.successful) {
@@ -398,10 +404,9 @@ export class DepositVerificationService {
     }
 
     // Fetch operations
-    const opsPage = await this.server
-      .operations()
-      .forTransaction(cleanHash)
-      .call();
+    const opsPage = await this.runHorizon((server) =>
+      server.operations().forTransaction(cleanHash).call()
+    );
 
     const paymentOps = opsPage.records.filter(
       (op: any) => op.type === "payment"

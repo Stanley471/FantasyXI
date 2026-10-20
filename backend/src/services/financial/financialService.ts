@@ -478,20 +478,15 @@ export class FinancialService {
     });
 
     if (!verification.success) {
-      await this.db.leagueMember.update({
-        where: { id: member.id },
-        data: {
-          paymentStatus: PaymentStatus.PAYMENT_FAILED,
-        },
-      });
-
-      await this.db.transaction.updateMany({
-        where: { stellarTxHash },
-        data: {
-          status: TransactionStatus.FAILED,
-          errorMessage: verification.error,
-        },
-      });
+      if (verification.retryable) return verification;
+      await this.db.$transaction([
+        this.db.leagueMember.update({
+          where: { id: member.id }, data: { paymentStatus: PaymentStatus.PAYMENT_FAILED },
+        }),
+        this.db.transaction.updateMany({
+          where: { stellarTxHash }, data: { status: TransactionStatus.FAILED, errorMessage: verification.error },
+        }),
+      ]);
 
       this.audit.record({
         action: FinancialAuditAction.DEPOSIT_FAILED,
@@ -897,6 +892,9 @@ export class FinancialService {
       throw new FinancialForbiddenError("Only an administrator can execute settlements");
     }
 
+    const previous = await this.db.coordinatedTransaction.findUnique({ where: { settlementKey: leagueId } });
+    if (previous) return this.recoverSettlement(previous);
+
     const plan = await this.prepareSettlement(leagueId, league.creatorId);
     if (!plan.canSettle || plan.winners.length === 0) {
       throw new FinancialValidationError(
@@ -923,7 +921,16 @@ export class FinancialService {
           winner: winner.stellarAddress,
           amount: toStroops(winner.prizeAmount).toString(),
         })),
-        toStroops(plan.platformFee)
+        toStroops(plan.platformFee),
+        async (txHash: string, envelope: string) => {
+          const attempt = await this.db.coordinatedTransaction.upsert({
+            where: { settlementKey: leagueId },
+            create: { settlementKey: leagueId, txHash, kind: "SETTLEMENT", leagueId, userId: adminUserId,
+              metadata: { plan, adminUserId, envelope }, status: "PENDING", nextPollAt: new Date() },
+            update: {},
+          });
+          if (attempt.txHash !== txHash) throw new Error("Another settlement is already journaled for this league");
+        }
       );
     } catch (error) {
       throw new FinancialConflictError(
@@ -948,57 +955,89 @@ export class FinancialService {
       );
     }
 
+    return this.commitSettlement(leagueId, adminUserId, plan, result.txHash, result.ledgerSeq);
+  }
+
+  /** Resume the exact signed hash after an RPC partition or a failed database commit. */
+  private async recoverSettlement(attempt: any): Promise<SettlementDispatchReport> {
+    let result = await this.stellar.getSettlementStatus(attempt.txHash);
+    if (result.status === "NOT_FOUND" && attempt.metadata?.envelope) {
+      const replay = await this.stellar.resumeSettlementEnvelope(attempt.metadata.envelope);
+      if (replay.success) result = { status: "SUCCESS", ledger: replay.ledgerSeq };
+    }
+    if (result.status !== "SUCCESS") {
+      throw new FinancialConflictError(`Journaled settlement ${attempt.txHash} is ${result.status}; resubmission is blocked`);
+    }
+    const { plan, adminUserId } = attempt.metadata;
+    return this.commitSettlement(attempt.leagueId, adminUserId, plan, attempt.txHash, result.ledger);
+  }
+
+  public async recoverPendingSettlements(): Promise<number> {
+    const attempts = await this.db.coordinatedTransaction.findMany({
+      where: { kind: "SETTLEMENT", settlementKey: { not: null }, transactionId: null,
+        status: { in: ["PENDING", "SUCCESS", "DROPPED"] } }, take: 50, orderBy: { nextPollAt: "asc" },
+    });
+    let recovered = 0;
+    for (const attempt of attempts) {
+      const league = await this.db.league.findUnique({ where: { id: attempt.leagueId } });
+      if (league?.status === LeagueStatus.COMPLETED) continue;
+      try { await this.recoverSettlement(attempt); recovered++; }
+      catch (error) { console.warn("[settlement-recovery]", (error as Error).message); }
+    }
+    return recovered;
+  }
+
+  private async commitSettlement(leagueId: string, adminUserId: string, plan: SettlementPlan,
+    txHash: string, ledgerSeq?: number): Promise<SettlementDispatchReport> {
+    const result = { txHash, ledgerSeq };
     const confirmedAt = new Date();
-    await this.db.$transaction([
-      this.db.league.update({
-        where: { id: leagueId },
-        data: {
-          status: LeagueStatus.COMPLETED,
-          prizePool: plan.netPrizePool,
-        },
-      }),
-      ...plan.winners.map((winner) =>
-        this.db.transaction.create({
+    await this.db.$transaction(async (tx: any) => {
+      // PostgreSQL serializes concurrent updates on this row and rechecks the
+      // predicate after waiting. Only the winning transaction creates ledger rows.
+      const { count } = await tx.league.updateMany({
+        where: { id: leagueId, status: { not: LeagueStatus.COMPLETED } },
+        data: { status: LeagueStatus.COMPLETED, prizePool: plan.netPrizePool },
+      });
+      if (!count) return;
+      const ledgerRows = await Promise.all([
+        ...plan.winners.map((winner) =>
+          tx.transaction.create({
+            data: {
+              userId: winner.userId,
+              leagueId,
+              type: TransactionType.PRIZE_PAYOUT,
+              amount: winner.prizeAmount,
+              asset: stellarConfig.usdcAssetCode,
+              assetIssuer: stellarConfig.usdcIssuer,
+              stellarTxHash: result.txHash,
+              ledgerSeq: result.ledgerSeq,
+              status: TransactionStatus.CONFIRMED,
+              confirmedAt,
+              memo: `PRIZE_PAYOUT:${leagueId}:${winner.rank}`,
+            },
+          })
+        ),
+        tx.transaction.create({
           data: {
-            userId: winner.userId,
+            userId: adminUserId,
             leagueId,
-            type: TransactionType.PRIZE_PAYOUT,
-            amount: winner.prizeAmount,
+            type: TransactionType.PLATFORM_FEE,
+            amount: plan.platformFee,
             asset: stellarConfig.usdcAssetCode,
             assetIssuer: stellarConfig.usdcIssuer,
             stellarTxHash: result.txHash,
             ledgerSeq: result.ledgerSeq,
             status: TransactionStatus.CONFIRMED,
             confirmedAt,
-            memo: `PRIZE_PAYOUT:${leagueId}:${winner.rank}`,
+            memo: `PLATFORM_FEE:${leagueId}`,
           },
-        })
-      ),
-      this.db.transaction.create({
-        data: {
-          userId: adminUserId,
-          leagueId,
-          type: TransactionType.PLATFORM_FEE,
-          amount: plan.platformFee,
-          asset: stellarConfig.usdcAssetCode,
-          assetIssuer: stellarConfig.usdcIssuer,
-          stellarTxHash: result.txHash,
-          ledgerSeq: result.ledgerSeq,
-          status: TransactionStatus.CONFIRMED,
-          confirmedAt,
-          memo: `PLATFORM_FEE:${leagueId}`,
-        },
-      }),
-    ]);
-
-    return {
-      leagueId,
-      contractLeagueId: contractLeagueId.toString(),
-      stellarTxHash: result.txHash,
-      ledgerSeq: result.ledgerSeq,
-      winnerTransactionCount: plan.winners.length,
-      platformFee: plan.platformFee,
-    };
+        }),
+      ]);
+      await tx.coordinatedTransaction.updateMany({ where: { settlementKey: leagueId },
+        data: { status: "SUCCESS", ledgerSeq, finalizedAt: confirmedAt, transactionId: ledgerRows[0].id } });
+    });
+    return { leagueId, contractLeagueId: FinancialService.toContractLeagueId(leagueId).toString(),
+      stellarTxHash: txHash, ledgerSeq, winnerTransactionCount: plan.winners.length, platformFee: plan.platformFee };
   }
 
   /**

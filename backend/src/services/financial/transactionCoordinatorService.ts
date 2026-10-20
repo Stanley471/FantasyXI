@@ -318,7 +318,7 @@ export class TransactionCoordinatorService {
     error: string | null
   ): Promise<CoordinatedTransactionStatus> {
     const pendingForMs = now.getTime() - new Date(record.submittedAt).getTime();
-    if (pendingForMs >= this.maxPendingMs) {
+    if (pendingForMs >= this.maxPendingMs && !error) {
       const reason =
         `Transaction not found on the network ${Math.round(pendingForMs / 1000)}s after submission` +
         (error ? `; last error: ${error}` : "");

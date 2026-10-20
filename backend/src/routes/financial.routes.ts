@@ -1,6 +1,7 @@
 import { Router } from "express";
 import {
   getPaymentRequirement,
+  simulateDeposit,
   submitPayment,
   verifyPayment,
   reconcileDeposit,
@@ -23,6 +24,12 @@ router.use(financialRateLimiter);
 router.use(idempotency);
 
 router.get("/requirement", getPaymentRequirement);
+router.post(
+  "/simulate-deposit",
+  mutationRateLimiter,
+  requirePermission(Permission.PAYMENT_MANAGE_OWN),
+  simulateDeposit
+);
 router.post("/submit", submitPayment);
 router.post("/verify", verifyPayment);
 router.get("/settlement-plan", getSettlementPlan);

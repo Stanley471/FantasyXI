@@ -177,7 +177,7 @@ export const StandingsTable: React.FC<StandingsTableProps> = ({
                       {entry.squadName || "Fantasy Squad"}
                     </span>
                     {isMe && (
-                      <span className="text-[10px] uppercase font-bold bg-emerald-500/20 text-emerald-300 px-1.5 py-0.5 rounded border border-emerald-500/30">
+                      <span className="text-[10px] uppercase font-bold tracking-wide text-emerald-400/80">
                         You
                       </span>
                     )}
@@ -190,7 +190,7 @@ export const StandingsTable: React.FC<StandingsTableProps> = ({
                 {/* Escrow Status */}
                 <td className="py-3 px-3">
                   {entryFee === 0 ? (
-                    <Badge variant="neutral">Free League</Badge>
+                    <span className="text-xs text-slate-500">Free league</span>
                   ) : entry.membershipStatus === MembershipStatus.ACTIVE ? (
                     <Badge variant="success" className="gap-1">
                       <IconCheck className="w-3 h-3" />

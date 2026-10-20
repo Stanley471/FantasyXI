@@ -1,0 +1,56 @@
+name: Financial and Matchday Resilience
+on:
+  pull_request:
+    paths: ["backend/**", ".github/workflows/resilience.yml"]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  resilience:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: chaos-test-only
+          POSTGRES_DB: fantasyxi_chaos
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      NODE_ENV: test
+      REDIS_ENABLED: "false"
+      JWT_SECRET: resilience-tests-only-secret-at-least-thirty-two-characters
+      DATABASE_URL: postgresql://postgres:chaos-test-only@localhost:5432/fantasyxi_chaos
+      CHAOS_DATABASE_URL: postgresql://postgres:chaos-test-only@localhost:5432/fantasyxi_chaos
+      FANOUT_REDIS_URL: redis://localhost:6379
+      FANOUT_LOAD_SECONDS: "30"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - run: npx prisma db push
+      - run: npm run build
+      - run: npm run test:resilience
+      - run: npm run test:resilience:integration
+      - run: npm run test:fanout:load | tee fanout-load-report.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fanout-load-report
+          path: backend/fanout-load-report.json

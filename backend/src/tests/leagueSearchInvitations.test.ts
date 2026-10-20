@@ -17,6 +17,8 @@ import {
   FinancialForbiddenError,
 } from "../services/financial/financialService.js";
 import leagueRoutes from "../routes/league.routes.js";
+import { acceptLeagueInvitation } from "../controllers/league.controller.js";
+import { leagueService as sharedLeagueService } from "../services/league/leagueService.js";
 import { LeagueStatus, MembershipStatus, ScoringType } from "../types/index.js";
 
 const CREATOR = "creator-1";
@@ -125,12 +127,23 @@ function createMockDb() {
     },
     leagueInvitation: {
       create: async ({ data }: any) => {
-        const invitation = { id: randomUUID(), usedAt: null, usedById: null, revokedAt: null, createdAt: new Date(), ...data };
+        const invitation = {
+          id: randomUUID(),
+          maxUses: 1,
+          usesCount: 0,
+          usedAt: null,
+          usedById: null,
+          revokedAt: null,
+          createdAt: new Date(),
+          ...data,
+        };
         state.invitations.push(invitation);
         return { ...invitation };
       },
       findUnique: async ({ where }: any) => {
-        const inv = state.invitations.find((i) => i.tokenHash === where.tokenHash);
+        const inv = state.invitations.find((i) =>
+          where.tokenHash ? i.tokenHash === where.tokenHash : i.id === where.id
+        );
         return inv ? { ...inv } : null;
       },
       findMany: async ({ where }: any) =>
@@ -142,9 +155,14 @@ function createMockDb() {
             (where.leagueId === undefined || i.leagueId === where.leagueId) &&
             (where.usedAt !== null || i.usedAt === null) &&
             (where.revokedAt !== null || i.revokedAt === null) &&
+            (!where.usesCount || i.usesCount < where.usesCount.lt) &&
             (!where.expiresAt || i.expiresAt > where.expiresAt.gt)
         );
-        matched.forEach((i) => Object.assign(i, data));
+        matched.forEach((i) => {
+          const { usesCount, ...otherData } = data;
+          Object.assign(i, otherData);
+          if (usesCount?.increment) i.usesCount += usesCount.increment;
+        });
         return { count: matched.length };
       },
     },
@@ -305,7 +323,7 @@ describe("Private league invitations", () => {
     return { db, league, service: new LeagueService(db) };
   }
 
-  it("creates a single-use token that is stored only as a hash", async () => {
+  it("creates a capped token that is stored only as a hash", async () => {
     const { db, league, service } = setup();
     const invitation = await service.createInvitation(league.id, CREATOR, 24);
 
@@ -313,6 +331,8 @@ describe("Private league invitations", () => {
     const stored = db.state.invitations[0];
     assert.equal(stored.tokenHash, LeagueService.hashInvitationToken(invitation.token));
     assert.ok(!JSON.stringify(stored).includes(invitation.token));
+    assert.equal(stored.maxUses, 1);
+    assert.equal(stored.usesCount, 0);
 
     const ttlHours = (stored.expiresAt.getTime() - Date.now()) / 3_600_000;
     assert.ok(ttlHours > 23.9 && ttlHours <= 24);
@@ -346,7 +366,8 @@ describe("Private league invitations", () => {
     assert.equal(db.state.invitations[0].usedById, "user-a");
     assert.equal(db.state.leagues[0].currentMembers, 2);
 
-    await assert.rejects(() => service.acceptInvitation(token, "user-b", "squad-b"), /already been used/);
+    await assert.rejects(() => service.acceptInvitation(token, "user-b", "squad-b"), /Maximum invite uses reached/);
+    assert.equal(db.state.invitations[0].usesCount, 1);
     await assert.rejects(() => service.previewInvitation(token), LeagueInvitationError);
   });
 
@@ -365,12 +386,31 @@ describe("Private league invitations", () => {
     assert.equal(db.state.members.length, 1);
   });
 
+  it("increments multi-use invitations transactionally until the configured cap", async () => {
+    const { db, league, service } = setup();
+    const { token } = await service.createInvitation(league.id, CREATOR, undefined, 2);
+
+    await service.acceptInvitation(token, "user-a", "squad-a");
+    assert.equal(db.state.invitations[0].usesCount, 1);
+    assert.equal(db.state.invitations[0].usedAt, null);
+
+    await service.acceptInvitation(token, "user-b", "squad-b");
+    assert.equal(db.state.invitations[0].usesCount, 2);
+    assert.ok(db.state.invitations[0].usedAt instanceof Date);
+
+    await assert.rejects(() => service.acceptInvitation(token, "user-c", "squad-c"), /Maximum invite uses reached/);
+    assert.equal(db.state.members.length, 2);
+  });
+
   it("rejects expired, revoked and unknown links", async () => {
     const { db, league, service } = setup();
 
     const expired = await service.createInvitation(league.id, CREATOR, 1);
     db.state.invitations[0].expiresAt = new Date(Date.now() - 1_000);
-    await assert.rejects(() => service.acceptInvitation(expired.token, "user-a", "squad-a"), /expired/);
+    await assert.rejects(
+      () => service.acceptInvitation(expired.token, "user-a", "squad-a"),
+      /Invitation link has expired/
+    );
 
     const revoked = await service.createInvitation(league.id, CREATOR);
     await service.revokeInvitation(league.id, revoked.id, CREATOR);
@@ -385,6 +425,23 @@ describe("Private league invitations", () => {
     const states = (await service.listInvitations(league.id, CREATOR)).map((i: any) => i.state).sort();
     assert.deepEqual(states, ["EXPIRED", "REVOKED"]);
     assert.equal(db.state.members.length, 0);
+  });
+
+  it("rejects an invitation at the exact expiration boundary", async () => {
+    const { db, league, service } = setup();
+    const { token } = await service.createInvitation(league.id, CREATOR);
+    const boundary = new Date("2026-10-19T12:00:00.000Z");
+    db.state.invitations[0].expiresAt = boundary;
+    const originalNow = Date.now;
+    Date.now = () => boundary.getTime();
+    try {
+      await assert.rejects(
+        () => service.acceptInvitation(token, "user-a", "squad-a"),
+        /Invitation link has expired/
+      );
+    } finally {
+      Date.now = originalNow;
+    }
   });
 
   it("requires an invitation to join a private league directly", async () => {
@@ -442,6 +499,43 @@ describe("League routes input validation", () => {
   it("returns 410 for a malformed invitation token", async () => {
     const res = await fetch(`${baseUrl}/api/v1/leagues/invitations/short`);
     assert.equal(res.status, 410);
+  });
+
+  it("returns 400 with distinct messages for expired and exhausted invitation links", async () => {
+    const originalAccept = sharedLeagueService.acceptInvitation;
+    const cases = [
+      "Invitation link has expired",
+      "Maximum invite uses reached",
+    ];
+
+    try {
+      for (const message of cases) {
+        (sharedLeagueService as any).acceptInvitation = async () => {
+          throw new LeagueInvitationError(message, 400);
+        };
+        let statusCode = 200;
+        let body: any;
+        const res = {
+          status(code: number) {
+            statusCode = code;
+            return this;
+          },
+          json(value: any) {
+            body = value;
+            return this;
+          },
+        };
+        await acceptLeagueInvitation(
+          { user: { id: "user-a" }, params: { token: "token" }, body: { squadId: "squad-a" } } as any,
+          res as any,
+          (() => assert.fail("known invitation errors should be handled")) as any
+        );
+        assert.equal(statusCode, 400);
+        assert.equal(body.message, message);
+      }
+    } finally {
+      (sharedLeagueService as any).acceptInvitation = originalAccept;
+    }
   });
 
   it("requires authentication to accept or create invitations", async () => {

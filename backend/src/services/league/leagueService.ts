@@ -37,6 +37,10 @@ export interface H2HAnomalyReport {
 
 export const MAX_LEAGUE_MEMBERS = 100_000;
 
+/** Maximum lengths (after trimming) accepted when creating a league. */
+export const LEAGUE_NAME_MAX_LENGTH = 50;
+export const LEAGUE_DESCRIPTION_MAX_LENGTH = 200;
+
 export class LeagueValidationError extends Error {
   constructor(message: string) {
     super(message);
@@ -60,9 +64,12 @@ export class LeagueForbiddenError extends Error {
 
 /** Raised for invitation links that are unknown, expired, revoked or already used. */
 export class LeagueInvitationError extends Error {
-  constructor(message: string) {
+  public readonly statusCode: number;
+
+  constructor(message: string, statusCode: number = 410) {
     super(message);
     this.name = "LeagueInvitationError";
+    this.statusCode = statusCode;
   }
 }
 
@@ -404,11 +411,23 @@ export class LeagueService {
    * Creates a new fantasy league and registers the creator as the first pending member.
    */
   public async createLeague(userId: string, input: CreateLeagueInput) {
-    if (!input.name || input.name.trim().length === 0) {
+    if (typeof input.name !== "string" || input.name.trim().length === 0) {
       throw new LeagueValidationError("League name is required");
     }
-    if (input.name.trim().length > 60) {
-      throw new LeagueValidationError("League name must not exceed 60 characters");
+    if (input.name.trim().length > LEAGUE_NAME_MAX_LENGTH) {
+      throw new LeagueValidationError(
+        `League name must not exceed ${LEAGUE_NAME_MAX_LENGTH} characters`
+      );
+    }
+    if (input.description !== undefined && input.description !== null) {
+      if (typeof input.description !== "string") {
+        throw new LeagueValidationError("League description must be a string");
+      }
+      if (input.description.trim().length > LEAGUE_DESCRIPTION_MAX_LENGTH) {
+        throw new LeagueValidationError(
+          `League description must not exceed ${LEAGUE_DESCRIPTION_MAX_LENGTH} characters`
+        );
+      }
     }
     if (input.entryFee < 0) {
       throw new LeagueValidationError("Entry fee must be 0 or greater");
@@ -540,11 +559,8 @@ export class LeagueService {
   }
 
   /**
-   * Joins an upcoming league with a valid fantasy squad.
-   *
-   * Private leagues require a valid invitation token. The invitation is consumed in
-   * the same transaction that creates the membership, so a link can never admit
-   * more than one user, even under concurrent requests.
+   * Joins an upcoming league with a valid fantasy squad. Private invitation usage
+   * is incremented in the same transaction that creates the membership.
    */
   public async joinLeague(
     leagueId: string,
@@ -563,6 +579,8 @@ export class LeagueService {
 
     // 0. Private leagues are invitation-only
     let invitationId: string | null = null;
+    let invitationMaxUses = 1;
+    let invitationUsesCount = 0;
     if (league.isPrivate) {
       if (!options.invitationToken) {
         throw new LeagueForbiddenError(
@@ -574,6 +592,8 @@ export class LeagueService {
         throw new LeagueInvitationError("This invitation is not valid for this league");
       }
       invitationId = invitation.id;
+      invitationMaxUses = invitation.maxUses;
+      invitationUsesCount = invitation.usesCount;
     }
 
     // 1. Must be in UPCOMING state
@@ -628,19 +648,31 @@ export class LeagueService {
 
     return this.db.$transaction(async (tx: any) => {
       if (invitationId) {
-        // Conditional update = atomic single-use check; loses the race if already consumed
+        // Conditional update enforces the usage cap atomically under concurrent requests.
         const now = new Date();
         const consumed = await tx.leagueInvitation.updateMany({
           where: {
             id: invitationId,
-            usedAt: null,
             revokedAt: null,
             expiresAt: { gt: now },
+            usesCount: { lt: invitationMaxUses },
           },
-          data: { usedAt: now, usedById: userId },
+          data: {
+            usesCount: { increment: 1 },
+            ...(invitationUsesCount + 1 >= invitationMaxUses
+              ? { usedAt: now, usedById: userId }
+              : {}),
+          },
         });
         if (consumed.count !== 1) {
-          throw new LeagueInvitationError("This invitation link has already been used or has expired");
+          const current = await tx.leagueInvitation.findUnique({ where: { id: invitationId } });
+          if (current?.revokedAt) {
+            throw new LeagueInvitationError("This invitation link has been revoked");
+          }
+          if (current && new Date(current.expiresAt).getTime() <= now.getTime()) {
+            throw new LeagueInvitationError("Invitation link has expired", 400);
+          }
+          throw new LeagueInvitationError("Maximum invite uses reached", 400);
         }
       }
 
@@ -685,13 +717,14 @@ export class LeagueService {
   }
 
   /**
-   * Creates a single-use invitation link for a private league. Creator only.
+   * Creates an expiring invitation link with a configurable redemption cap. Creator only.
    * The raw token is returned exactly once and cannot be recovered later.
    */
   public async createInvitation(
     leagueId: string,
     requesterUserId: string,
-    expiresInHours: number = INVITATION_DEFAULT_TTL_HOURS
+    expiresInHours: number = INVITATION_DEFAULT_TTL_HOURS,
+    maxUses: number = 1
   ) {
     if (
       !Number.isFinite(expiresInHours) ||
@@ -701,6 +734,9 @@ export class LeagueService {
       throw new LeagueValidationError(
         `expiresInHours must be between 1 and ${INVITATION_MAX_TTL_HOURS}`
       );
+    }
+    if (!Number.isSafeInteger(maxUses) || maxUses < 1 || maxUses > 2_147_483_647) {
+      throw new LeagueValidationError("maxUses must be a positive integer");
     }
 
     const league = await this.requireOwnedLeague(leagueId, requesterUserId);
@@ -722,6 +758,8 @@ export class LeagueService {
         tokenHash: LeagueService.hashInvitationToken(token),
         createdById: requesterUserId,
         expiresAt: new Date(Date.now() + Math.round(expiresInHours * 3_600_000)),
+        maxUses,
+        usesCount: 0,
       },
     });
 
@@ -730,6 +768,8 @@ export class LeagueService {
       leagueId,
       token,
       expiresAt: invitation.expiresAt,
+      maxUses: invitation.maxUses,
+      usesCount: invitation.usesCount,
       createdAt: invitation.createdAt,
     };
   }
@@ -745,6 +785,8 @@ export class LeagueService {
       select: {
         id: true,
         expiresAt: true,
+        maxUses: true,
+        usesCount: true,
         usedAt: true,
         revokedAt: true,
         createdAt: true,
@@ -764,8 +806,23 @@ export class LeagueService {
    */
   public async revokeInvitation(leagueId: string, invitationId: string, requesterUserId: string) {
     await this.requireOwnedLeague(leagueId, requesterUserId);
+    const invitation = await this.db.leagueInvitation.findUnique({ where: { id: invitationId } });
+    if (
+      !invitation ||
+      invitation.leagueId !== leagueId ||
+      LeagueService.invitationState(invitation) !== "ACTIVE"
+    ) {
+      throw new LeagueInvitationError("Invitation not found, already used or already revoked");
+    }
+
     const revoked = await this.db.leagueInvitation.updateMany({
-      where: { id: invitationId, leagueId, usedAt: null, revokedAt: null },
+      where: {
+        id: invitationId,
+        leagueId,
+        revokedAt: null,
+        expiresAt: { gt: new Date() },
+        usesCount: { lt: invitation.maxUses },
+      },
       data: { revokedAt: new Date() },
     });
     if (revoked.count !== 1) {
@@ -811,10 +868,21 @@ export class LeagueService {
   }
 
   private static invitationState(
-    inv: { usedAt: Date | null; revokedAt: Date | null; expiresAt: Date },
+    inv: {
+      usedAt: Date | null;
+      revokedAt: Date | null;
+      expiresAt: Date;
+      maxUses?: number;
+      usesCount?: number;
+    },
     now: number = Date.now()
   ): "ACTIVE" | "USED" | "REVOKED" | "EXPIRED" {
-    if (inv.usedAt) return "USED";
+    if (
+      (inv.maxUses !== undefined && (inv.usesCount ?? 0) >= inv.maxUses) ||
+      (inv.usedAt && (inv.usesCount ?? 0) === 0)
+    ) {
+      return "USED";
+    }
     if (inv.revokedAt) return "REVOKED";
     if (new Date(inv.expiresAt).getTime() <= now) return "EXPIRED";
     return "ACTIVE";
@@ -834,11 +902,11 @@ export class LeagueService {
 
     switch (LeagueService.invitationState(invitation)) {
       case "USED":
-        throw new LeagueInvitationError("This invitation link has already been used");
+        throw new LeagueInvitationError("Maximum invite uses reached", 400);
       case "REVOKED":
         throw new LeagueInvitationError("This invitation link has been revoked");
       case "EXPIRED":
-        throw new LeagueInvitationError("This invitation link has expired");
+        throw new LeagueInvitationError("Invitation link has expired", 400);
       default:
         return invitation;
     }
@@ -863,7 +931,7 @@ export class LeagueService {
    * 2. Highest Single Gameweek Score in that window (descending)
    * 3. Earliest joined timestamp (ascending)
    */
-  public async getLeagueStandings(leagueId: string): Promise<{
+  public async getLeagueStandings(leagueId: string, gameweekId?: number): Promise<{
     league: {
       id: string;
       name: string;
@@ -874,9 +942,10 @@ export class LeagueService {
       endGameweek: { id: number; name: string };
     };
     standings: LeagueStandingsEntry[];
+    completedGameweeks: Array<{ id: number; name: string }>;
     prizeDistribution: ReturnType<typeof PrizeService.calculatePrizeDistribution>;
   }> {
-    const league = await prisma.league.findUnique({
+    const league = await this.db.league.findUnique({
       where: { id: leagueId },
       include: {
         startGameweek: true,
@@ -894,15 +963,31 @@ export class LeagueService {
       throw new LeagueNotFoundError(leagueId);
     }
 
-    const squadIds = league.members.map((m) => m.squadId);
+    const completedGameweeks = await this.db.gameweek.findMany({
+      where: {
+        id: { gte: league.startGameweekId, lte: league.endGameweekId },
+        isFinished: true,
+      },
+      select: { id: true, name: true },
+      orderBy: { id: "asc" },
+    });
+    if (gameweekId !== undefined && !completedGameweeks.some((gameweek: { id: number }) => gameweek.id === gameweekId)) {
+      throw new LeagueValidationError("The selected gameweek is not completed or is outside this league.");
+    }
 
-    // Fetch all gameweek scores within the competition window [startGameweekId, endGameweekId]
-    const gameweekScores = await prisma.squadGameweekScore.findMany({
+    const squadIds = league.members.map((m: { squadId: string }) => m.squadId);
+    const previousGameweekId = gameweekId === undefined
+      ? undefined
+      : completedGameweeks.filter((gameweek: { id: number }) => gameweek.id < gameweekId).at(-1)?.id;
+
+    // Only completed league weeks are shown in the time machine. The default
+    // response keeps the existing full-window standings behavior.
+    const gameweekScores = await this.db.squadGameweekScore.findMany({
       where: {
         squadId: { in: squadIds },
         gameweekId: {
           gte: league.startGameweekId,
-          lte: league.endGameweekId,
+          lte: gameweekId ?? league.endGameweekId,
         },
       },
       include: {
@@ -926,46 +1011,62 @@ export class LeagueService {
       scoresBySquad.set(score.squadId, list);
     }
 
-    // Build standings items
-    const rawEntries = league.members.map((m) => {
-      const scores = scoresBySquad.get(m.squadId) || [];
-      const totalPoints = scores.reduce((sum, s) => sum + s.points, 0);
-      const bestGameweekPoints = scores.length > 0
-        ? Math.max(...scores.map((s) => s.points))
-        : 0;
+    type RankedStandings = {
+      rank: number;
+      userId: string;
+      username: string;
+      squadId: string;
+      squadName: string;
+      membershipStatus: MembershipStatus;
+      totalPoints: number;
+      bestGameweekPoints: number;
+      gameweekScores: Array<{ gameweekId: number; gameweekName: string; points: number }>;
+      joinedAt: Date;
+    };
+    const rankAt = (throughGameweekId?: number): RankedStandings[] => {
+      const entries = league.members.map((member: {
+        userId: string;
+        squadId: string;
+        user: { username: string };
+        squad: { name: string };
+        status: MembershipStatus;
+        joinedAt: Date;
+      }) => {
+        const scores = (scoresBySquad.get(member.squadId) || []).filter(
+          (score) => throughGameweekId === undefined || score.gameweekId <= throughGameweekId
+        );
+        return {
+          userId: member.userId,
+          username: member.user.username,
+          squadId: member.squadId,
+          squadName: member.squad.name,
+          membershipStatus: member.status,
+          totalPoints: scores.reduce((sum, score) => sum + score.points, 0),
+          bestGameweekPoints: scores.length > 0
+            ? Math.max(...scores.map((score) => score.points))
+            : 0,
+          gameweekScores: scores.sort((a, b) => a.gameweekId - b.gameweekId),
+          joinedAt: member.joinedAt,
+        };
+      });
+      entries.sort((a: Omit<RankedStandings, "rank">, b: Omit<RankedStandings, "rank">) =>
+        b.totalPoints - a.totalPoints ||
+        b.bestGameweekPoints - a.bestGameweekPoints ||
+        a.joinedAt.getTime() - b.joinedAt.getTime()
+      );
+      return entries.map((entry: Omit<RankedStandings, "rank">, index: number) => ({ rank: index + 1, ...entry }));
+    };
 
+    const previousRanks = previousGameweekId === undefined
+      ? new Map<string, number>()
+      : new Map<string, number>(rankAt(previousGameweekId).map((entry) => [entry.userId, entry.rank]));
+    const standings: LeagueStandingsEntry[] = rankAt().map((entry: RankedStandings) => {
+      const previousRank = previousRanks.get(entry.userId);
       return {
-        userId: m.userId,
-        username: m.user.username,
-        squadId: m.squadId,
-        squadName: m.squad.name,
-        membershipStatus: m.status,
-        totalPoints,
-        bestGameweekPoints,
-        gameweekScores: scores.sort((a, b) => a.gameweekId - b.gameweekId),
-        joinedAt: m.joinedAt,
+        ...entry,
+        rankChange: previousRank === undefined ? null : previousRank - entry.rank,
       };
     });
-
-    // Deterministic Sort
-    rawEntries.sort((a, b) => {
-      // 1. Total Points (descending)
-      if (b.totalPoints !== a.totalPoints) {
-        return b.totalPoints - a.totalPoints;
-      }
-      // 2. Highest Single Gameweek Score (descending)
-      if (b.bestGameweekPoints !== a.bestGameweekPoints) {
-        return b.bestGameweekPoints - a.bestGameweekPoints;
-      }
-      // 3. Earliest Join Date (ascending)
-      return a.joinedAt.getTime() - b.joinedAt.getTime();
-    });
-
-    // Assign sequential ranks
-    const standings: LeagueStandingsEntry[] = rawEntries.map((entry, idx) => ({
-      rank: idx + 1,
-      ...entry,
-    }));
 
     const prizeDistribution = PrizeService.calculatePrizeDistribution(
       league.currentMembers,
@@ -989,6 +1090,7 @@ export class LeagueService {
         },
       },
       standings,
+      completedGameweeks,
       prizeDistribution,
     };
   }

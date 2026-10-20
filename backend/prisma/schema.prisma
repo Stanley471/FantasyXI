@@ -723,7 +723,7 @@ model PlayerStatusHistory {
   @@map("player_status_history")
 }
 
-/// Single-use, expiring invitation granting access to a private league.
+/// Expiring invitation granting capped access to a private league.
 /// Only the SHA-256 hash of the token is stored; the raw token is shown once at creation.
 model LeagueInvitation {
   id          String    @id @default(uuid())
@@ -731,6 +731,8 @@ model LeagueInvitation {
   tokenHash   String    @unique @map("token_hash")
   createdById String    @map("created_by_id")
   expiresAt   DateTime  @map("expires_at")
+  maxUses     Int       @default(1) @map("max_uses")
+  usesCount   Int       @default(0) @map("uses_count")
   usedAt      DateTime? @map("used_at")
   usedById    String?   @map("used_by_id")
   revokedAt   DateTime? @map("revoked_at")
@@ -815,6 +817,8 @@ model FinancialAuditLog {
 /// An on-chain transaction whose finality is tracked by TransactionCoordinatorService.
 /// State lives here (not in memory) so polling resumes after a backend restart.
 model CoordinatedTransaction {
+  /// One durable signed settlement per league; never blindly resubmit after a partition.
+  settlementKey String? @unique @map("settlement_key")
   id            String                       @id @default(uuid())
   txHash        String                       @unique @map("tx_hash")
   /// What the transaction does, e.g. DEPOSIT, SETTLEMENT, REFUND

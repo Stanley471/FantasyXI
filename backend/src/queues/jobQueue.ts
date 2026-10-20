@@ -1,3 +1,4 @@
+import { financialService } from "../services/financial/financialService.js";
 import PgBoss from "pg-boss";
 import { collectMatchdaySyncTasks } from "../jobs/matchdayPolling.js";
 import { lockDueGameweeks } from "../jobs/deadlineLocking.js";
@@ -45,6 +46,7 @@ export interface QueueMetrics {
 // delegated to the `fpl-sync` queue (with retry + DLQ) instead of running
 // inline inside the poller.
 export const JOB_DEFINITIONS: JobDefinition[] = [
+  { name: "settlement-recovery", cron: "* * * * *", handler: () => financialService.recoverPendingSettlements() },
   { name: "matchday-poll", cron: "* * * * *", handler: () => enqueuePendingSyncs() },
   { name: "deadline-lock", cron: "* * * * *", handler: () => lockDueGameweeks() },
   { name: "gameweek-settlement", cron: "*/5 * * * *", handler: () => settleCompletedGameweeks() },

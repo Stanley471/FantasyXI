@@ -96,7 +96,7 @@ export default function StatsDashboardPage() {
                     <div key={player.id} className="flex items-center text-sm gap-4">
                       <span className="w-6 text-slate-500 font-mono text-right">{idx + 1}.</span>
                       <span className="w-40 font-medium truncate text-slate-200">{player.displayName}</span>
-                      <span className="w-14 text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-300 text-center font-mono">
+                      <span className="w-14 text-xs text-slate-400 text-center font-mono">
                         {player.position}
                       </span>
                       <span className="w-24 text-xs text-slate-400 truncate">{player.teamName}</span>
@@ -158,7 +158,7 @@ export default function StatsDashboardPage() {
                       <tr key={player.id} className="hover:bg-slate-800/40 transition">
                         <td className="py-3 px-4 font-medium text-white">{player.displayName}</td>
                         <td className="py-3 px-4">
-                          <span className="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300">
+                          <span className="text-xs font-mono text-slate-400">
                             {player.position}
                           </span>
                         </td>

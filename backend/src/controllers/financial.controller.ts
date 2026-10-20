@@ -6,6 +6,7 @@ import {
   FinancialForbiddenError,
   FinancialConflictError,
 } from "../services/financial/financialService.js";
+import { SorobanContractClient } from "../services/financial/sorobanContractClient.js";
 
 /**
  * Financial Controller — Stellar Escrow & Payment Endpoints
@@ -60,6 +61,50 @@ export async function getPaymentRequirement(
       return;
     }
     next(error);
+  }
+}
+
+/** Read-only fee and footprint simulation for a Soroban league deposit. */
+export async function simulateDeposit(
+  req: Request,
+  res: Response
+): Promise<void> {
+  if (!req.user?.id) {
+    res.status(401).json({ success: false, message: "Authentication required" });
+    return;
+  }
+
+  const { publicKey, leagueId } = req.body ?? {};
+  if (typeof publicKey !== "string" || !publicKey.trim()) {
+    res.status(400).json({ success: false, message: "A Stellar publicKey is required." });
+    return;
+  }
+  if (
+    (typeof leagueId !== "string" && typeof leagueId !== "number") ||
+    String(leagueId).trim() === ""
+  ) {
+    res.status(400).json({ success: false, message: "A valid leagueId is required." });
+    return;
+  }
+
+  try {
+    const result = await new SorobanContractClient().simulateDepositTransaction(
+      publicKey.trim(),
+      leagueId
+    );
+    if (result.success) {
+      res.status(200).json(result);
+      return;
+    }
+
+    const isInputError = /valid Stellar public key|valid league ID/i.test(result.error);
+    res.status(isInputError ? 400 : 422).json({ success: false, message: result.error });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown configuration error";
+    res.status(503).json({
+      success: false,
+      message: `Deposit simulation is unavailable: ${message}`,
+    });
   }
 }
 
