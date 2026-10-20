@@ -302,6 +302,13 @@ export interface LeagueStandingsEntry {
 // League Chat (REST history + WebSocket /api/v1/leagues/:id/chat/ws)
 // ============================================================
 
+export interface ChatReactionState {
+  emoji: string;
+  count: number;
+  userIds: string[];
+  pending?: boolean;
+}
+
 export interface ChatMessage {
   id: string;
   leagueId: string;
@@ -309,6 +316,7 @@ export interface ChatMessage {
   username: string;
   body: string;
   createdAt: string;
+  reactions?: Record<string, ChatReactionState>;
 }
 
 /** A message in the UI, including the sender's own messages that are still in flight */

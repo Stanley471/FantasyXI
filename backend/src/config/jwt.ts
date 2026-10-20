@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
 
@@ -36,17 +37,25 @@ export interface JwtPayload {
   email?: string;
   username?: string;
   role?: string;
+  jti?: string;
+  iat?: number;
+  exp?: number;
   [key: string]: unknown;
 }
 
 /**
- * Signs a minimal JWT payload.
+ * Signs a JWT payload with a unique `jti` (JWT ID) claim for session tracking
+ * and token revocation.
  */
 export function signAccessToken(payload: JwtPayload): string {
   const secret = getJwtSecret();
   const expiresIn = getJwtExpiresIn();
+  const jti =
+    typeof payload.jti === "string" && payload.jti.trim().length > 0
+      ? payload.jti
+      : crypto.randomUUID();
 
-  return jwt.sign(payload, secret, {
+  return jwt.sign({ ...payload, jti }, secret, {
     expiresIn: expiresIn as jwt.SignOptions["expiresIn"],
   });
 }
@@ -59,4 +68,25 @@ export function verifyAccessToken(token: string): JwtPayload {
   const secret = getJwtSecret();
   const decoded = jwt.verify(token, secret);
   return decoded as JwtPayload;
+}
+
+/**
+ * Calculates the remaining lifetime (in seconds) before a token expires,
+ * used as the Redis TTL for blacklisted `jti` entries.
+ */
+export function getTokenRemainingTtlSeconds(
+  tokenOrPayload: string | JwtPayload,
+  nowMs: number = Date.now()
+): number {
+  const payload =
+    typeof tokenOrPayload === "string"
+      ? (jwt.decode(tokenOrPayload) as JwtPayload | null)
+      : tokenOrPayload;
+
+  if (!payload || typeof payload.exp !== "number") {
+    return 7 * 24 * 60 * 60;
+  }
+
+  const nowSeconds = Math.floor(nowMs / 1000);
+  return Math.max(0, payload.exp - nowSeconds);
 }

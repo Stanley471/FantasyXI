@@ -14,6 +14,7 @@ import {
 } from "../config/serviceAuth.js";
 import { AuthUser, UserRole } from "../types/index.js";
 import { setRlsContext } from "../config/db.js";
+import { sessionService } from "../services/auth/sessionService.js";
 
 /**
  * Global declaration merging to extend Express Request with authenticated user.
@@ -38,7 +39,7 @@ export function requireAuth(
   req: Request,
   res: Response,
   next: NextFunction
-): void {
+): void | Promise<void> {
   const serviceKey = req.headers[SERVICE_KEY_HEADER];
   if (serviceKey !== undefined) {
     const service =
@@ -94,19 +95,47 @@ export function requireAuth(
       return;
     }
 
-    req.user = {
-      id: payload.userId,
-      email: payload.email || "",
-      username: payload.username || "",
-      role: asUserRole(payload.role),
+    if (sessionService.isTokenRevokedSync(payload)) {
+      res.status(401).json({
+        success: false,
+        message: "Authentication token has been revoked",
+      });
+      return;
+    }
+
+    const finalizeAuth = () => {
+      req.user = {
+        id: payload.userId,
+        email: payload.email || "",
+        username: payload.username || "",
+        role: asUserRole(payload.role),
+        jti: typeof payload.jti === "string" ? payload.jti : undefined,
+      };
+
+      // Set PostgreSQL RLS context for multi-tenant data isolation
+      setRlsContext(payload.userId).catch(() => {
+        // RLS may not be enabled in all environments; fail silently
+      });
+
+      next();
     };
 
-    // Set PostgreSQL RLS context for multi-tenant data isolation
-    setRlsContext(payload.userId).catch(() => {
-      // RLS may not be enabled in all environments; fail silently
-    });
+    if (sessionService.hasActiveRedisConnection()) {
+      return sessionService
+        .checkTokenBlacklistPipelined(payload)
+        .then(({ revoked }) => {
+          if (revoked) {
+            res.status(401).json({
+              success: false,
+              message: "Authentication token has been revoked",
+            });
+            return;
+          }
+          finalizeAuth();
+        });
+    }
 
-    next();
+    finalizeAuth();
   } catch (error) {
     if (error instanceof jwt.TokenExpiredError) {
       res.status(401).json({
@@ -290,12 +319,13 @@ export function optionalAuth(
   if (parts.length === 2 && parts[0].toLowerCase() === "bearer") {
     try {
       const payload = verifyAccessToken(parts[1]);
-      if (payload.userId) {
+      if (payload.userId && !sessionService.isTokenRevokedSync(payload)) {
         req.user = {
           id: payload.userId,
           email: payload.email || "",
           username: payload.username || "",
           role: asUserRole(payload.role),
+          jti: typeof payload.jti === "string" ? payload.jti : undefined,
         };
         setRlsContext(payload.userId).catch(() => {});
       }

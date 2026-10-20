@@ -93,6 +93,8 @@ export interface AuthUser {
   name?: string | null;
   /** USER / MODERATOR / ADMIN for accounts, SERVICE for API-key callers */
   role: Role;
+  /** Unique JWT ID claim for the active token session */
+  jti?: string;
 }
 
 /** Safe user representation returned across public and auth endpoints */

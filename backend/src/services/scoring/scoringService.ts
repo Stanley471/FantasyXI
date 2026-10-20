@@ -76,6 +76,23 @@ export interface FormationCounts {
  * - Position counts are recomputed live so chained swaps stay formation-safe.
  */
 export class AutoSubstitutionEngine {
+  /**
+   * All 8 valid FPL outfield formations (with 1 GKP):
+   * 3-5-2, 3-4-3, 4-4-2, 4-3-3, 5-3-2, 5-4-1, 4-5-1, 5-2-3
+   */
+  public static readonly VALID_FORMATIONS: ReadonlyArray<
+    Readonly<{ def: number; mid: number; fwd: number }>
+  > = [
+    { def: 3, mid: 5, fwd: 2 },
+    { def: 3, mid: 4, fwd: 3 },
+    { def: 4, mid: 4, fwd: 2 },
+    { def: 4, mid: 3, fwd: 3 },
+    { def: 5, mid: 3, fwd: 2 },
+    { def: 5, mid: 4, fwd: 1 },
+    { def: 4, mid: 5, fwd: 1 },
+    { def: 5, mid: 2, fwd: 3 },
+  ];
+
   public static countFormation(players: PlayerScoreDetail[]): FormationCounts {
     const counts: FormationCounts = { gkp: 0, def: 0, mid: 0, fwd: 0 };
     for (const p of players) {
@@ -98,14 +115,52 @@ export class AutoSubstitutionEngine {
   }
 
   /**
+   * Returns true when `counts` satisfies FPL minimum/maximum formation rules
+   * and matches one of the 8 valid formations (`3-5-2`, `3-4-3`, `4-4-2`,
+   * `4-3-3`, `5-3-2`, `5-4-1`, `4-5-1`, `5-2-3`).
+   */
+  public static isFormationValid(counts: FormationCounts): boolean {
+    const min = SQUAD_RULES.MIN_STARTERS;
+    const max = SQUAD_RULES.POSITION_COUNTS;
+    if (
+      counts.gkp < min.GKP ||
+      counts.gkp > 1 ||
+      counts.def < min.DEF ||
+      counts.def > max.DEF ||
+      counts.mid < min.MID ||
+      counts.mid > max.MID ||
+      counts.fwd < min.FWD ||
+      counts.fwd > max.FWD
+    ) {
+      return false;
+    }
+
+    const outfieldTotal = counts.def + counts.mid + counts.fwd;
+    if (outfieldTotal === 10) {
+      return AutoSubstitutionEngine.VALID_FORMATIONS.some(
+        (f) => f.def === counts.def && f.mid === counts.mid && f.fwd === counts.fwd
+      );
+    }
+
+    return true;
+  }
+
+  /**
    * Returns true when replacing `starter` with `candidate` keeps the formation
-   * within the platform's minimum starting requirements.
+   * within the platform's valid starting formation requirements.
    */
   public static swapKeepsFormationValid(
     starter: PlayerScoreDetail,
     candidate: PlayerScoreDetail,
     counts: FormationCounts
   ): boolean {
+    if (
+      (starter.position === Position.GKP && candidate.position !== Position.GKP) ||
+      (starter.position !== Position.GKP && candidate.position === Position.GKP)
+    ) {
+      return false;
+    }
+
     const next: FormationCounts = {
       gkp:
         counts.gkp -
@@ -125,16 +180,43 @@ export class AutoSubstitutionEngine {
         (candidate.position === Position.FWD ? 1 : 0),
     };
 
-    return (
-      next.gkp >= SQUAD_RULES.MIN_STARTERS.GKP &&
-      next.def >= SQUAD_RULES.MIN_STARTERS.DEF &&
-      next.mid >= SQUAD_RULES.MIN_STARTERS.MID &&
-      next.fwd >= SQUAD_RULES.MIN_STARTERS.FWD
-    );
+    return AutoSubstitutionEngine.isFormationValid(next);
   }
 
   /**
-   * Resolves automatic bench substitutions for non-playing starters.
+   * Generates all size-`k` combinations of `items` in lexicographical index order.
+   */
+  private static combinations<T>(items: T[], k: number): T[][] {
+    if (k === 0) return [[]];
+    if (k > items.length) return [];
+    const results: T[][] = [];
+
+    const backtrack = (start: number, current: T[]) => {
+      if (current.length === k) {
+        results.push([...current]);
+        return;
+      }
+      const remainingNeeded = k - current.length;
+      for (let i = start; i <= items.length - remainingNeeded; i++) {
+        current.push(items[i]);
+        backtrack(i + 1, current);
+        current.pop();
+      }
+    };
+
+    backtrack(0, []);
+    return results;
+  }
+
+  /**
+   * Resolves automatic bench substitutions for non-playing starters using a
+   * constraint-satisfaction solver.
+   *
+   * Evaluates all valid combinations of bench players (respecting bench priority
+   * order `positionOrder` as primary tie-breaker) that can replace the set of
+   * 0-minute starters while guaranteeing the final 11 players adhere to valid
+   * FPL formations (`3-5-2`, `3-4-3`, `4-4-2`, `4-3-3`, `5-3-2`, `5-4-1`,
+   * `4-5-1`, `5-2-3`). Goalkeeper substitutions remain strictly GKP-for-GKP.
    *
    * Mutates the `subbedIn` / `subbedOut` flags on the supplied details and
    * returns the final starting XI (original starters with replacements).
@@ -144,18 +226,15 @@ export class AutoSubstitutionEngine {
     benchDetails: PlayerScoreDetail[]
   ): PlayerScoreDetail[] {
     const currentStarters = [...starterDetails];
+    const orderedBench = [...benchDetails].sort(
+      (a, b) => a.positionOrder - b.positionOrder
+    );
 
+    // 1. Goalkeeper resolution: strictly isolated to GKP-for-GKP
     for (let i = 0; i < currentStarters.length; i++) {
       const starter = currentStarters[i];
-      if (starter.minutesPlayed > 0) {
-        continue;
-      }
-
-      const counts = AutoSubstitutionEngine.countFormation(currentStarters);
-
-      // Goalkeepers can ONLY be replaced by the bench goalkeeper
-      if (starter.position === Position.GKP) {
-        const benchGkp = benchDetails.find(
+      if (starter.position === Position.GKP && starter.minutesPlayed === 0) {
+        const benchGkp = orderedBench.find(
           (b) =>
             b.position === Position.GKP &&
             !b.subbedIn &&
@@ -166,34 +245,75 @@ export class AutoSubstitutionEngine {
           benchGkp.subbedIn = true;
           currentStarters[i] = benchGkp;
         }
-        continue;
       }
+    }
 
-      // Outfield player (DEF, MID, FWD): walk the bench in priority order and
-      // pick the first candidate whose swap keeps the formation valid.
-      for (const candidate of benchDetails) {
-        if (
-          candidate.position === Position.GKP ||
-          candidate.subbedIn ||
-          candidate.minutesPlayed === 0
-        ) {
-          continue;
-        }
+    // 2. Outfield constraint-satisfaction solver
+    const missingOutfieldIndices: number[] = [];
+    const playingOutfieldStarters: PlayerScoreDetail[] = [];
+    const activeGkps: PlayerScoreDetail[] = [];
 
-        if (
-          AutoSubstitutionEngine.swapKeepsFormationValid(
-            starter,
-            candidate,
-            counts
-          )
-        ) {
-          // Valid substitution found — apply and move on.
-          starter.subbedOut = true;
-          candidate.subbedIn = true;
-          currentStarters[i] = candidate;
-          break;
+    for (let i = 0; i < currentStarters.length; i++) {
+      const p = currentStarters[i];
+      if (p.position === Position.GKP) {
+        activeGkps.push(p);
+      } else if (p.minutesPlayed === 0) {
+        missingOutfieldIndices.push(i);
+      } else {
+        playingOutfieldStarters.push(p);
+      }
+    }
+
+    // Order missing outfield starter indices by starter positionOrder ascending
+    missingOutfieldIndices.sort(
+      (ia, ib) => currentStarters[ia].positionOrder - currentStarters[ib].positionOrder
+    );
+
+    const eligibleOutfieldBench = orderedBench.filter(
+      (b) => b.position !== Position.GKP && !b.subbedIn && b.minutesPlayed > 0
+    );
+
+    const maxSubs = Math.min(missingOutfieldIndices.length, eligibleOutfieldBench.length);
+
+    let solvedBench: PlayerScoreDetail[] = [];
+    let solvedStarterIndices: number[] = [];
+
+    outer: for (let k = maxSubs; k >= 1; k--) {
+      const benchCombos = AutoSubstitutionEngine.combinations(eligibleOutfieldBench, k);
+      const starterIdxCombos = AutoSubstitutionEngine.combinations(missingOutfieldIndices, k);
+
+      for (const selectedBench of benchCombos) {
+        for (const replacedIndices of starterIdxCombos) {
+          const replacedIndexSet = new Set(replacedIndices);
+          const unreplacedMissingStarters = missingOutfieldIndices
+            .filter((idx) => !replacedIndexSet.has(idx))
+            .map((idx) => currentStarters[idx]);
+
+          const candidateEleven = [
+            ...activeGkps,
+            ...playingOutfieldStarters,
+            ...unreplacedMissingStarters,
+            ...selectedBench,
+          ];
+
+          const counts = AutoSubstitutionEngine.countFormation(candidateEleven);
+          if (AutoSubstitutionEngine.isFormationValid(counts)) {
+            solvedBench = selectedBench;
+            solvedStarterIndices = replacedIndices;
+            break outer;
+          }
         }
       }
+    }
+
+    for (let j = 0; j < solvedBench.length; j++) {
+      const starterIndex = solvedStarterIndices[j];
+      const starter = currentStarters[starterIndex];
+      const candidate = solvedBench[j];
+
+      starter.subbedOut = true;
+      candidate.subbedIn = true;
+      currentStarters[starterIndex] = candidate;
     }
 
     return currentStarters;

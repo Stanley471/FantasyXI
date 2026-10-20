@@ -10,6 +10,9 @@ import {
   unlinkGoogleAccount,
   setPassword,
   getUserReferralCode,
+  getActiveSessions,
+  revokeActiveSession,
+  logoutAll,
 } from "../controllers/auth.controller.js";
 import { requireAuth, requirePermission } from "../middleware/authMiddleware.js";
 import { Permission } from "../types/index.js";
@@ -55,6 +58,15 @@ router.delete("/google/link", requireAuth, unlinkGoogleAccount);
 
 // POST /api/v1/auth/password (Protected: add a password to a Google account, or change it)
 router.post("/password", authRateLimiter, requireAuth, setPassword);
+
+// GET /api/v1/auth/sessions (Protected: list active sessions)
+router.get("/sessions", requireAuth, authenticatedRateLimiter, getActiveSessions);
+
+// DELETE /api/v1/auth/sessions/:jti (Protected: revoke a specific session)
+router.delete("/sessions/:jti", requireAuth, authenticatedRateLimiter, revokeActiveSession);
+
+// POST /api/v1/auth/logout-all (Protected: revoke all active sessions across devices)
+router.post("/logout-all", requireAuth, authenticatedRateLimiter, logoutAll);
 
 export default router;
 

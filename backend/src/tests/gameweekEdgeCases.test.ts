@@ -1,11 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { PrismaClient } from "@prisma/client";
-import { ScoringService } from "../services/scoring/scoringService.js";
+import { ScoringService, AutoSubstitutionEngine } from "../services/scoring/scoringService.js";
 import { LeagueService } from "../services/league/leagueService.js";
 import { normalizeFixture, normalizePlayerStats } from "../services/fpl/fplNormalizer.js";
 import { isGameweekReadyForSettlement } from "../jobs/gameweekSettlement.js";
-import { ChipType, MembershipStatus } from "../types/index.js";
+import { ChipType, MembershipStatus, Position } from "../types/index.js";
 import {
   BLANK_GAMEWEEK_SCENARIOS,
   CAPTAIN_ID,
@@ -426,5 +426,269 @@ describe("Gameweek edge cases — head-to-head settlement", () => {
     // Against the league Average (mean of 50 and 40 = 45) m1 wins exactly once
     assert.equal(members.get("m1").matchesWon, 1);
     assert.equal(members.get("m1").pointsAgainst, 45);
+  });
+});
+
+// ============================================================
+// Dynamic formation constraint-satisfaction solver (Issue #226)
+// ============================================================
+
+describe("Dynamic formation solver — multi-player DGW/BGW auto-substitution matrix", () => {
+  function buildFormationLineup(
+    starterPositions: [number, number, number], // [DEF, MID, FWD]
+    benchOutfieldPositions: [Position, Position, Position]
+  ) {
+    const [defCount, midCount, fwdCount] = starterPositions;
+    const starterList: Position[] = [
+      Position.GKP,
+      ...Array(defCount).fill(Position.DEF),
+      ...Array(midCount).fill(Position.MID),
+      ...Array(fwdCount).fill(Position.FWD),
+    ];
+
+    const starters = starterList.map((position, idx) => ({
+      playerId: idx + 1,
+      position,
+      isStarter: true,
+      isCaptain: idx + 1 === 11,
+      isViceCaptain: idx + 1 === 6,
+      positionOrder: idx + 1,
+    }));
+
+    const bench = [
+      {
+        playerId: 12,
+        position: Position.GKP,
+        isStarter: false,
+        isCaptain: false,
+        isViceCaptain: false,
+        positionOrder: 12,
+      },
+      ...benchOutfieldPositions.map((position, idx) => ({
+        playerId: 13 + idx,
+        position,
+        isStarter: false,
+        isCaptain: false,
+        isViceCaptain: false,
+        positionOrder: 13 + idx,
+      })),
+    ];
+
+    return [...starters, ...bench];
+  }
+
+  it("solves coupled 3-starter blank in 3-4-3 where 1-for-1 DEF swap would violate min-DEF without paired FWD/DEF swap", () => {
+    // 3-4-3 starters: 1 GKP | 2,3,4 DEF | 5,6,7,8 MID | 9,10,11 FWD
+    // Bench: 12 GKP | 13 FWD | 14 MID | 15 DEF
+    const lineup = buildFormationLineup(
+      [3, 4, 3],
+      [Position.FWD, Position.MID, Position.DEF]
+    );
+    const stats = buildStats(
+      {
+        13: { minutes: 180, totalPoints: 14 },
+        14: { minutes: 180, totalPoints: 10 },
+        15: { minutes: 180, totalPoints: 8 },
+      },
+      [2, 5, 9] // DEF 2, MID 5, FWD 9 all blank (0 minutes)
+    );
+
+    const result = ScoringService.calculateLineupScore(lineup, stats);
+    const subbedIn = result.details.filter((d) => d.subbedIn).map((d) => d.playerId);
+    const subbedOut = result.details.filter((d) => d.subbedOut).map((d) => d.playerId);
+
+    // All 3 bench outfielders come on globally, preserving 3-4-3
+    assert.deepEqual(subbedIn, [13, 14, 15]);
+    assert.deepEqual(subbedOut, [2, 5, 9]);
+
+    const fielded = result.details.filter((d) => (d.isStarter && !d.subbedOut) || d.subbedIn);
+    const counts = AutoSubstitutionEngine.countFormation(fielded);
+    assert.equal(AutoSubstitutionEngine.isFormationValid(counts), true);
+    assert.deepEqual(counts, { gkp: 1, def: 3, mid: 4, fwd: 3 });
+  });
+
+  it("prevents illegal 4-forward formation in 4-3-3 when DEF + FWD blank and only bench FWD played", () => {
+    // 4-3-3 starters: 1 GKP | 2,3,4,5 DEF | 6,7,8 MID | 9,10,11 FWD
+    // Bench: 12 GKP | 13 FWD (played) | 14 DEF (0m) | 15 MID (0m)
+    const lineup = buildFormationLineup(
+      [4, 3, 3],
+      [Position.FWD, Position.DEF, Position.MID]
+    );
+    const stats = buildStats(
+      {
+        13: { minutes: 180, totalPoints: 12 },
+        14: { minutes: 0, totalPoints: 0 },
+        15: { minutes: 0, totalPoints: 0 },
+      },
+      [2, 10] // DEF 2 and FWD 10 both blank
+    );
+
+    const result = ScoringService.calculateLineupScore(lineup, stats);
+    const subbedIn = result.details.filter((d) => d.subbedIn).map((d) => d.playerId);
+    const subbedOut = result.details.filter((d) => d.subbedOut).map((d) => d.playerId);
+
+    // Bench FWD 13 must replace FWD 10 (keeping 4-3-3), NOT DEF 2 (which would create illegal 3-3-4)
+    assert.deepEqual(subbedIn, [13]);
+    assert.deepEqual(subbedOut, [10]);
+
+    const fielded = result.details.filter((d) => (d.isStarter && !d.subbedOut) || d.subbedIn);
+    const counts = AutoSubstitutionEngine.countFormation(fielded);
+    assert.equal(AutoSubstitutionEngine.isFormationValid(counts), true);
+    assert.deepEqual(counts, { gkp: 1, def: 4, mid: 3, fwd: 3 });
+  });
+
+  it("handles 4 simultaneous missing starters across GKP, DEF, MID, and FWD in 5-2-3", () => {
+    // 5-2-3 starters: 1 GKP | 2,3,4,5,6 DEF | 7,8 MID | 9,10,11 FWD
+    // Bench: 12 GKP | 13 MID | 14 MID | 15 MID
+    const lineup = buildFormationLineup(
+      [5, 2, 3],
+      [Position.MID, Position.MID, Position.MID]
+    );
+    const stats = buildStats(
+      {
+        12: { minutes: 180, totalPoints: 9 },
+        13: { minutes: 180, totalPoints: 11 },
+        14: { minutes: 180, totalPoints: 7 },
+        15: { minutes: 180, totalPoints: 6 },
+      },
+      [1, 2, 7, 9] // GKP 1, DEF 2, MID 7, FWD 9 all miss out
+    );
+
+    const result = ScoringService.calculateLineupScore(lineup, stats);
+    const subbedIn = result.details.filter((d) => d.subbedIn).map((d) => d.playerId);
+    const subbedOut = result.details.filter((d) => d.subbedOut).map((d) => d.playerId);
+
+    // GKP 12 replaces GKP 1; MID 13, 14, 15 replace DEF 2, MID 7, FWD 9 -> transitions 5-2-3 to valid 4-4-2
+    assert.deepEqual(subbedIn, [12, 13, 14, 15]);
+    assert.deepEqual(subbedOut, [1, 2, 7, 9]);
+
+    const fielded = result.details.filter((d) => (d.isStarter && !d.subbedOut) || d.subbedIn);
+    const counts = AutoSubstitutionEngine.countFormation(fielded);
+    assert.equal(AutoSubstitutionEngine.isFormationValid(counts), true);
+    assert.deepEqual(counts, { gkp: 1, def: 4, mid: 4, fwd: 2 });
+  });
+
+  it("handles 4 missing outfield starters by replacing the optimal valid 3-starter subset in 3-5-2", () => {
+    // 3-5-2 starters: 1 GKP | 2,3,4 DEF | 5,6,7,8,9 MID | 10,11 FWD
+    // Bench: 12 GKP | 13 FWD | 14 DEF | 15 DEF
+    const lineup = buildFormationLineup(
+      [3, 5, 2],
+      [Position.FWD, Position.DEF, Position.DEF]
+    );
+    const stats = buildStats(
+      {
+        13: { minutes: 90, totalPoints: 8 },
+        14: { minutes: 90, totalPoints: 6 },
+        15: { minutes: 0, totalPoints: 0 }, // 3rd bench outfielder blanked
+      },
+      [2, 5, 6, 10] // DEF 2, MID 5, MID 6, FWD 10 all blank (4 outfield starters)
+    );
+
+    const result = ScoringService.calculateLineupScore(lineup, stats);
+    const subbedIn = result.details.filter((d) => d.subbedIn).map((d) => d.playerId);
+    const subbedOut = result.details.filter((d) => d.subbedOut).map((d) => d.playerId);
+
+    // Bench 13 (FWD) and 14 (DEF) both come on for DEF 2 and MID 5 -> valid 3-4-3
+    assert.deepEqual(subbedIn, [13, 14]);
+    assert.deepEqual(subbedOut, [2, 5]);
+
+    const fielded = result.details.filter((d) => (d.isStarter && !d.subbedOut) || d.subbedIn);
+    const counts = AutoSubstitutionEngine.countFormation(fielded);
+    assert.equal(AutoSubstitutionEngine.isFormationValid(counts), true);
+    assert.deepEqual(counts, { gkp: 1, def: 3, mid: 4, fwd: 3 });
+  });
+
+  it("exhaustively validates all 8 legal formations under 3+ missing starters without violating formation rules", () => {
+    const formationMatrix: Array<{
+      name: string;
+      starters: [number, number, number];
+      bench: [Position, Position, Position];
+      absentStarters: number[];
+      absentBench?: number[];
+      expectedSubbedIn: number[];
+      expectedFormation: { def: number; mid: number; fwd: number };
+    }> = [
+      {
+        name: "3-5-2 -> 4-4-2 with 3 missing starters",
+        starters: [3, 5, 2],
+        bench: [Position.DEF, Position.DEF, Position.FWD],
+        absentStarters: [2, 5, 10], // DEF 2, MID 5, FWD 10
+        expectedSubbedIn: [13, 14, 15],
+        expectedFormation: { def: 4, mid: 4, fwd: 2 },
+      },
+      {
+        name: "3-4-3 -> 4-4-2 with 3 missing starters",
+        starters: [3, 4, 3],
+        bench: [Position.DEF, Position.DEF, Position.MID],
+        absentStarters: [2, 5, 9], // DEF 2, MID 5, FWD 9
+        expectedSubbedIn: [13, 14, 15],
+        expectedFormation: { def: 4, mid: 4, fwd: 2 },
+      },
+      {
+        name: "4-4-2 -> 3-5-2 with 3 missing starters",
+        starters: [4, 4, 2],
+        bench: [Position.MID, Position.DEF, Position.FWD],
+        absentStarters: [2, 3, 10], // DEF 2, DEF 3, FWD 10
+        expectedSubbedIn: [13, 14, 15],
+        expectedFormation: { def: 3, mid: 5, fwd: 2 },
+      },
+      {
+        name: "4-3-3 -> 4-5-1 with 3 missing starters",
+        starters: [4, 3, 3],
+        bench: [Position.MID, Position.MID, Position.DEF],
+        absentStarters: [2, 9, 10], // DEF 2, FWD 9, FWD 10
+        expectedSubbedIn: [13, 14, 15],
+        expectedFormation: { def: 4, mid: 5, fwd: 1 },
+      },
+      {
+        name: "5-3-2 -> 3-5-2 with 3 missing starters",
+        starters: [5, 3, 2],
+        bench: [Position.MID, Position.MID, Position.FWD],
+        absentStarters: [2, 3, 10], // DEF 2, DEF 3, FWD 10
+        expectedSubbedIn: [13, 14, 15],
+        expectedFormation: { def: 3, mid: 5, fwd: 2 },
+      },
+      {
+        name: "5-4-1 -> 3-4-3 with 3 missing starters",
+        starters: [5, 4, 1],
+        bench: [Position.FWD, Position.FWD, Position.MID],
+        absentStarters: [2, 3, 7], // DEF 2, DEF 3, MID 7
+        expectedSubbedIn: [13, 14, 15],
+        expectedFormation: { def: 3, mid: 4, fwd: 3 },
+      },
+      {
+        name: "4-5-1 -> 3-4-3 with 3 missing starters",
+        starters: [4, 5, 1],
+        bench: [Position.FWD, Position.DEF, Position.FWD],
+        absentStarters: [2, 3, 6], // DEF 2, DEF 3, MID 6
+        expectedSubbedIn: [13, 14, 15],
+        expectedFormation: { def: 3, mid: 4, fwd: 3 },
+      },
+      {
+        name: "5-2-3 -> 3-5-2 with 3 missing starters",
+        starters: [5, 2, 3],
+        bench: [Position.MID, Position.MID, Position.MID],
+        absentStarters: [2, 3, 9], // DEF 2, DEF 3, FWD 9
+        expectedSubbedIn: [13, 14, 15],
+        expectedFormation: { def: 3, mid: 5, fwd: 2 },
+      },
+    ];
+
+    for (const tc of formationMatrix) {
+      const lineup = buildFormationLineup(tc.starters, tc.bench);
+      const stats = buildStats({}, [...tc.absentStarters, ...(tc.absentBench ?? [])]);
+      const result = ScoringService.calculateLineupScore(lineup, stats);
+      const subbedIn = result.details.filter((d) => d.subbedIn).map((d) => d.playerId);
+      const fielded = result.details.filter((d) => (d.isStarter && !d.subbedOut) || d.subbedIn);
+      const counts = AutoSubstitutionEngine.countFormation(fielded);
+
+      assert.deepEqual(subbedIn, tc.expectedSubbedIn, `${tc.name}: subbedIn`);
+      assert.equal(AutoSubstitutionEngine.isFormationValid(counts), true, `${tc.name}: isFormationValid`);
+      assert.deepEqual(
+        { def: counts.def, mid: counts.mid, fwd: counts.fwd },
+        tc.expectedFormation,
+        `${tc.name}: formation`
+      );
+    }
   });
 });
