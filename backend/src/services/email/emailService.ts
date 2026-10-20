@@ -13,6 +13,15 @@ export interface DepositConfirmationEmailPayload {
   txHash?: string;
 }
 
+export interface CaptainInjuryAlertEmailPayload {
+  to: string;
+  managerName?: string;
+  captainName: string;
+  status: "d" | "i" | "s" | string;
+  news?: string;
+  teamManagementUrl?: string;
+}
+
 export interface SendEmailOptions {
   to: string;
   subject: string;
@@ -156,12 +165,93 @@ export class EmailService {
   }
 
   /**
+   * Generates clean templated text and HTML body for captain injury/suspension alerts.
+   */
+  public generateCaptainInjuryAlertTemplate(payload: CaptainInjuryAlertEmailPayload): {
+    subject: string;
+    text: string;
+    html: string;
+  } {
+    const {
+      managerName = "Manager",
+      captainName,
+      status,
+      news,
+      teamManagementUrl = "https://fantasyxi.app/team",
+    } = payload;
+
+    const normalizedStatus = status === "d" ? "doubtful" : status === "i" ? "injured" : status === "s" ? "suspended" : "unavailable";
+    const subject = `Captain Alert: ${captainName} is ${normalizedStatus}`;
+    const safeNews = news?.trim() ? `FPL update: ${news.trim()}` : "No detailed note was provided by FPL.";
+
+    const text = [
+      `Hi ${managerName},`,
+      "",
+      `Your captain, ${captainName}, is currently marked as ${normalizedStatus}.`,
+      safeNews,
+      "",
+      `Please review your team before the deadline and manage your squad here: ${teamManagementUrl}`,
+      "",
+      "Best regards,",
+      "The FantasyXI Team",
+    ].join("\n");
+
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>${subject}</title>
+</head>
+<body style="font-family: Arial, sans-serif; background-color: #0f172a; color: #f8fafc; padding: 24px;">
+  <div style="max-width: 600px; margin: 0 auto; background-color: #1e293b; border-radius: 8px; padding: 32px; border: 1px solid #334155;">
+    <h2 style="color: #fbbf24; margin-top: 0;">Captain Alert ⚠️</h2>
+    <p>Hello <strong>${managerName}</strong>,</p>
+    <p>Your captain, <strong>${captainName}</strong>, is currently marked as <strong>${normalizedStatus}</strong>.</p>
+
+    <div style="background-color: #0f172a; padding: 16px; border-radius: 6px; margin: 20px 0; border-left: 4px solid #fbbf24;">
+      <p style="margin: 4px 0;"><strong>Captain:</strong> ${captainName}</p>
+      <p style="margin: 4px 0;"><strong>Status:</strong> ${normalizedStatus}</p>
+      <p style="margin: 4px 0;"><strong>Update:</strong> ${safeNews}</p>
+    </div>
+
+    <p>Please review your squad before the deadline and update your team from the management page.</p>
+    <p><a href="${teamManagementUrl}" style="color: #38bdf8;">Manage my team</a></p>
+
+    <hr style="border: 0; border-top: 1px solid #334155; margin: 24px 0;" />
+    <p style="font-size: 12px; color: #94a3b8; text-align: center;">
+      This is an automated notification from FantasyXI.
+    </p>
+  </div>
+</body>
+</html>
+    `.trim();
+
+    return { subject, text, html };
+  }
+
+  /**
    * Sends an automated email notification to the user upon a confirmed USDC deposit.
    */
   public async sendDepositConfirmation(
     payload: DepositConfirmationEmailPayload
   ): Promise<EmailProviderResult> {
     const { subject, text, html } = this.generateDepositConfirmationTemplate(payload);
+    return this.provider.sendEmail({
+      to: payload.to,
+      subject,
+      text,
+      html,
+    });
+  }
+
+  /**
+   * Sends an alert email when the manager's captain becomes doubtful, injured, or suspended.
+   */
+  public async sendCaptainInjuryAlert(
+    payload: CaptainInjuryAlertEmailPayload
+  ): Promise<EmailProviderResult> {
+    const { subject, text, html } = this.generateCaptainInjuryAlertTemplate(payload);
     return this.provider.sendEmail({
       to: payload.to,
       subject,

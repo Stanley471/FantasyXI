@@ -5,6 +5,7 @@
 
 export const GAMEWEEK_UPDATED_EVENT = "gameweek.updated";
 export const USER_SIGNED_UP_EVENT = "user.signed_up";
+export const CAPTAIN_INJURY_ALERT_EVENT = "captain.injury_alert";
 export const SECURITY_TAMPER_DETECTED_EVENT = "SECURITY_TAMPER_DETECTED";
 
 /** Published once a gameweek's live FPL data has been synced and is ready to settle. */
@@ -18,6 +19,17 @@ export interface UserSignedUpPayload {
   userId: string;
   email: string;
   username: string;
+}
+
+/** Published when a captain is newly flagged as doubtful, injured, or suspended. */
+export interface CaptainInjuryAlertPayload {
+  playerId: number;
+  fplId: number;
+  captainName: string;
+  status: "d" | "i" | "s" | string;
+  news?: string | null;
+  gameweekId?: number | null;
+  detectedAt: Date;
 }
 
 /** Published when audit chain verification detects cryptographic tampering or link breakage. */

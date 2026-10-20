@@ -312,6 +312,49 @@ export async function setPassword(
   }
 }
 
+export async function requestPasswordReset(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const result = await authService.requestPasswordReset(req.body?.email ?? "");
+    res.json({
+      success: true,
+      message: result.message,
+      data: {
+        expiresAt: result.expiresAt,
+      },
+    });
+  } catch (error) {
+    if (error instanceof AuthValidationError) {
+      res.status(400).json({ success: false, message: error.message });
+      return;
+    }
+    next(error);
+  }
+}
+
+export async function resetPassword(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const result = await authService.resetPassword(req.body?.token ?? "", req.body?.password ?? "");
+    res.json({
+      success: true,
+      message: result.message,
+    });
+  } catch (error) {
+    if (error instanceof AuthValidationError) {
+      res.status(400).json({ success: false, message: error.message });
+      return;
+    }
+    next(error);
+  }
+}
+
 export async function handleGoogleCallback(
   req: Request,
   res: Response,

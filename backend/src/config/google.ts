@@ -121,14 +121,35 @@ export function generateOAuthNonce(): string {
 
 /**
  * Restricts post-login redirects to same-site relative paths. Absolute URLs,
- * protocol-relative URLs ("//evil.com") and backslash tricks fall back to "/".
+ * protocol-relative URLs ("//evil.com"), encoded hostnames, and backslash
+ * tricks fall back to "/" to avoid open-redirect vulnerabilities.
  */
 export function sanitizeReturnTo(returnTo: unknown): string {
-  if (typeof returnTo !== "string" || returnTo.length > 512) return "/";
-  if (!returnTo.startsWith("/") || returnTo.startsWith("//") || /[\\\s]/.test(returnTo)) {
+  if (typeof returnTo !== "string") return "/";
+
+  const candidate = returnTo.trim();
+  if (candidate.length === 0 || candidate.length > 512) return "/";
+
+  try {
+    const normalized = decodeURIComponent(candidate);
+    if (
+      !normalized.startsWith("/") ||
+      normalized.startsWith("//") ||
+      /[\\\u0000-\u001F\u007F]/.test(normalized) ||
+      /^(?:[a-zA-Z][a-zA-Z0-9+.-]*:)/.test(normalized)
+    ) {
+      return "/";
+    }
+
+    const parsed = new URL(normalized, "https://fantasyxi.local");
+    if (parsed.origin !== "https://fantasyxi.local") {
+      return "/";
+    }
+
+    return normalized;
+  } catch {
     return "/";
   }
-  return returnTo;
 }
 
 /**

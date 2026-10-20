@@ -10,12 +10,15 @@ import {
   unlinkGoogleAccount,
   setPassword,
   getUserReferralCode,
+  requestPasswordReset,
+  resetPassword,
 } from "../controllers/auth.controller.js";
 import { requireAuth, requirePermission } from "../middleware/authMiddleware.js";
 import { Permission } from "../types/index.js";
 import {
   authRateLimiter,
   authenticatedRateLimiter,
+  passwordResetRateLimiter,
 } from "../middleware/rateLimiter.js";
 
 const router = Router();
@@ -55,6 +58,12 @@ router.delete("/google/link", requireAuth, unlinkGoogleAccount);
 
 // POST /api/v1/auth/password (Protected: add a password to a Google account, or change it)
 router.post("/password", authRateLimiter, requireAuth, setPassword);
+
+// POST /api/v1/auth/password/reset/request
+router.post("/password/reset/request", passwordResetRateLimiter, requestPasswordReset);
+
+// POST /api/v1/auth/password/reset
+router.post("/password/reset", passwordResetRateLimiter, resetPassword);
 
 export default router;
 
