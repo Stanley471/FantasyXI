@@ -3,14 +3,12 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import Link from "next/link";
 import { api } from "@/lib/api";
-import { Player, Position, Team } from "@/types";
+import { Player, Team } from "@/types";
 import { PositionBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import {
   IconSearch,
   IconFootball,
-  IconTrophy,
-  IconUsers,
 } from "@/components/ui/Icons";
 import { useVirtualList } from "@/hooks/useVirtualList";
 
@@ -73,7 +71,9 @@ export default function PlayersPage() {
         }>(`/api/v1/players?${params.toString()}`);
 
         if (res?.data) {
-          const fetched = Array.isArray(res.data) ? res.data : (res.data as any).players || [];
+          const fetched = Array.isArray(res.data)
+            ? res.data
+            : (res.data as { players?: Player[] }).players ?? [];
           setPlayers(fetched);
         }
       } catch (err) {

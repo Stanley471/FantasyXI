@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { api, ApiError } from "@/lib/api";
@@ -71,16 +71,16 @@ export default function TeamPage() {
   const userId = user?.id;
 
   // Refresh queued mutations count
-  const refreshQueueCount = async () => {
+  const refreshQueueCount = useCallback(async () => {
     try {
       const count = await getQueuedMutationCount();
       setQueuedMutationsCount(count);
     } catch {
       // Ignore in unsupported environments
     }
-  };
+  }, []);
 
-  const handleManualSync = async (isAuto = false) => {
+  const handleManualSync = useCallback(async (isAuto = false) => {
     if (isSyncingOfflineQueue) return;
     setIsSyncingOfflineQueue(true);
     try {
@@ -100,11 +100,12 @@ export default function TeamPage() {
     } finally {
       setIsSyncingOfflineQueue(false);
     }
-  };
+  }, [isSyncingOfflineQueue, refreshQueueCount, toast]);
 
   // Listen to queue changes, SW messages, and register SW
   useEffect(() => {
-    refreshQueueCount();
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void refreshQueueCount();
     registerServiceWorker().catch(() => {});
 
     const handleQueueChange = () => {
@@ -132,21 +133,24 @@ export default function TeamPage() {
         }
       }
     };
-  }, []);
+  }, [handleManualSync, refreshQueueCount]);
 
   // Auto-sync when reconnecting online
   useEffect(() => {
     if (!prevOnlineRef.current && isOnline) {
-      handleManualSync(true);
+      void handleManualSync(true);
     }
     prevOnlineRef.current = isOnline;
-  }, [isOnline]);
+  }, [handleManualSync, isOnline]);
   
   // Wildcard chip state
-  const [isWildcardActive, setIsWildcardActive] = useState<boolean>(false);
   const [currentGameweek, setCurrentGameweek] = useState<{ id: number; name: string; deadline: string } | null>(null);
   const [chipUsages, setChipUsages] = useState<SquadChipUsage[]>([]);
   const [isActivatingChip, setIsActivatingChip] = useState<boolean>(false);
+  const isWildcardActive =
+    !!currentGameweek && chipUsages.some(
+      (usage) => usage.chipType === ChipType.WILDCARD && usage.gameweekId === currentGameweek.id
+    );
 
   // Load existing squad
   useEffect(() => {
@@ -273,13 +277,13 @@ export default function TeamPage() {
   const sensors = useSensors(
     useSensor(MouseSensor, {
       activationConstraint: {
-        distance: 10,
+        distance: 8,
       },
     }),
     useSensor(TouchSensor, {
       activationConstraint: {
-        delay: 250,
-        tolerance: 5,
+        delay: 120,
+        tolerance: 8,
       },
     })
   );
@@ -639,7 +643,6 @@ export default function TeamPage() {
         gameweekId: currentGameweek.id,
       });
 
-      setIsWildcardActive(true);
       const newUsage: SquadChipUsage = {
         id: Date.now(),
         squadId,
@@ -664,16 +667,6 @@ export default function TeamPage() {
       setIsActivatingChip(false);
     }
   };
-
-  // Check if Wildcard is already active for current gameweek
-  useEffect(() => {
-    if (currentGameweek && chipUsages.length > 0) {
-      const wildcardForGameweek = chipUsages.find(
-        (usage) => usage.chipType === ChipType.WILDCARD && usage.gameweekId === currentGameweek.id
-      );
-      setIsWildcardActive(!!wildcardForGameweek);
-    }
-  }, [currentGameweek, chipUsages]);
 
   if (isLoading) {
     return (

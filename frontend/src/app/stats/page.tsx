@@ -35,8 +35,9 @@ export default function StatsDashboardPage() {
         if (!res.ok) throw new Error("Failed to fetch player ownership statistics");
         const json = await res.json();
         setStats(json.data);
-      } catch (err: any) {
-        setError(err.message || "An error occurred");
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : "An error occurred";
+        setError(message);
       } finally {
         setLoading(false);
       }

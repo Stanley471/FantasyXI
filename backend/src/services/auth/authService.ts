@@ -62,6 +62,11 @@ export class AuthNotFoundError extends Error {
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const BCRYPT_SALT_ROUNDS = 10;
 const MIN_PASSWORD_LENGTH = 8;
+const PASSWORD_RESET_TTL_MS = 15 * 60 * 1000;
+
+function hashPasswordResetToken(token: string): string {
+  return crypto.createHash("sha256").update(token).digest("hex");
+}
 
 export function toSafeUser(user: {
   id: string;
@@ -576,7 +581,122 @@ export class AuthService {
       where: { id: userId },
       data: { passwordHash },
     });
+
+    if (this.db.passwordResetToken) {
+      await this.db.passwordResetToken.deleteMany({
+        where: { userId },
+      });
+    }
+
     return toSafeUser(updated);
+  }
+
+  /**
+   * Generates a 15-minute single-use password reset token for the supplied email.
+   * Returns a generic success payload regardless of account existence to prevent enumeration.
+   */
+  public async requestPasswordReset(email: string): Promise<{
+    token: string;
+    expiresAt: Date;
+    message: string;
+  }> {
+    if (!email || typeof email !== "string") {
+      throw new AuthValidationError("Email is required");
+    }
+
+    const normalizedEmail = this.normalizeEmail(email);
+    if (!EMAIL_REGEX.test(normalizedEmail)) {
+      throw new AuthValidationError("Invalid email address format");
+    }
+
+    const user = await this.db.user.findUnique({ where: { email: normalizedEmail } });
+    if (!user) {
+      return {
+        token: "",
+        expiresAt: new Date(Date.now() + PASSWORD_RESET_TTL_MS),
+        message: "If an account exists for that email, a password reset link has been sent.",
+      };
+    }
+
+    const token = crypto.randomBytes(32).toString("hex");
+    const expiresAt = new Date(Date.now() + PASSWORD_RESET_TTL_MS);
+    const tokenHash = hashPasswordResetToken(token);
+
+    if (this.db.passwordResetToken) {
+      await this.db.passwordResetToken.deleteMany({ where: { userId: user.id } });
+      await this.db.passwordResetToken.create({
+        data: {
+          userId: user.id,
+          tokenHash,
+          expiresAt,
+          usedAt: null,
+        },
+      });
+    }
+
+    return {
+      token,
+      expiresAt,
+      message: "If an account exists for that email, a password reset link has been sent.",
+    };
+  }
+
+  /**
+   * Verifies a password reset token and sets a new password once.
+   */
+  public async resetPassword(
+    rawToken: string,
+    newPassword: string
+  ): Promise<{ success: true; message: string }> {
+    if (!rawToken || typeof rawToken !== "string") {
+      throw new AuthValidationError("Token already redeemed or invalid");
+    }
+    if (!newPassword || typeof newPassword !== "string") {
+      throw new AuthValidationError("Password is required");
+    }
+    if (newPassword.length < MIN_PASSWORD_LENGTH) {
+      throw new AuthValidationError(
+        `Password must be at least ${MIN_PASSWORD_LENGTH} characters long`
+      );
+    }
+
+    const tokenHash = hashPasswordResetToken(rawToken);
+    const resetTokenRecord = this.db.passwordResetToken?.findUnique
+      ? await this.db.passwordResetToken.findUnique({ where: { tokenHash } })
+      : await this.db.passwordResetToken.findFirst({ where: { tokenHash } });
+
+    if (!resetTokenRecord) {
+      throw new AuthValidationError("Token already redeemed or invalid");
+    }
+
+    const now = new Date();
+    if (resetTokenRecord.usedAt || resetTokenRecord.expiresAt.getTime() <= now.getTime()) {
+      throw new AuthValidationError("Token already redeemed or invalid");
+    }
+
+    const user = await this.db.user.findUnique({ where: { id: resetTokenRecord.userId } });
+    if (!user) {
+      throw new AuthValidationError("Token already redeemed or invalid");
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, BCRYPT_SALT_ROUNDS);
+    await this.db.user.update({
+      where: { id: user.id },
+      data: { passwordHash },
+    });
+
+    await this.db.passwordResetToken.update({
+      where: { id: resetTokenRecord.id },
+      data: { usedAt: now },
+    });
+
+    if (this.db.passwordResetToken) {
+      await this.db.passwordResetToken.deleteMany({
+        where: { userId: user.id, id: { not: resetTokenRecord.id } },
+      });
+    }
+
+    return { success: true, message: "Password reset successful" };
   }
 
   /**

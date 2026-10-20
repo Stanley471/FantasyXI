@@ -1,11 +1,10 @@
 "use client";
 
 import React, { useState, useEffect, useCallback } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { useToast } from "@/context/ToastContext";
-import { api, ApiError } from "@/lib/api";
+import { api } from "@/lib/api";
 import { FailedPayoutRecord, FailedPayoutStatus } from "@/types";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -81,8 +80,8 @@ export default function AdminPayoutsPage() {
       } else {
         setRecords([]);
       }
-    } catch (err: any) {
-      const msg = err?.message || "Failed to load dead-letter payouts.";
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to load dead-letter payouts.";
       setError(msg);
       toast.error(msg);
     } finally {
@@ -92,7 +91,8 @@ export default function AdminPayoutsPage() {
 
   useEffect(() => {
     if (!authLoading && isAuthenticated && isStaff) {
-      fetchFailedPayouts();
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      void fetchFailedPayouts();
     }
   }, [authLoading, isAuthenticated, isStaff, fetchFailedPayouts]);
 
@@ -109,7 +109,7 @@ export default function AdminPayoutsPage() {
     if (!retryTarget) return;
     setIsSubmitting(true);
     try {
-      const res = await api.post<{ success: boolean; message?: string; data?: any }>(
+      const res = await api.post<{ success: boolean; message?: string; data?: unknown }>(
         `/api/v1/admin/payouts/dead-letter/${retryTarget.id}/retry`,
         { note: retryNote.trim() || undefined }
       );
@@ -125,8 +125,9 @@ export default function AdminPayoutsPage() {
       );
       setRetryTarget(null);
       setRetryNote("");
-    } catch (err: any) {
-      toast.error(err?.message || "Failed to trigger payout retry.");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to trigger payout retry.";
+      toast.error(message);
     } finally {
       setIsSubmitting(false);
     }
@@ -156,8 +157,9 @@ export default function AdminPayoutsPage() {
       );
       setDiscardTarget(null);
       setDiscardReason("");
-    } catch (err: any) {
-      toast.error(err?.message || "Failed to discard payout.");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to discard payout.";
+      toast.error(message);
     } finally {
       setIsSubmitting(false);
     }

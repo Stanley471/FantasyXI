@@ -1,5 +1,7 @@
 import { liveService } from "../live/liveService.js";
 import { prisma } from "../../config/db.js";
+import { eventBus } from "../events/eventBus.js";
+import { CAPTAIN_INJURY_ALERT_EVENT } from "../events/domainEvents.js";
 import { fplClient } from "./fplClient.js";
 import crypto from "crypto";
 import {
@@ -254,6 +256,41 @@ export class FplSyncService {
     // Flush remaining players
     if (playerOps.length > 0) {
       await prisma.$transaction(playerOps);
+    }
+
+    const currentGameweek = await prisma.gameweek.findFirst({
+      where: { isCurrent: true },
+      select: { id: true },
+    });
+
+    const latestPlayers = await prisma.player.findMany({
+      select: { id: true, fplId: true, displayName: true, status: true, news: true },
+    });
+    const previousStatusMap = new Map(
+      existingPlayers.map((player) => [
+        player.fplId,
+        { status: (player.status ?? "a") as string, news: player.news ?? "" },
+      ])
+    );
+    const injuryAlerts = latestPlayers
+      .filter((player) => {
+        const previous = previousStatusMap.get(player.fplId);
+        const nextStatus = (player.status ?? "a") as string;
+        if (!previous) return false;
+        return (nextStatus === "d" || nextStatus === "i" || nextStatus === "s") && previous.status !== nextStatus;
+      })
+      .map((player) => ({
+        playerId: player.id,
+        fplId: player.fplId,
+        captainName: player.displayName,
+        status: (player.status ?? "a") as "d" | "i" | "s" | string,
+        news: player.news ?? null,
+        gameweekId: currentGameweek?.id ?? null,
+        detectedAt: new Date(),
+      }));
+
+    for (const alert of injuryAlerts) {
+      await eventBus.publish(CAPTAIN_INJURY_ALERT_EVENT, alert);
     }
 
     console.log(

@@ -318,6 +318,12 @@ export async function clearQueuedMutations(): Promise<void> {
 // Background Sync Registration
 // ---------------------------------------------------------------------------
 
+type SyncRegistration = {
+  sync?: {
+    register: (tag: string) => Promise<void>;
+  };
+};
+
 export async function registerBackgroundSync(): Promise<boolean> {
   if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) {
     return false;
@@ -325,8 +331,9 @@ export async function registerBackgroundSync(): Promise<boolean> {
 
   try {
     const registration = await navigator.serviceWorker.ready;
-    if ("sync" in registration && typeof (registration as any).sync?.register === "function") {
-      await (registration as any).sync.register(SYNC_TAG);
+    const syncRegistration = registration as ServiceWorkerRegistration & SyncRegistration;
+    if ("sync" in syncRegistration && typeof syncRegistration.sync?.register === "function") {
+      await syncRegistration.sync.register(SYNC_TAG);
       return true;
     }
   } catch (err) {

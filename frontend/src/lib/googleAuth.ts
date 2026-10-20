@@ -10,13 +10,34 @@ import { api, API_BASE_URL } from "@/lib/api";
 
 /**
  * Only same-site relative paths are followed after sign-in; anything else
- * (absolute or protocol-relative URLs) falls back to the home page.
+ * (absolute, protocol-relative, encoded-host, or backslash-based paths) falls
+ * back to the home page.
  */
 export function safeReturnTo(value: string | null | undefined): string {
-  if (!value || !value.startsWith("/") || value.startsWith("//") || /[\\\s]/.test(value)) {
+  if (!value) return "/";
+
+  try {
+    const candidate = decodeURIComponent(value.trim());
+    if (
+      candidate.length === 0 ||
+      candidate.length > 512 ||
+      !candidate.startsWith("/") ||
+      candidate.startsWith("//") ||
+      /[\\\u0000-\u001F\u007F]/.test(candidate) ||
+      /^(?:[a-zA-Z][a-zA-Z0-9+.-]*:)/.test(candidate)
+    ) {
+      return "/";
+    }
+
+    const parsed = new URL(candidate, "https://fantasyxi.local");
+    if (parsed.origin !== "https://fantasyxi.local") {
+      return "/";
+    }
+
+    return candidate;
+  } catch {
     return "/";
   }
-  return value;
 }
 
 /** Sends the browser to the backend's Google sign-in endpoint. */
@@ -30,11 +51,34 @@ export function redirectToGoogleSignIn(returnTo?: string | null): void {
 }
 
 /** Starts linking a Google account to the signed-in manager. */
+export function safeGoogleRedirectUrl(value: string | null | undefined): string {
+  if (!value) return API_BASE_URL;
+
+  try {
+    const candidate = value.trim();
+    const parsed = new URL(candidate, API_BASE_URL);
+    const hostname = parsed.hostname.toLowerCase();
+    const isAllowedHost =
+      hostname === new URL(API_BASE_URL).hostname ||
+      hostname === "accounts.google.com" ||
+      hostname === "google.com" ||
+      hostname.endsWith(".google.com");
+
+    if (parsed.protocol !== "https:" || !isAllowedHost) {
+      return API_BASE_URL;
+    }
+
+    return parsed.toString();
+  } catch {
+    return API_BASE_URL;
+  }
+}
+
 export async function redirectToGoogleLink(): Promise<void> {
   const res = await api.post<{ success: boolean; data: { url: string } }>(
     "/api/v1/auth/google/link"
   );
-  window.location.href = new URL(res.data.url, API_BASE_URL).toString();
+  window.location.href = safeGoogleRedirectUrl(res.data.url);
 }
 
 const GOOGLE_AUTH_ERRORS: Record<string, string> = {

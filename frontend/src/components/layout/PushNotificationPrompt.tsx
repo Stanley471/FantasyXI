@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import {
   registerServiceWorker,
   requestNotificationPermission,
@@ -12,20 +12,21 @@ type BannerState = "idle" | "visible" | "loading" | "success" | "error" | "denie
 
 const DISMISS_KEY = "push_prompt_dismissed";
 
+function shouldShowPushPrompt(): boolean {
+  if (typeof window === "undefined" || typeof navigator === "undefined") return false;
+  return (
+    "serviceWorker" in navigator &&
+    "Notification" in window &&
+    Notification.permission === "default" &&
+    !localStorage.getItem(DISMISS_KEY)
+  );
+}
+
 export function PushNotificationPrompt() {
-  const [state, setState] = useState<BannerState>("idle");
+  const [state, setState] = useState<BannerState>(() =>
+    shouldShowPushPrompt() ? "visible" : "hidden"
+  );
   const [errorMessage, setErrorMessage] = useState("");
-
-  // Decide on mount whether the prompt should be shown
-  useEffect(() => {
-    const shouldShow =
-      "serviceWorker" in navigator &&
-      "Notification" in window &&
-      Notification.permission === "default" &&
-      !localStorage.getItem(DISMISS_KEY);
-
-    setState(shouldShow ? "visible" : "hidden");
-  }, []);
 
   // Nothing to render
   if (state === "idle" || state === "hidden") return null;

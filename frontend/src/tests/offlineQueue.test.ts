@@ -226,16 +226,19 @@ describe("Offline Squad Mutation Queue & Background Sync (Issue #214)", () => {
 
       assert.equal(await getQueuedMutationCount(), 2);
 
-      const putCalls: Array<{ url: string; data: any }> = [];
+      const putCalls: Array<{ url: string; data?: Record<string, unknown> }> = [];
       const mockApi = {
-        put: async (url: string, data: any) => {
+        get: async () => ({ success: true, data: [] }),
+        put: async (url: string, data?: Record<string, unknown>) => {
           putCalls.push({ url, data });
           return { success: true };
         },
         post: async () => ({ success: true }),
-      };
+        patch: async () => ({ success: true }),
+        del: async () => ({ success: true }),
+      } as Parameters<typeof syncQueuedMutations>[0];
 
-      const result = await syncQueuedMutations(mockApi as any);
+      const result = await syncQueuedMutations(mockApi);
 
       assert.equal(result.succeeded, 2);
       assert.equal(result.failed, 0);
@@ -260,6 +263,7 @@ describe("Offline Squad Mutation Queue & Background Sync (Issue #214)", () => {
       });
 
       const mockApi = {
+        get: async () => ({ success: true, data: [] }),
         put: async (url: string) => {
           if (url.includes("602")) {
             throw new Error("HTTP 500 Internal Server Error");
@@ -267,9 +271,11 @@ describe("Offline Squad Mutation Queue & Background Sync (Issue #214)", () => {
           return { success: true };
         },
         post: async () => ({ success: true }),
-      };
+        patch: async () => ({ success: true }),
+        del: async () => ({ success: true }),
+      } as Parameters<typeof syncQueuedMutations>[0];
 
-      const result = await syncQueuedMutations(mockApi as any);
+      const result = await syncQueuedMutations(mockApi);
 
       assert.equal(result.succeeded, 1);
       assert.equal(result.failed, 1);

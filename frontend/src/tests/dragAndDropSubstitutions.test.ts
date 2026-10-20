@@ -19,12 +19,17 @@
 
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { DndContext } from "@dnd-kit/core";
 import { Position, Player } from "../types/index.js";
 import {
   validateSubstitution,
   detectFormation,
 } from "../lib/formation.js";
 import { useTeamStore, LocalSquadPlayer } from "../store/teamStore.js";
+import { Pitch } from "../components/pitch/Pitch.js";
+import { PlayerCard } from "../components/pitch/PlayerCard.js";
 
 // Helper to create mock player
 function makePlayer(id: number, pos: Position, name: string): Player {
@@ -134,6 +139,34 @@ function buildStandardSquad(): LocalSquadPlayer[] {
   return squad;
 }
 
+describe("Mobile pitch quick-swap UX", () => {
+  it("renders touch-friendly mobile pitch affordances and selected-player swap state", () => {
+    const squad = buildStandardSquad();
+    useTeamStore.setState({
+      players: squad,
+      activeDragPlayer: null,
+      selectedPlayerId: 1,
+      substitutionFeedback: null,
+    });
+
+    const pitchHtml = renderToStaticMarkup(
+      React.createElement(DndContext, { sensors: [] }, React.createElement(Pitch))
+    );
+    const playerHtml = renderToStaticMarkup(
+      React.createElement(PlayerCard, {
+        player: squad[0].player,
+        positionSlot: Position.GKP,
+        isStarter: true,
+      })
+    );
+
+    assert.match(pitchHtml, /overflow-x-hidden/);
+    assert.match(pitchHtml, /touch-pan-y/);
+    assert.match(playerHtml, /touch-action:manipulation/);
+    assert.match(playerHtml, /aria-label="Raya player card"/);
+  });
+});
+
 describe("Drag-and-Drop Squad Management & Substitutions", () => {
   let squad: LocalSquadPlayer[];
 
@@ -192,7 +225,7 @@ describe("Drag-and-Drop Squad Management & Substitutions", () => {
       const currentStarters = useTeamStore
         .getState()
         .players.filter((p) => p.isStarter);
-      assert.strictEqual(detectFormation(currentStarters as any), "3-5-2");
+      assert.strictEqual(detectFormation(currentStarters), "3-5-2");
     });
 
     it("should allow valid tactical switch: 4-4-2 -> 4-3-3 (subbing MID for FWD)", () => {
@@ -208,7 +241,7 @@ describe("Drag-and-Drop Squad Management & Substitutions", () => {
       const currentStarters = useTeamStore
         .getState()
         .players.filter((p) => p.isStarter);
-      assert.strictEqual(detectFormation(currentStarters as any), "4-3-3");
+      assert.strictEqual(detectFormation(currentStarters), "4-3-3");
     });
 
     it("should reject subbing a DEF when squad already has minimum 3 defenders (3-5-2)", () => {

@@ -1,4 +1,4 @@
-import rateLimit, { RateLimitRequestHandler } from "express-rate-limit";
+import rateLimit, { ipKeyGenerator, RateLimitRequestHandler } from "express-rate-limit";
 import { Request, Response } from "express";
 
 function configuredLimit(name: string, fallback: number): number {
@@ -101,6 +101,21 @@ export const authenticatedRateLimiter = createRateLimiter(
   configuredLimit("AUTHENTICATED_RATE_LIMIT_MAX", 60),
   "Too many authenticated API requests from this IP. Please try again later."
 );
+
+/** Lower limit for password-reset requests, combined per IP + email to prevent enumeration spam. */
+export const passwordResetRateLimiter: RateLimitRequestHandler = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: configuredLimit("PASSWORD_RESET_RATE_LIMIT_MAX", 3),
+  standardHeaders: true,
+  legacyHeaders: false,
+  validate: { trustProxy: false },
+  keyGenerator: (req) => {
+    const ip = ipKeyGenerator(req.ip ?? req.socket.remoteAddress ?? "unknown");
+    const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "unknown";
+    return `${ip}:${email}`;
+  },
+  handler: createRateLimitHandler("Too many password reset requests. Please wait before trying again."),
+});
 
 /** Lower limit for authenticated mutations that are more expensive or stateful. */
 export const mutationRateLimiter = createRateLimiter(

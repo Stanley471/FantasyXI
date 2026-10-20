@@ -19,6 +19,7 @@ export const Pitch: React.FC<PitchProps> = ({ isLoading = false }) => {
   // Select the stable players array and derive from it: a selector returning a
   // new array on every call makes zustand re-render forever
   const players = useTeamStore((state) => state.players);
+  const selectedPlayerId = useTeamStore((state) => state.selectedPlayerId);
   const starters = useMemo(
     () => players.filter((p) => p.isStarter).sort((a, b) => a.positionOrder - b.positionOrder),
     [players]
@@ -44,12 +45,14 @@ export const Pitch: React.FC<PitchProps> = ({ isLoading = false }) => {
   const midSlots = midStarters.length > 0 ? midStarters : [null, null, null, null];
   const fwdSlots = fwdStarters.length > 0 ? fwdStarters : [null, null];
 
-  const currentFormation = detectFormation(starters as any);
+  const currentFormation = detectFormation(
+    starters as Array<{ player?: Player; position?: Position }>
+  );
 
   return (
-    <div className="w-full relative rounded-2xl overflow-hidden shadow-2xl border border-pitch-border bg-slate-950" data-testid="pitch">
+    <div className="w-full max-w-full overflow-x-hidden relative rounded-2xl shadow-2xl border border-pitch-border bg-slate-950" data-testid="pitch">
       {/* Tactical Grass Pitch Canvas */}
-      <div className="pitch-grass relative w-full min-h-[580px] sm:min-h-[660px] flex flex-col justify-between py-6 px-2 sm:px-6">
+      <div className="pitch-grass relative w-full max-w-full min-h-[580px] sm:min-h-[660px] flex flex-col justify-between py-6 px-2 sm:px-6 overflow-x-hidden touch-pan-y">
         {/* Pitch Tactical Line Markings */}
         <div className="absolute inset-0 pointer-events-none opacity-40">
           {/* Halfway line */}
@@ -76,9 +79,14 @@ export const Pitch: React.FC<PitchProps> = ({ isLoading = false }) => {
             )}
           </div>
 
-          <div className="text-[11px] text-slate-300 tracking-wide">
+          <div className="flex items-center gap-2 text-[11px] text-slate-300 tracking-wide">
             <span className="text-white font-semibold">{starters.filter((s) => !!s.player).length}</span>
             <span className="text-slate-400"> / 11 Starters</span>
+            {selectedPlayerId !== null && (
+              <span className="ml-1 rounded-full border border-emerald-400/50 bg-emerald-500/10 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.18em] text-emerald-300 sm:hidden">
+                Tap another player to swap
+              </span>
+            )}
           </div>
         </div>
 
