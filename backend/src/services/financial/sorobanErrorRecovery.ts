@@ -582,3 +582,16 @@ export class TransactionReplayWorker {
 
 export const transactionReplayWorker = new TransactionReplayWorker();
 
+export {
+  ZeroLossTransactionReplayQueue,
+  type ReplayTransactionState,
+  type StateTransitionEntry,
+  type ZeroLossTrackedTransaction,
+  type SorobanRpcGetTransactionResponse,
+  type ZeroLossSorobanRpcEndpoint,
+  type ZeroLossResubmitter,
+  type ZeroLossLedgerDbAdapter,
+  type ZeroLossReplayQueueOptions,
+} from "./zeroLossTransactionReplayQueue.js";
+
+
