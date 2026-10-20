@@ -1,6 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { EmailService, EmailProvider, SendEmailOptions, EmailProviderResult } from "../services/email/emailService.js";
+import {
+  EmailService,
+  EmailProvider,
+  SendEmailOptions,
+  EmailProviderResult,
+} from "../services/email/emailService.js";
 
 class MockEmailProvider implements EmailProvider {
   public sent: SendEmailOptions[] = [];
@@ -51,5 +56,25 @@ describe("EmailService", () => {
     assert.equal(provider.sent.length, 1);
     assert.equal(provider.sent[0].to, "test@example.com");
     assert.equal(provider.sent[0].subject, "Deposit Confirmed: 50.00 USDC for High Rollers");
+  });
+
+  it("should generate captain injury alert email template with team management link", () => {
+    const service = new EmailService();
+    const template = service.generateCaptainInjuryAlertTemplate({
+      to: "manager@example.com",
+      managerName: "Alex",
+      captainName: "Bukayo Saka",
+      status: "i",
+      news: "Hamstring injury - expected to miss 2-3 weeks",
+      teamManagementUrl: "https://fantasyxi.app/team",
+    });
+
+    assert.equal(template.subject, "Captain Alert: Bukayo Saka is injured");
+    assert.match(template.text, /Alex/);
+    assert.match(template.text, /Bukayo Saka/);
+    assert.match(template.text, /Hamstring injury/);
+    assert.match(template.text, /https:\/\/fantasyxi\.app\/team/);
+    assert.match(template.html, /Captain Alert/);
+    assert.match(template.html, /https:\/\/fantasyxi\.app\/team/);
   });
 });
