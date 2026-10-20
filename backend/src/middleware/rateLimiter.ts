@@ -107,3 +107,42 @@ export const mutationRateLimiter = createRateLimiter(
   configuredLimit("MUTATION_RATE_LIMIT_MAX", 30),
   "Too many mutation requests from this IP. Please try again later."
 );
+
+export {
+  SLIDING_WINDOW_LUA_SCRIPT,
+  SlidingWindowRateLimiter,
+  InMemorySlidingWindowStore,
+  createSlidingWindowRateLimiter,
+  resolveCallerIdentity,
+  extractClientIp,
+  type ISlidingWindowRedisClient,
+  type SlidingWindowEvaluation,
+  type SlidingWindowGatewayOptions,
+  type CallerIdentity,
+} from "./slidingWindowRateLimiter.js";
+
+export {
+  loadRateLimitGatewayConfig,
+  resolveRouteGroup,
+  type CallerTier,
+  type RouteGroupName,
+  type FallbackBehavior,
+  type TierThresholds,
+  type RouteGroupRateLimitConfig,
+  type RateLimitGatewayConfig,
+} from "../config/rateLimitConfig.js";
+
+import { createSlidingWindowRateLimiter as buildSlidingLimiter } from "./slidingWindowRateLimiter.js";
+
+/**
+ * Dynamic Redis-backed sliding-window rate-limiting gateway for public API
+ * and webhook endpoints (#346).
+ */
+export const publicApiSlidingWindowGateway = buildSlidingLimiter();
+export const playersSlidingRateLimiter = buildSlidingLimiter({ routeGroupOverride: "players" });
+export const fixturesSlidingRateLimiter = buildSlidingLimiter({ routeGroupOverride: "fixtures" });
+export const leaguesSlidingRateLimiter = buildSlidingLimiter({ routeGroupOverride: "leagues" });
+export const leaderboardSlidingRateLimiter = buildSlidingLimiter({ routeGroupOverride: "leaderboard" });
+export const liveSlidingRateLimiter = buildSlidingLimiter({ routeGroupOverride: "live" });
+export const webhooksSlidingRateLimiter = buildSlidingLimiter({ routeGroupOverride: "webhooks" });
+
