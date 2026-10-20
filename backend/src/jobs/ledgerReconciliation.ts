@@ -1,4 +1,8 @@
 import { ledgerReconciliationService } from "../services/financial/ledgerReconciliationService.js";
+import {
+  ledgerDeltaAuditor,
+  LedgerDeltaAuditReport,
+} from "../services/financial/ledgerDeltaAuditor.js";
 
 /**
  * Daily Ledger Reconciliation Job (issue #261).
@@ -18,3 +22,14 @@ export async function runLedgerReconciliationJob(): Promise<void> {
   if (report.status === "BALANCED") console.log(line);
   else console.warn(line);
 }
+
+/**
+ * Scheduled Ledger Delta Audit Job (issue #345).
+ *
+ * Compares contract escrow balances and Horizon ledger sequences against
+ * active PostgreSQL league deposits, refunds, payouts, and contract fees.
+ */
+export async function runLedgerDeltaAuditJob(): Promise<LedgerDeltaAuditReport> {
+  return ledgerDeltaAuditor.runDeltaAudit({ trigger: "scheduled" });
+}
+
