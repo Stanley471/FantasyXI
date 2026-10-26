@@ -14,7 +14,7 @@ import { Permission } from "./types/index.js";
 import { ApolloServer } from "@apollo/server";
 import { expressMiddleware } from "@as-integrations/express5";
 import DataLoader from "dataloader";
-import { prisma, getReadReplicaStatus } from "./config/db.js";
+import { prisma, getReadReplicaStatus, getSlowQueryCount } from "./config/db.js";
 import { closeRedisClient, getRedisClient } from "./config/redis.js";
 import { preferReplicaReads } from "./middleware/readConsistency.js";
 import { financialAuditLog } from "./services/audit/financialAuditLog.js";
@@ -100,6 +100,19 @@ app.get(
 );
 
 // Replica topology and lag are operational data, like queue health
+app.get(
+  "/api/health/database",
+  requireAuth,
+  requirePermission(Permission.SYSTEM_HEALTH_READ),
+  (_req: Request, res: Response) => {
+    res.json({
+      success: true,
+      data: { slowQueriesLastMinute: getSlowQueryCount() },
+      timestamp: new Date().toISOString(),
+    });
+  },
+);
+
 app.get(
   "/api/health/replicas",
   requireAuth,

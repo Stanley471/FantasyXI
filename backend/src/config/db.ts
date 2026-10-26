@@ -12,6 +12,7 @@ import {
   DatabaseClusterMonitor,
   createDatabaseMaintenanceMiddleware,
 } from "./dbHealthMonitor.js";
+import { slowQueryTelemetry } from "./slowQueryTelemetry.js";
 
 // Extend globalThis to hold our Prisma instance
 const globalForPrisma = globalThis as unknown as {
@@ -24,13 +25,21 @@ function createClient(connectionString: string): PrismaClient {
   const pool = new pg.Pool({ connectionString });
   const adapter = new PrismaPg(pool);
 
-  return new PrismaClient({
+  const prisma = new PrismaClient({
     adapter,
-    log:
-      process.env.NODE_ENV === "development"
-        ? ["query", "error", "warn"]
-        : ["error"],
+    log: [
+      { emit: "event", level: "query" },
+      { emit: "stdout", level: "error" },
+      { emit: "stdout", level: "warn" },
+    ],
   });
+
+  prisma.$on("query", (event) => slowQueryTelemetry.observe(event));
+  return prisma;
+}
+
+export function getSlowQueryCount(): number {
+  return slowQueryTelemetry.getRollingCount();
 }
 
 function getPrismaInstance(): PrismaClient {

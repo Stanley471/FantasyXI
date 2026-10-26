@@ -13,7 +13,7 @@
     "db:push": "npx prisma db push",
     "db:validate-migration": "tsx src/scripts/validateMigration.ts",
     "test": "tsx --test src/tests/authMiddleware.test.ts src/tests/authService.test.ts src/tests/authorization.test.ts src/tests/chipsEngine.test.ts src/tests/eventIndexer.test.ts src/tests/financialEndpoints.test.ts src/tests/financialService.test.ts src/tests/fplNormalizer.test.ts src/tests/fplTrackingDaemon.test.ts src/tests/googleAuth.test.ts src/tests/h2hLeague.test.ts src/tests/jobQueue.test.ts src/tests/ledgerAuditService.test.ts src/tests/leagueRefunds.test.ts src/tests/leagueService.test.ts src/tests/liveTimelineService.test.ts src/tests/ownershipStats.test.ts src/tests/prizeService.test.ts src/tests/rateLimiter.test.ts src/tests/referralService.test.ts src/tests/scoringService.test.ts src/tests/sorobanContractClient.test.ts src/tests/squadValidator.test.ts src/tests/stellarService.test.ts src/tests/zeroDowntimeMigration.test.ts",
-    "test:testnet": "tsx --test src/tests/testnetEndToEnd.test.ts"
+    "test:testnet": "tsx --test src/tests/testnetEndToEnd.test.ts",
     "db:bootstrap-tenant": "psql -U postgres -d fantasyxi -f prisma/sql/tenant_bootstrap.sql",
     "db:migrate:tenants": "tsx src/scripts/multiTenantMigration.ts",
     "db:migrate:tenants:status": "tsx src/scripts/multiTenantMigration.ts --status",
