@@ -4,6 +4,7 @@ import React from "react";
 import { PerformanceAnalytics, ChipType } from "@/types";
 import { CHART_COLORS, formatPoints } from "@/lib/chart";
 import { TimeSeriesChart } from "./TimeSeriesChart";
+import { ExportDropdown } from "./ExportDropdown";
 
 const CHIP_LABELS: Record<ChipType, string> = {
   TRIPLE_CAPTAIN: "Triple Captain",
@@ -65,6 +66,9 @@ export const PerformanceDashboard: React.FC<PerformanceDashboardProps> = ({ anal
 
   return (
     <div className="space-y-6">
+      <div className="flex justify-end">
+        <ExportDropdown analytics={analytics} />
+      </div>
       <section aria-labelledby="season-summary-heading">
         <h2 id="season-summary-heading" className="sr-only">
           Season summary

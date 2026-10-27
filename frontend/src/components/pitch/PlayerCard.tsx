@@ -3,7 +3,7 @@
 import React from "react";
 import { Player, Position } from "@/types";
 import { PositionBadge } from "@/components/ui/Badge";
-import { IconFootball, IconSwap } from "@/components/ui/Icons";
+import { IconSwap } from "@/components/ui/Icons";
 import { useDraggable, useDroppable } from "@dnd-kit/core";
 import { validateSubstitution } from "@/lib/formation";
 import { useTeamStore } from "@/store/teamStore";
@@ -198,6 +198,8 @@ const PlayerCardComponent: React.FC<PlayerCardProps> = ({
         onClick={onClick}
         {...(!isOverlay ? listeners : {})}
         {...(!isOverlay ? attributes : {})}
+        aria-pressed={isSelectedForSwap}
+        aria-label={`${player.displayName || player.lastName}, ${positionSlot}${isStarter ? ", starter" : ", substitute"}${isSelectedForSwap ? ", selected for swap" : ""}`}
         style={!isOverlay ? { touchAction: "none" } : undefined}
         className={`group relative flex flex-col items-center focus:outline-none transition-all duration-200 ${interactiveStyles}`}
       >
@@ -235,7 +237,7 @@ const PlayerCardComponent: React.FC<PlayerCardProps> = ({
 
         {/* Tactical Jersey Token */}
         <div
-          className={`relative w-11 h-11 sm:w-12 sm:h-12 rounded-xl bg-gradient-to-b ${jerseyStyle} border shadow-lg flex items-center justify-center transition-transform group-hover:brightness-110`}
+          className={`relative h-10 w-10 sm:h-12 sm:w-12 rounded-xl bg-gradient-to-b ${jerseyStyle} border shadow-lg flex items-center justify-center transition-transform group-hover:brightness-110`}
         >
           {/* Subtle kit collar stripe */}
           <div className="absolute top-0 inset-x-2 h-1 bg-white/30 rounded-b-sm" />
@@ -245,8 +247,8 @@ const PlayerCardComponent: React.FC<PlayerCardProps> = ({
         </div>
 
         {/* Player Name Pill */}
-        <div className="mt-1 w-20 sm:w-24 bg-slate-900/95 border border-slate-800 rounded px-1.5 py-0.5 text-center shadow-md truncate">
-          <span className="text-[11px] sm:text-xs font-bold text-white uppercase tracking-tight truncate block">
+        <div className="mt-1 w-[clamp(3rem,18vw,5rem)] sm:w-24 min-h-8 bg-slate-900/95 border border-slate-800 rounded px-1 py-0.5 text-center shadow-md">
+          <span className="block line-clamp-2 break-words text-[10px] sm:text-xs font-bold leading-tight text-white uppercase tracking-tight">
             {player.displayName || player.lastName}
           </span>
         </div>

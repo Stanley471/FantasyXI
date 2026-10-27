@@ -1,5 +1,9 @@
 import { Request, Response, NextFunction } from "express";
 import { securityAnomalyLog, SecurityAnomalyType } from "../services/security/securityAnomalyLog.js";
+import {
+  sybilDetectionGraphService,
+  SybilLeagueNotFoundError,
+} from "../services/security/sybilDetectionGraph.js";
 
 /**
  * Security Administration Controller (issue #117).
@@ -37,6 +41,32 @@ export async function listSecurityAnomalies(
 
     res.json({ success: true, data: entries });
   } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * GET /api/v1/admin/security/sybil/leagues/:leagueId[?refresh=true] (issue #274)
+ *
+ * Sybil-ring review for one league: suspected account clusters with the
+ * evidence behind every link, per-account risk scores and the hub signals
+ * that were ignored. Review only - fund actions stay a manual decision.
+ */
+export async function getLeagueSybilReport(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const report = await sybilDetectionGraphService.analyzeLeague(String(req.params.leagueId), {
+      refresh: req.query.refresh === "true",
+    });
+    res.json({ success: true, data: report });
+  } catch (error) {
+    if (error instanceof SybilLeagueNotFoundError) {
+      res.status(404).json({ success: false, message: error.message });
+      return;
+    }
     next(error);
   }
 }

@@ -23,21 +23,27 @@ function withMockBeacon(
   fn: (calls: Array<{ url: string; data: string }>) => void
 ): void {
   const globalRecord = globalThis as unknown as Record<string, unknown>;
-  const originalNavigator = globalRecord.navigator;
+  const descriptor = Object.getOwnPropertyDescriptor(globalRecord, 'navigator');
 
   const calls: Array<{ url: string; data: string }> = [];
 
-  globalRecord.navigator = {
-    sendBeacon: (url: string, data: unknown) => {
-      calls.push({ url, data: data as string });
-      return true;
-    },
-  } satisfies NavigatorRecord;
+  Object.defineProperty(globalRecord, 'navigator', {
+    value: {
+      sendBeacon: (url: string, data: unknown) => {
+        calls.push({ url, data: data as string });
+        return true;
+      },
+    } satisfies NavigatorRecord,
+    configurable: true,
+    writable: true,
+  });
 
   try {
     fn(calls);
   } finally {
-    globalRecord.navigator = originalNavigator;
+    if (descriptor) {
+      Object.defineProperty(globalRecord, 'navigator', descriptor);
+    }
   }
 }
 

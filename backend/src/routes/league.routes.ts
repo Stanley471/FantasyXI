@@ -1,5 +1,12 @@
 import { Router } from "express";
 import {
+  initSwissTournament,
+  getSwissStandings,
+  getSwissCurrentRound,
+  advanceSwissRound,
+  resolveSwissRound,
+} from "../controllers/league.controller.js";
+import {
   createLeague,
   getLeagues,
   getLeagueById,
@@ -155,5 +162,12 @@ router.get(
   authenticatedRateLimiter,
   reconcileLeague
 );
+
+// Swiss-system tournament routes (Issue #341)
+router.post("/:leagueId/swiss/init", requireAuth, initSwissTournament);
+router.get("/:leagueId/swiss/standings", primaryReads, getSwissStandings);
+router.get("/:leagueId/swiss/current-round", primaryReads, getSwissCurrentRound);
+router.post("/:leagueId/swiss/rounds/advance", requireAuth, advanceSwissRound);
+router.post("/:leagueId/swiss/rounds/:round/resolve", requireAuth, resolveSwissRound);
 
 export default router;

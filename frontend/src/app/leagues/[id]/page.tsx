@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, use } from "react";
+import React, { useState, useEffect, useCallback, use, useRef } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
@@ -13,6 +13,7 @@ import {
   LeagueStatus,
 } from "@/types";
 import { StandingsTable } from "@/components/leagues/StandingsTable";
+import { HistoricalStandingsScrubber, type CompletedGameweek } from "@/components/leagues/HistoricalStandingsScrubber";
 import { LeagueChat } from "@/components/chat/LeagueChat";
 import { PrizeCalculator } from "@/components/leagues/PrizeCalculator";
 import { PaymentModal } from "@/components/leagues/PaymentModal";
@@ -24,6 +25,7 @@ import { LiveSquadModal } from "@/components/live/LiveSquadModal";
 import { useLiveLeague } from "@/components/live/useLiveLeague";
 import { LeagueStatusBadge, Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { useToast } from "@/context/ToastContext";
 import {
   IconTrophy,
@@ -47,6 +49,12 @@ export default function LeagueDetailPage({
 
   const [league, setLeague] = useState<League | null>(null);
   const [standings, setStandings] = useState<LeagueStandingsEntry[]>([]);
+  const [completedGameweeks, setCompletedGameweeks] = useState<CompletedGameweek[]>([]);
+  const [selectedGameweekId, setSelectedGameweekId] = useState<number | null>(null);
+  const [historicalStandings, setHistoricalStandings] = useState<LeagueStandingsEntry[]>([]);
+  const [historicalLoading, setHistoricalLoading] = useState(false);
+  const [historicalError, setHistoricalError] = useState<string | null>(null);
+  const historicalCache = useRef(new Map<number, LeagueStandingsEntry[]>());
   const [userSquads, setUserSquads] = useState<Squad[]>([]);
   const [selectedSquadId, setSelectedSquadId] = useState<string>("");
 
@@ -91,10 +99,15 @@ export default function LeagueDetailPage({
       // 2. Fetch standings
       const stdRes = await api.get<{
         success: boolean;
-        data: LeagueStandingsEntry[] | { standings: LeagueStandingsEntry[] };
+        data: LeagueStandingsEntry[] | { standings: LeagueStandingsEntry[]; completedGameweeks?: CompletedGameweek[] };
       }>(`/api/v1/leagues/${leagueId}/standings`);
       if (stdRes?.data) {
-        setStandings(Array.isArray(stdRes.data) ? stdRes.data : stdRes.data.standings);
+        const data = Array.isArray(stdRes.data) ? stdRes.data : stdRes.data;
+        setStandings(Array.isArray(data) ? data : data.standings);
+        if (!Array.isArray(data) && data.completedGameweeks) {
+          setCompletedGameweeks(data.completedGameweeks);
+          setSelectedGameweekId(data.completedGameweeks.at(-1)?.id ?? null);
+        }
       }
 
       // 3. Fetch user's squads if logged in
@@ -133,10 +146,15 @@ export default function LeagueDetailPage({
 
         const stdRes = await api.get<{
           success: boolean;
-          data: LeagueStandingsEntry[] | { standings: LeagueStandingsEntry[] };
+          data: LeagueStandingsEntry[] | { standings: LeagueStandingsEntry[]; completedGameweeks?: CompletedGameweek[] };
         }>(`/api/v1/leagues/${leagueId}/standings`);
         if (!cancelled && stdRes?.data) {
-          setStandings(Array.isArray(stdRes.data) ? stdRes.data : stdRes.data.standings);
+          const data = stdRes.data;
+          setStandings(Array.isArray(data) ? data : data.standings);
+          if (!Array.isArray(data) && data.completedGameweeks) {
+            setCompletedGameweeks(data.completedGameweeks);
+            setSelectedGameweekId(data.completedGameweeks.at(-1)?.id ?? null);
+          }
         }
 
         if (isAuthenticated) {
@@ -168,6 +186,37 @@ export default function LeagueDetailPage({
       cancelled = true;
     };
   }, [leagueId, isAuthenticated]);
+
+  useEffect(() => {
+    if (selectedGameweekId === null) return;
+    const cached = historicalCache.current.get(selectedGameweekId);
+    if (cached) {
+      setHistoricalStandings(cached);
+      setHistoricalLoading(false);
+      setHistoricalError(null);
+      return;
+    }
+    let cancelled = false;
+    setHistoricalLoading(true);
+    setHistoricalError(null);
+    setHistoricalStandings([]);
+    api.get<{ success: boolean; data: { standings: LeagueStandingsEntry[] } }>(
+      `/api/v1/leagues/${leagueId}/standings?gameweekId=${selectedGameweekId}`
+    ).then((response) => {
+      if (!cancelled && response?.data) {
+        historicalCache.current.set(selectedGameweekId, response.data.standings);
+        setHistoricalStandings(response.data.standings);
+      }
+    }).catch((error: unknown) => {
+      if (!cancelled) {
+        console.error("Failed to load historical standings:", error);
+        setHistoricalError("Could not load standings for this gameweek. Move the slider to try another week.");
+      }
+    }).finally(() => {
+      if (!cancelled) setHistoricalLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [leagueId, selectedGameweekId]);
 
   useEffect(() => {
     if (!league || league.entryFee <= 0) return;
@@ -314,10 +363,10 @@ export default function LeagueDetailPage({
             <div className="flex items-center gap-2 mb-1.5">
               <LeagueStatusBadge status={league.status} />
               {league.isPrivate && (
-                <Badge variant="neutral" className="gap-1">
+                <span className="inline-flex items-center gap-1 text-xs text-slate-400">
                   <IconShield className="w-3 h-3" />
                   <span>Private</span>
-                </Badge>
+                </span>
               )}
               <span className="text-xs font-mono text-slate-400">
                 GW {league.startGameweekId} &rarr; GW {league.endGameweekId}
@@ -500,19 +549,46 @@ export default function LeagueDetailPage({
               </div>
             </div>
 
-            <StandingsTable
-              standings={displayStandings}
-              entryFee={league.entryFee}
-              prizePool={league.prizePool}
-              currentUserId={user?.id}
-              livePoints={livePoints}
-              rankChanges={rankChanges}
-              onSelectEntry={livePoints ? setLiveSquadUserId : undefined}
-            />
+            <ErrorBoundary
+              name="LeagueStandings"
+              fallbackTitle="Standings table encountered an error"
+              onReset={loadLeagueData}
+              resetKeys={[leagueId, selectedGameweekId]}
+            >
+              {completedGameweeks.length > 0 && selectedGameweekId !== null ? (
+                <HistoricalStandingsScrubber
+                  gameweeks={completedGameweeks}
+                  selectedGameweekId={selectedGameweekId}
+                  standings={historicalStandings}
+                  loading={historicalLoading}
+                  error={historicalError}
+                  onSelectGameweek={setSelectedGameweekId}
+                  entryFee={league.entryFee}
+                  prizePool={league.prizePool}
+                  currentUserId={user?.id}
+                />
+              ) : (
+                <StandingsTable
+                  standings={displayStandings}
+                  entryFee={league.entryFee}
+                  prizePool={league.prizePool}
+                  currentUserId={user?.id}
+                  livePoints={livePoints}
+                  rankChanges={rankChanges}
+                  onSelectEntry={livePoints ? setLiveSquadUserId : undefined}
+                />
+              )}
+            </ErrorBoundary>
           </div>
 
           {user && (isMember || isCreator) && (
-            <LeagueChat leagueId={league.id} currentUser={{ id: user.id, username: user.username }} />
+            <ErrorBoundary
+              name="LeagueChat"
+              fallbackTitle="League chat temporarily unavailable"
+              resetKeys={[league.id]}
+            >
+              <LeagueChat leagueId={league.id} currentUser={{ id: user.id, username: user.username }} />
+            </ErrorBoundary>
           )}
         </div>
 
@@ -590,7 +666,11 @@ export default function LeagueDetailPage({
 
       {/* Live squad points */}
       {liveSquadEntry && (
-        <LiveSquadModal entry={liveSquadEntry} onClose={() => setLiveSquadUserId(null)} />
+        <LiveSquadModal
+          entry={liveSquadEntry}
+          events={snapshot?.events}
+          onClose={() => setLiveSquadUserId(null)}
+        />
       )}
 
       {/* USDC Payment Modal */}

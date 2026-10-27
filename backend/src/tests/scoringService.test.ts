@@ -6,6 +6,10 @@ import {
   FormationCounts,
 } from "../services/scoring/scoringService.js";
 import { Position, SQUAD_RULES } from "../types/index.js";
+import {
+  LEAGUE_SCORING_PRESETS,
+  parseLeagueScoringConfig,
+} from "../models/leagueScoringConfig.js";
 
 describe("ScoringService Domain Rules", () => {
   // Lineup helper: 4-4-2 setup
@@ -31,6 +35,103 @@ describe("ScoringService Domain Rules", () => {
       { playerId: 15, position: Position.FWD, isStarter: false, isCaptain: false, isViceCaptain: false, positionOrder: 15 }, // 3rd bench outfield
     ];
   }
+
+  it("calculates parallel leagues independently using their selected rule sets", async () => {
+    const lineup = createLineup();
+    const statsMap = new Map([
+      [
+        1,
+        {
+          minutes: 90,
+          totalPoints: 99,
+          goals: 1,
+          assists: 1,
+          saves: 3,
+          penaltiesSaved: 1,
+          yellowCards: 1,
+          bonus: 3,
+        },
+      ],
+    ]);
+
+    const [classic, allAttack] = await Promise.all([
+      Promise.resolve(
+        ScoringService.calculateLineupScore(lineup, statsMap, {
+          scoringConfig: LEAGUE_SCORING_PRESETS.CLASSIC_FPL,
+        })
+      ),
+      Promise.resolve(
+        ScoringService.calculateLineupScore(lineup, statsMap, {
+          scoringConfig: LEAGUE_SCORING_PRESETS.ALL_ATTACK,
+        })
+      ),
+    ]);
+
+    assert.equal(classic.details.find((detail) => detail.playerId === 1)?.rawPoints, 19);
+    assert.equal(classic.totalPoints, 38);
+    assert.equal(allAttack.details.find((detail) => detail.playerId === 1)?.rawPoints, 23);
+    assert.equal(allAttack.totalPoints, 46);
+  });
+
+  it("rejects negative attacking rewards and accepts preset configs", () => {
+    const invalidConfig = structuredClone(LEAGUE_SCORING_PRESETS.CLASSIC_FPL);
+    invalidConfig.goals[Position.FWD] = -1;
+    assert.throws(
+      () => parseLeagueScoringConfig(invalidConfig),
+      /goals\.FWD must be an integer between 0 and 100/
+    );
+    assert.equal(
+      parseLeagueScoringConfig(LEAGUE_SCORING_PRESETS.DEFENSIVE_MASTERMIND)
+        .cleanSheets[Position.GKP],
+      8
+    );
+
+    invalidConfig.goals[Position.FWD] = 4;
+    invalidConfig.yellowCards = 1;
+    assert.throws(
+      () => parseLeagueScoringConfig(invalidConfig),
+      /yellowCards must be an integer between -100 and 0/
+    );
+  });
+
+  it("applies appearance, defensive, and disciplinary event weights", () => {
+    const lineup = createLineup();
+    const statsMap = new Map([
+      [
+        1,
+        {
+          minutes: 45,
+          totalPoints: 100,
+          goals: 1,
+          cleanSheet: true,
+          goalsConceded: 2,
+          saves: 3,
+          penaltiesSaved: 1,
+          penaltiesMissed: 1,
+          yellowCards: 1,
+          redCards: 1,
+          ownGoals: 1,
+          bonus: 1,
+        },
+      ],
+    ]);
+
+    const result = ScoringService.calculateLineupScore(lineup, statsMap, {
+      scoringConfig: LEAGUE_SCORING_PRESETS.CLASSIC_FPL,
+    });
+    assert.equal(result.details.find((detail) => detail.playerId === 1)?.rawPoints, 9);
+    assert.equal(result.totalPoints, 18);
+  });
+
+  it("retains the existing precomputed-total-points path without a config", () => {
+    const lineup = createLineup();
+    const statsMap = new Map<number, { minutes: number; totalPoints: number }>([
+      [1, { minutes: 90, totalPoints: 6 }],
+    ]);
+    const result = ScoringService.calculateLineupScore(lineup, statsMap);
+    assert.equal(result.details.find((detail) => detail.playerId === 1)?.rawPoints, 6);
+    assert.equal(result.totalPoints, 12);
+  });
 
   it("should calculate standard player points and apply 2x captain multiplier", () => {
     const lineup = createLineup();

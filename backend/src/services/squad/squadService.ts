@@ -36,6 +36,13 @@ export class SquadForbiddenError extends Error {
   }
 }
 
+export class SquadRevisionConflictError extends Error {
+  constructor(public readonly currentRevision: Date) {
+    super("This squad changed on the server while your offline edits were pending");
+    this.name = "SquadRevisionConflictError";
+  }
+}
+
 /** A transfer pairing: one player sold for one player of the same position bought. */
 export interface TransferPair {
   playerOutId: number;
@@ -56,6 +63,9 @@ export class ChipUnavailableError extends Error {
 /** Lineup snapshot stored when Free Hit is played, restored after the gameweek. */
 interface FreeHitSnapshot {
   budgetRemaining: string;
+  freeTransfers: number;
+  freeTransfersGameweekId: number | null;
+  transferCost?: number | null;
   players: Array<{
     playerId: number;
     isCaptain: boolean;
@@ -64,6 +74,13 @@ interface FreeHitSnapshot {
     positionOrder: number;
     purchasePrice: string;
   }>;
+}
+
+export class ChipCancellationLockedError extends Error {
+  constructor() {
+    super("A chip cannot be cancelled after the gameweek deadline");
+    this.name = "ChipCancellationLockedError";
+  }
 }
 
 /**
@@ -287,6 +304,16 @@ export class SquadService {
       });
       if (!squad) {
         throw new SquadValidationError(`Squad ${squadId} not found`);
+      }
+
+      if (input.expectedUpdatedAt !== undefined) {
+        const expectedTime = Date.parse(input.expectedUpdatedAt);
+        if (!Number.isFinite(expectedTime)) {
+          throw new SquadValidationError("expectedUpdatedAt must be a valid timestamp");
+        }
+        if (squad.updatedAt.getTime() !== expectedTime) {
+          throw new SquadRevisionConflictError(squad.updatedAt);
+        }
       }
 
       // The earliest unfinished gameweek governs every edit: once its deadline
@@ -534,42 +561,52 @@ export class SquadService {
       }),
     ]);
 
-    if (usedThisGameweek) {
+    if (usedThisGameweek && !usedThisGameweek.cancelledAt) {
       throw new ChipUnavailableError(
         `A chip (${usedThisGameweek.chipType}) is already active for ${gameweek.name}`
       );
     }
-    if (usedThisSeason) {
+    if (usedThisSeason && !usedThisSeason.cancelledAt) {
       throw new ChipUnavailableError(
         `${chipType} has already been used this season`
       );
     }
 
-    let previousLineup: FreeHitSnapshot | undefined;
-    if (chipType === ChipType.FREE_HIT) {
-      previousLineup = {
-        budgetRemaining: squad.budgetRemaining.toString(),
-        players: squad.players.map((sp: any) => ({
-          playerId: sp.playerId,
-          isCaptain: sp.isCaptain,
-          isViceCaptain: sp.isViceCaptain,
-          isStarter: sp.isStarter,
-          positionOrder: sp.positionOrder,
-          purchasePrice: sp.purchasePrice.toString(),
-        })),
-      };
-    }
-
     try {
       return await this.db.$transaction(async (tx: any) => {
-        const usage = await tx.squadChipUsage.create({
-          data: {
+        await lockSquadForUpdate(tx, squadId);
+        const currentSquad = await tx.squad.findUnique({ where: { id: squadId }, include: { players: true } });
+        if (!currentSquad) throw new SquadValidationError(`Squad ${squadId} not found`);
+        let previousLineup: FreeHitSnapshot | undefined;
+        if (chipType === ChipType.FREE_HIT || chipType === ChipType.WILDCARD) {
+          const previousScore = tx.squadGameweekScore
+            ? await tx.squadGameweekScore.findUnique({ where: { squadId_gameweekId: { squadId, gameweekId } } })
+            : null;
+          previousLineup = {
+            budgetRemaining: currentSquad.budgetRemaining.toString(),
+            freeTransfers: currentSquad.freeTransfers,
+            freeTransfersGameweekId: currentSquad.freeTransfersGameweekId,
+            transferCost: previousScore?.transferCost ?? null,
+            players: currentSquad.players.map((sp: any) => ({
+              playerId: sp.playerId,
+              isCaptain: sp.isCaptain,
+              isViceCaptain: sp.isViceCaptain,
+              isStarter: sp.isStarter,
+              positionOrder: sp.positionOrder,
+              purchasePrice: sp.purchasePrice.toString(),
+            })),
+          };
+        }
+        const usage = await tx.squadChipUsage.upsert({
+          where: { squadId_gameweekId: { squadId, gameweekId } },
+          create: {
             squadId,
             gameweekId,
             chipType,
             season: gameweek.season,
             previousLineup,
           },
+          update: { chipType, season: gameweek.season, previousLineup, cancelledAt: null, revertedAt: null },
         });
         // Authoritative deadline check at commit time: a chip that raced the deadline is rolled back
         await assertGameweeksOpen(tx, [gameweekId]);
@@ -586,6 +623,56 @@ export class SquadService {
     }
   }
 
+  /** Cancels a Free Hit or Wildcard and restores the state captured at activation. */
+  public async cancelChip(squadId: string, gameweekId: number, requestingUserId: string) {
+    const squad = await this.db.squad.findUnique({ where: { id: squadId } });
+    if (!squad) throw new SquadValidationError(`Squad ${squadId} not found`);
+    if (squad.userId !== requestingUserId) throw new SquadForbiddenError();
+
+    try {
+      return await this.db.$transaction(async (tx: any) => {
+        await lockSquadForUpdate(tx, squadId);
+        const usage = await tx.squadChipUsage.findUnique({
+          where: { squadId_gameweekId: { squadId, gameweekId } },
+        });
+        if (!usage || usage.cancelledAt || ![ChipType.FREE_HIT, ChipType.WILDCARD].includes(usage.chipType) || !usage.previousLineup) {
+          throw new ChipUnavailableError("Only an active Free Hit or Wildcard can be cancelled");
+        }
+        try {
+          await assertGameweeksOpen(tx, [gameweekId]);
+        } catch (error) {
+          if (error instanceof SquadLockedError) throw new ChipCancellationLockedError();
+          throw error;
+        }
+        const snapshot = usage.previousLineup as FreeHitSnapshot;
+        await tx.squadPlayer.deleteMany({ where: { squadId } });
+        await tx.squadPlayer.createMany({ data: snapshot.players.map((player) => ({ squadId, ...player })) });
+        await tx.squad.update({
+          where: { id: squadId },
+          data: {
+            budgetRemaining: snapshot.budgetRemaining,
+            freeTransfers: snapshot.freeTransfers,
+            freeTransfersGameweekId: snapshot.freeTransfersGameweekId,
+          },
+        });
+        if (snapshot.transferCost !== null && snapshot.transferCost !== undefined) {
+          await tx.squadGameweekScore.update({
+            where: { squadId_gameweekId: { squadId, gameweekId } },
+            data: { transferCost: snapshot.transferCost },
+          });
+        }
+        await tx.squadChipCancellation.create({
+          data: { usageId: usage.id, squadId, gameweekId, chipType: usage.chipType, snapshot },
+        });
+        return tx.squadChipUsage.update({ where: { id: usage.id }, data: { cancelledAt: new Date() } });
+      }, { ...DEADLINE_TRANSACTION_OPTIONS, isolationLevel: "Serializable" });
+    } catch (error: any) {
+      if (error instanceof ChipCancellationLockedError || error instanceof ChipUnavailableError) throw error;
+      if (error?.code === "P2034") throw new ChipCancellationLockedError();
+      throw error;
+    }
+  }
+
   /**
    * Restores the lineup saved when Free Hit was played for a completed gameweek.
    * Returns false when there is nothing to revert (no Free Hit, or already reverted).
@@ -597,6 +684,7 @@ export class SquadService {
     if (
       !usage ||
       usage.chipType !== ChipType.FREE_HIT ||
+      usage.cancelledAt ||
       usage.revertedAt ||
       !usage.previousLineup
     ) {

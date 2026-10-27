@@ -1,3 +1,4 @@
+import { BoundedSocketSender } from "./boundedSocket.js";
 import type { IncomingMessage, Server } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket, RawData } from "ws";
@@ -53,10 +54,11 @@ interface ClientFrame {
   clientId?: unknown;
 }
 
+const senders = new WeakMap<WebSocket, BoundedSocketSender>();
 function send(socket: WebSocket, payload: unknown): void {
-  if (socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify(payload));
-  }
+  let sender = senders.get(socket);
+  if (!sender) { sender = new BoundedSocketSender(socket); senders.set(socket, sender); }
+  sender.send(payload);
 }
 
 function rejectUpgrade(socket: Duplex, status: number, reason: string): void {

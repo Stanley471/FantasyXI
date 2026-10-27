@@ -35,9 +35,19 @@ function createMockDb(overrides?: any) {
     ...overrides,
   };
 
-  return {
+  const db = {
     state,
+    coordinatedTransaction: {
+      findUnique: async () => null,
+      upsert: async ({ create }: any) => create,
+      updateMany: async () => ({ count: 1 }),
+    },
     league: {
+      updateMany: async ({ where, data }: any) => {
+        const league = state.leagues.get(where.id);
+        if (league.status === LeagueStatus.COMPLETED) return { count: 0 };
+        Object.assign(league, data); return { count: 1 };
+      },
       findUnique: async ({ where }: any) => {
         const league = state.leagues.get(where.id);
         if (!league) return null;
@@ -158,8 +168,9 @@ function createMockDb(overrides?: any) {
         return { count };
       },
     },
-    $transaction: async (ops: any[]) => Promise.all(ops),
+    $transaction: async (ops: any) => typeof ops === "function" ? ops(db) : Promise.all(ops),
   };
+  return db;
 }
 
 function createMockStellar(overrides?: any) {

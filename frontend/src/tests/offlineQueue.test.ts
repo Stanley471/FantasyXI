@@ -1,5 +1,6 @@
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { ApiError } from "../lib/api.js";
 import {
   QueuedSquadMutation,
   MemoryQueueStorage,
@@ -14,6 +15,7 @@ import {
   incrementMutationRetry,
   clearQueuedMutations,
   syncQueuedMutations,
+  updateQueuedMutationRevision,
   MAX_QUEUE_RETRIES,
 } from "../lib/offlineQueue.js";
 
@@ -310,6 +312,34 @@ describe("Offline Squad Mutation Queue & Background Sync (Issue #214)", () => {
       assert.equal(await getQueuedMutationCount(), 2);
       await clearQueuedMutations();
       assert.equal(await getQueuedMutationCount(), 0);
+    });
+
+    it("preserves a server revision conflict for explicit user resolution", async () => {
+      const mutation = await enqueueSquadMutation({
+        squadId: "squad-1",
+        userId: "manager-1",
+        payload: { name: "Offline XI", players: [] },
+      });
+      const mockApi = {
+        put: async () => {
+          throw new ApiError(409, "Squad changed on the server", { data: { revision: "2026-10-20T10:00:00.000Z" } });
+        },
+        post: async () => ({ success: true }),
+      };
+
+      const result = await syncQueuedMutations(mockApi as any);
+      const conflicted = await memoryStorage.get(mutation.id);
+
+      assert.equal(result.conflicts.length, 1);
+      assert.equal(result.conflicts[0].serverRevision, "2026-10-20T10:00:00.000Z");
+      assert.equal(conflicted?.status, "conflict");
+      assert.equal(await getQueuedMutationCount(), 1);
+
+      await updateQueuedMutationRevision(mutation.id, "2026-10-20T10:00:00.000Z");
+      const retried = await memoryStorage.get(mutation.id);
+      assert.equal(retried?.status, "pending");
+      assert.equal(retried?.baseRevision, "2026-10-20T10:00:00.000Z");
+      assert.equal(retried?.serverRevision, undefined);
     });
   });
 });

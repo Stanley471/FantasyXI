@@ -174,6 +174,7 @@ export interface Squad {
   players?: SquadPlayer[];
   chipUsages?: SquadChipUsage[];
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface SquadPlayer {
@@ -234,6 +235,8 @@ export type LeagueInvitationState = "ACTIVE" | "USED" | "REVOKED" | "EXPIRED";
 export interface LeagueInvitation {
   id: string;
   expiresAt: string;
+  maxUses: number;
+  usesCount: number;
   usedAt: string | null;
   revokedAt: string | null;
   createdAt: string;
@@ -247,6 +250,8 @@ export interface CreatedLeagueInvitation {
   leagueId: string;
   token: string;
   expiresAt: string;
+  maxUses: number;
+  usesCount: number;
   createdAt: string;
 }
 
@@ -278,6 +283,7 @@ export interface LeagueMember {
 
 export interface LeagueStandingsEntry {
   rank: number;
+  rankChange?: number | null;
   userId: string;
   username: string;
   squadId: string;
@@ -329,9 +335,11 @@ export interface GameweekPerformance {
   gameweekName: string;
   deadline: string;
   points: number;
+  rank: number | null;
   benchPoints: number;
   captainPoints: number;
   transferCost: number;
+  transferCount: number;
   cumulativePoints: number;
   rollingAverage: number;
   /** Mean score of every squad on the platform that gameweek */

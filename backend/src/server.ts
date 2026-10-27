@@ -1,21 +1,26 @@
+import { eventFanout } from "./services/live/eventFanout.js";
+import { attachLiveSocketServer, LIVE_SOCKET_PATH } from "./realtime/liveSocketServer.js";
+import { initRedisChat } from "./services/chat/chatService.js";
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import app from "./app.js";
 import { startJobQueue, stopJobQueue, getQueueHealth } from "./queues/jobQueue.js";
 import { apiRateLimiter } from "./middleware/rateLimiter.js";
+import { optionalAuth } from "./middleware/authMiddleware.js";
 import { errorHandler } from "./middleware/error.middleware.js";
 import { requireAuth, requirePermission } from "./middleware/authMiddleware.js";
 import { Permission } from "./types/index.js";
 import { ApolloServer } from "@apollo/server";
 import { expressMiddleware } from "@as-integrations/express5";
 import DataLoader from "dataloader";
-import { prisma, getReadReplicaStatus } from "./config/db.js";
-import { closeRedisClient } from "./config/redis.js";
+import { prisma, getReadReplicaStatus, getSlowQueryCount } from "./config/db.js";
+import { closeRedisClient, getRedisClient } from "./config/redis.js";
 import { preferReplicaReads } from "./middleware/readConsistency.js";
 import { financialAuditLog } from "./services/audit/financialAuditLog.js";
 import { resolvers } from "./graphql/resolvers.js";
 import { typeDefs } from "./graphql/schema.js";
+import { createComplexityPlugin } from "./graphql/complexityPlugin.js";
 import { attachChatSocketServer } from "./realtime/chatSocketServer.js";
 import {
   attachNotificationSocketServer,
@@ -26,10 +31,17 @@ import {
   CoordinatedTransactionStatus,
 } from "./services/financial/transactionCoordinatorService.js";
 import { financialService } from "./services/financial/financialService.js";
+import { jwtKeyRotationService } from "./services/auth/jwtKeyRotationService.js";
+import { fplClient } from "./services/fpl/fplClient.js";
+import { partitionRotationWorker } from "./workers/partitionRotationWorker.js";
 
 dotenv.config();
 
-const apolloServer = new ApolloServer({ typeDefs, resolvers });
+const apolloServer = new ApolloServer({
+  typeDefs,
+  resolvers,
+  plugins: [createComplexityPlugin(getRedisClient())],
+});
 
 // Trust reverse proxies (Cloudflare, Nginx, ALB) for accurate client IP rate limiting
 app.set("trust proxy", 1);
@@ -44,8 +56,9 @@ app.use(
     credentials: true,
   })
 );
-app.use(express.json());
+app.use(optionalAuth);
 app.use(apiRateLimiter);
+app.use(express.json());
 
 // ============================================================
 // Routes
@@ -88,6 +101,19 @@ app.get(
 
 // Replica topology and lag are operational data, like queue health
 app.get(
+  "/api/health/database",
+  requireAuth,
+  requirePermission(Permission.SYSTEM_HEALTH_READ),
+  (_req: Request, res: Response) => {
+    res.json({
+      success: true,
+      data: { slowQueriesLastMinute: getSlowQueryCount() },
+      timestamp: new Date().toISOString(),
+    });
+  },
+);
+
+app.get(
   "/api/health/replicas",
   requireAuth,
   requirePermission(Permission.SYSTEM_HEALTH_READ),
@@ -100,6 +126,20 @@ app.get(
         appRegion: process.env.APP_REGION ?? null,
         replicas,
       },
+      timestamp: new Date().toISOString(),
+    });
+  }
+);
+
+// FPL upstream circuit breaker and cache-tier metrics (issue #275), like queue health
+app.get(
+  "/api/health/fpl",
+  requireAuth,
+  requirePermission(Permission.SYSTEM_HEALTH_READ),
+  (_req: Request, res: Response) => {
+    res.json({
+      success: true,
+      data: { degraded: fplClient.isDegraded(), ...fplClient.getTelemetry() },
       timestamp: new Date().toISOString(),
     });
   }
@@ -135,7 +175,15 @@ function startTransactionCoordinator(): void {
   }
 }
 
+let liveSocketServer: ReturnType<typeof attachLiveSocketServer> | null = null;
+let chatAdapter: Awaited<ReturnType<typeof initRedisChat>> = null;
+
 async function startServer(): Promise<void> {
+  if (process.env.DATABASE_URL && process.env.PARTITION_ROTATION_ENABLED !== "false") {
+    partitionRotationWorker.start();
+  }
+  await eventFanout.start();
+  chatAdapter = await initRedisChat();
   await apolloServer.start();
   app.use(
     "/graphql",
@@ -185,8 +233,9 @@ async function startServer(): Promise<void> {
   });
 
   // Real-time league chat and user notifications share the HTTP server's port
-  chatSocketServer = attachChatSocketServer(httpServer, { passthroughPaths: [NOTIFICATION_SOCKET_PATH] });
+  chatSocketServer = attachChatSocketServer(httpServer, { passthroughPaths: [NOTIFICATION_SOCKET_PATH, LIVE_SOCKET_PATH] });
   notificationSocketServer = attachNotificationSocketServer(httpServer);
+  liveSocketServer = attachLiveSocketServer(httpServer);
   startTransactionCoordinator();
 }
 
@@ -196,12 +245,17 @@ startServer().catch((error) => {
 });
 
 process.on("SIGTERM", () => {
+  partitionRotationWorker.stop();
   // Persist buffered financial audit entries before exiting
   stopJobQueue()
     .finally(() => transactionCoordinator.stop())
+    .finally(() => jwtKeyRotationService.stop())
     .finally(() => chatSocketServer?.close())
     .finally(() => notificationSocketServer?.close())
     .finally(() => financialAuditLog.close())
+    .finally(() => liveSocketServer?.close())
+    .finally(() => chatAdapter?.close())
+    .finally(() => eventFanout.close())
     .finally(() => closeRedisClient())
     .finally(() => process.exit(0));
 });

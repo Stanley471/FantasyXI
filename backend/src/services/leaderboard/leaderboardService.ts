@@ -1,5 +1,13 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { prisma } from "../../config/db.js";
+export {
+  LiveProvisionalLeaderboardService,
+  liveProvisionalLeaderboardService,
+  type LiveMatchEvent,
+  type LiveLeaderboardDeltaDiff,
+  type ProvisionalSquadRecord,
+  type ProvisionalLeaderboardRankEntry,
+} from "../live/liveProvisionalLeaderboardService.js";
 
 /**
  * Global Leaderboard (read-only).

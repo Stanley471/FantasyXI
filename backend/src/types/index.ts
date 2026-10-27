@@ -8,6 +8,8 @@
  * API Resource shapes combined.
  */
 
+import type { PublicKeyCredentialRequestOptionsJSON } from "@simplewebauthn/server";
+
 // ============================================================
 // Enums — must match the Prisma schema exactly
 // ============================================================
@@ -24,6 +26,10 @@ import {
   ChipType,
   UserRole,
 } from "@prisma/client";
+import type {
+  LeagueScoringConfig,
+  ScoringPreset,
+} from "../models/leagueScoringConfig.js";
 
 export { Role, Permission } from "../config/permissions.js";
 import type { Role } from "../config/permissions.js";
@@ -135,6 +141,14 @@ export type RegisterRequest = RegisterInput;
 export interface LoginInput {
   email: string;
   password: string;
+  /** Browser entropy fingerprint used for device recognition (issue #331); optional for API clients */
+  deviceFingerprint?: string;
+}
+
+/** POST /api/v1/auth/login/verify input: the step-up code emailed to the account owner */
+export interface LoginChallengeInput {
+  challengeId: string;
+  code: string;
 }
 
 /** Backwards-compatible alias */
@@ -144,7 +158,27 @@ export type LoginRequest = LoginInput;
 export interface AuthResult {
   user: SafeUser;
   token: string;
+  refreshToken?: string;
 }
+
+/** Returned instead of a token when a login from a new device must be verified (issue #331) */
+export interface LoginChallenge {
+  challengeRequired: true;
+  challengeId: string;
+  method: "EMAIL_OTP";
+  expiresAt: string;
+}
+
+/** Returned instead of a token when a password login must be confirmed with one of the account's passkeys (issue #273) */
+export interface PasskeyLoginChallenge {
+  challengeRequired: true;
+  method: "WEBAUTHN";
+  /** Options for navigator.credentials.get(), limited to the account's passkeys */
+  options: PublicKeyCredentialRequestOptionsJSON;
+  expiresAt: string;
+}
+
+export type LoginResult = AuthResult | LoginChallenge | PasskeyLoginChallenge;
 
 /** Standard auth API response wrapper */
 export interface AuthResponse {
@@ -202,6 +236,7 @@ export interface CreateSquadInput {
 export interface UpdateSquadInput {
   name?: string;
   players: SquadPlayerSelection[];
+  expectedUpdatedAt?: string;
 }
 
 export interface PlayerFilterQuery {
@@ -231,7 +266,11 @@ export interface CreateLeagueInput {
   endGameweekId: number;
   squadId: string; // Creator's initial squad
   scoringType?: ScoringType; // default CLASSIC
+  scoringConfig?: LeagueScoringConfig;
+  scoringPreset?: ScoringPreset;
   isPrivate?: boolean; // default false: private leagues are invitation-only
+  payoutPreset?: "standard" | "winner-takes-all" | "top-five" | "custom";
+  customPrizeSplitsBps?: number[];
 }
 
 export interface CreateLeagueTierGroupInput {
@@ -290,6 +329,7 @@ export interface JoinLeagueInput {
 
 export interface LeagueStandingsEntry {
   rank: number;
+  rankChange?: number | null;
   userId: string;
   username: string;
   squadId: string;
@@ -355,6 +395,8 @@ export interface PaymentSubmissionInput {
 }
 
 export interface PaymentVerificationResult {
+  /** Verification unavailable; do not turn a transport failure into a payment failure. */
+  retryable?: boolean;
   success: boolean;
   txHash: string;
   ledgerSeq?: number;
@@ -386,6 +428,7 @@ export interface SettlementPlan {
   platformFee: number;
   netPrizePool: number;
   winners: SettlementWinner[];
+  distributionBps?: number[];
   canSettle: boolean;
   proofHash?: string;
   unsettledReason?: string;

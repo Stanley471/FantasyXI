@@ -34,6 +34,46 @@ export interface DispatchOptions {
   httpFetch?: (url: string, init: RequestInit) => Promise<Response>;
 }
 
+export const WEBHOOK_DUPLICATE_SUBSCRIPTION_MESSAGE =
+  "Webhook subscription already exists for this URL and event";
+
+export class DuplicateWebhookSubscriptionError extends Error {
+  constructor() {
+    super(WEBHOOK_DUPLICATE_SUBSCRIPTION_MESSAGE);
+    this.name = "DuplicateWebhookSubscriptionError";
+  }
+}
+
+/** Canonicalizes the URL parts that should not distinguish webhook targets. */
+export function normalizeWebhookUrl(value: string): string {
+  const url = new URL(value.trim());
+  url.protocol = url.protocol.toLowerCase();
+  url.hostname = url.hostname.toLowerCase();
+  if (url.pathname !== "/") {
+    url.pathname = url.pathname.replace(/\/+$/, "") || "/";
+  }
+  return url.toString();
+}
+
+/** Finds an active same-user subscription and rejects overlapping events. */
+export function findExistingWebhookSubscription(
+  endpoints: WebhookEndpoint[],
+  userId: string,
+  normalizedUrl: string,
+  events: string[]
+): WebhookEndpoint | undefined {
+  const existing = endpoints.find(
+    (endpoint) =>
+      endpoint.isActive &&
+      endpoint.userId === userId &&
+      normalizeWebhookUrl(endpoint.url) === normalizedUrl
+  );
+  if (existing && events.some((event) => existing.events.includes(event))) {
+    throw new DuplicateWebhookSubscriptionError();
+  }
+  return existing;
+}
+
 /**
  * Calculates exponential backoff with full jitter to avoid thundering herd.
  */

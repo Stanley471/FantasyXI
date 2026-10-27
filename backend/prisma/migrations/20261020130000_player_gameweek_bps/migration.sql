@@ -1,0 +1,1 @@
+ALTER TABLE "player_gameweek_stats" ADD COLUMN "bps" INTEGER NOT NULL DEFAULT 0;

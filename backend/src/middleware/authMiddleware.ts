@@ -1,3 +1,4 @@
+import { sessionRegistryService } from "../services/auth/sessionRegistryService.js";
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { verifyAccessToken } from "../config/jwt.js";
@@ -25,6 +26,7 @@ declare global {
   namespace Express {
     interface Request {
       user?: AuthUser;
+      sessionId?: string;
     }
   }
 }
@@ -34,11 +36,11 @@ declare global {
  * service API key in the X-Service-Key header for automated callers.
  * Rejects unauthenticated requests with HTTP 401.
  */
-export function requireAuth(
+export async function requireAuth(
   req: Request,
   res: Response,
   next: NextFunction
-): void {
+): Promise<void> {
   const serviceKey = req.headers[SERVICE_KEY_HEADER];
   if (serviceKey !== undefined) {
     const service =
@@ -92,6 +94,21 @@ export function requireAuth(
         message: "Invalid authentication token payload.",
       });
       return;
+    }
+
+    if (payload.sessionId) {
+      const isValid = await sessionRegistryService.isSessionValid(
+        payload.sessionId as string,
+        payload.userId
+      );
+      if (!isValid) {
+        res.status(401).json({
+          success: false,
+          message: "Session has been revoked or expired.",
+        });
+        return;
+      }
+      req.sessionId = payload.sessionId as string;
     }
 
     req.user = {
@@ -275,11 +292,11 @@ export const requirePermission = createPermissionGuard();
  * Optional authentication middleware.
  * Attaches req.user if a valid token is present, but allows unauthenticated requests through.
  */
-export function optionalAuth(
+export async function optionalAuth(
   req: Request,
   _res: Response,
   next: NextFunction
-): void {
+): Promise<void> {
   const authHeader = req.headers.authorization;
 
   if (!authHeader) {

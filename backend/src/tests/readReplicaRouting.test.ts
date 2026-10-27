@@ -85,8 +85,8 @@ describe("Multi-region read replicas", () => {
     it("applies safe defaults", () => {
       const config = loadReadReplicaConfig({ APP_REGION: "eu-west-1", REPLICA_MAX_LAG_MS: "nope" } as any);
       assert.equal(config.appRegion, "eu-west-1");
-      assert.equal(config.maxLagMs, 5_000);
-      assert.equal(config.healthCheckIntervalMs, 10_000);
+      assert.equal(config.maxLagMs, 200);
+      assert.equal(config.healthCheckIntervalMs, 1_000);
       assert.deepEqual(config.replicas, []);
     });
   });
@@ -327,5 +327,41 @@ describe("Multi-region read replicas", () => {
       assert.equal(contextFor(preferReplicaReads, "POST", { "x-read-consistency": "STRONG" }).allowReplica, false);
       assert.equal(contextFor(preferReplicaReads, "POST").allowReplica, true);
     });
+  });
+});
+
+describe("deadline read consistency (#317)", () => {
+  it("pins reads across requests for five seconds after a user mutation", async () => {
+    const replica = fakeReplica();
+    const router = await healthyRouter("eu", { eu: replica }, 200);
+    let now = 0;
+    const timestamps = new Map<string, number>();
+    const mutations = {
+      mark: async (id: string) => { timestamps.set(id, now); },
+      recent: async (id: string) => now - (timestamps.get(id) ?? -Infinity) < 5000,
+    };
+    const query = primaryQuery();
+    const context = (user: string, fn: () => Promise<unknown>) => readConsistencyStorage.run({ allowReplica: true, hasWritten: false, userId: () => user, mutations }, fn);
+    await context("alice", () => routeOperation(router, { model: "League", operation: "update", args: {}, query: query.query }));
+    now = 4999;
+    assert.deepEqual(await context("alice", () => routeOperation(router, { model: "League", operation: "findMany", args: {}, query: query.query })), [{ id: "from-primary" }]);
+    assert.deepEqual(await context("bob", () => routeOperation(router, { model: "League", operation: "findMany", args: {}, query: query.query })), [{ id: "from-replica" }]);
+    now = 5000;
+    assert.deepEqual(await context("alice", () => routeOperation(router, { model: "League", operation: "findMany", args: {}, query: query.query })), [{ id: "from-replica" }]);
+  });
+  it("routes 200ms lag to replica and 201ms to primary, then recovers", async () => {
+    const replica = fakeReplica({ lagMs: 200 });
+    const router = await healthyRouter("eu", { eu: replica }, 200);
+    const primary = primaryQuery();
+    const read = () => runWithReplicaReads(() => routeOperation(router, { model: "League", operation: "findMany", args: {}, query: primary.query }));
+    await read(); assert.equal(primary.calls.length, 0);
+    replica.state.lagMs = 201; await router.checkAll(); await read(); assert.equal(primary.calls.length, 1);
+    replica.state.lagMs = 0; await router.checkAll(); await read(); assert.equal(replica.served.length, 2);
+  });
+  it("rejects stale health samples instead of trusting a disconnected replica", async () => {
+    const replica = fakeReplica();
+    const router = await healthyRouter("eu", { eu: replica }, 200);
+    router.nodes[0].lastCheckedAt = new Date(Date.now() - 6000);
+    assert.equal(router.pick(), null);
   });
 });

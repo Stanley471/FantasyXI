@@ -17,7 +17,22 @@ import { fplSyncService } from "../services/fpl/fplSyncService.js";
 
 export type FplSyncTask =
   | { type: "fixtures" }
+  | { type: "daily-players" }
   | { type: "gameweek-live"; gameweekFplId: number };
+
+export const FPL_SYNC_PRIORITY = {
+  CRITICAL_MATCH_STATS: 10,
+  DAILY_PLAYER_INFO: 5,
+  FIXTURES: 1,
+} as const;
+
+export function fplTaskPriority(task: FplSyncTask): number {
+  switch (task.type) {
+    case "gameweek-live": return FPL_SYNC_PRIORITY.CRITICAL_MATCH_STATS;
+    case "daily-players": return FPL_SYNC_PRIORITY.DAILY_PLAYER_INFO;
+    case "fixtures": return FPL_SYNC_PRIORITY.FIXTURES;
+  }
+}
 
 export const FPL_SYNC_QUEUE_NAME = "fpl-sync";
 export const FPL_SYNC_DLQ_NAME = "fpl-sync-dlq";
@@ -65,6 +80,8 @@ export async function executeFplSyncTask(task: FplSyncTask): Promise<unknown> {
   switch (task.type) {
     case "fixtures":
       return fplSyncService.syncFixtures();
+    case "daily-players":
+      return fplSyncService.syncBootstrap();
     case "gameweek-live":
       return fplSyncService.syncGameweekLiveStats(task.gameweekFplId);
   }

@@ -2,6 +2,7 @@
 
 import React, { useEffect } from "react";
 import { useOnlineStatus } from "@/lib/useOnlineStatus";
+import { startOfflineSyncCoordinator } from "@/lib/offlineSyncCoordinator";
 
 export function OfflineIndicator() {
   const isOffline = !useOnlineStatus();
@@ -16,6 +17,8 @@ export function OfflineIndicator() {
           console.warn("[PWA] Service Worker registration failed:", err);
         });
     }
+    // Replays lineup changes queued offline whenever connectivity returns (issue #334)
+    return startOfflineSyncCoordinator();
   }, []);
 
   if (!isOffline) {

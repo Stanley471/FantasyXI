@@ -1,10 +1,15 @@
+import { sessionRegistryService } from "./sessionRegistryService.js";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import { prisma as defaultPrisma } from "../../config/db.js";
 import { signAccessToken } from "../../config/jwt.js";
+import { RefreshTokenService } from "./refreshTokenService.js";
 import {
   RegisterInput,
   LoginInput,
+  LoginChallengeInput,
+  LoginResult,
+  PasskeyLoginChallenge,
   SafeUser,
   AuthResult,
   UserRole,
@@ -18,12 +23,23 @@ import {
   loginSecurityService as defaultLoginSecurityService,
   LoginSecurityService,
 } from "../security/loginSecurityService.js";
+import type { GeoPoint } from "../security/geoVelocity.js";
+import {
+  accountSignalRecorder as defaultSignalRecorder,
+  AccountSignalRecorder,
+} from "../security/accountSignals.js";
+import { webAuthnService as defaultWebAuthnService, WebAuthnService } from "./webAuthnService.js";
 
-/** Request-derived context used for anomalous-login detection (issue #117). */
+/** Request-derived context used for anomalous-login detection (issues #117, #331). */
 export interface AuthRequestContext {
   ip: string;
   userAgent?: string | null;
+  /** IP-derived location from trusted edge headers, when configured */
+  location?: GeoPoint | null;
 }
+
+/** Passkeys loaded with the user on login; only what step-up options need. */
+const PASSKEY_STEP_UP_SELECT = { select: { id: true, transports: true } } as const;
 
 /**
  * Custom error classes for Authentication domain rules.
@@ -49,6 +65,16 @@ export class AuthUnauthorizedError extends Error {
   constructor(message: string = "Invalid email or password") {
     super(message);
     this.name = "AuthUnauthorizedError";
+  }
+}
+
+/** A correct password was refused because the login looks like account takeover (issue #331). */
+export class AuthLoginBlockedError extends Error {
+  constructor(
+    message: string = "This sign-in was blocked because it came from an implausibly distant location. Check your email for details."
+  ) {
+    super(message);
+    this.name = "AuthLoginBlockedError";
   }
 }
 
@@ -117,7 +143,9 @@ export class AuthService {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     private readonly db: any = defaultPrisma,
     private readonly events: EventBus = eventBus,
-    private readonly security: LoginSecurityService = defaultLoginSecurityService
+    private readonly security: LoginSecurityService = defaultLoginSecurityService,
+    private readonly passkeys: WebAuthnService = defaultWebAuthnService,
+    private readonly signals: AccountSignalRecorder = defaultSignalRecorder
   ) {}
 
   /**
@@ -183,7 +211,7 @@ export class AuthService {
   /**
    * Registers a new user account with bcrypt hashed password.
    */
-  public async register(input: RegisterInput): Promise<AuthResult> {
+  public async register(input: RegisterInput, context?: AuthRequestContext): Promise<AuthResult> {
     const { normalizedEmail, normalizedUsername } =
       this.validateRegisterInput(input);
 
@@ -245,13 +273,12 @@ export class AuthService {
       }
     }
 
-    const safeUser = toSafeUser(user);
-    const token = signAccessToken({
-      userId: user.id,
-      email: user.email,
-      username: user.username,
-      role: user.role ?? UserRole.USER,
+    const session = await sessionRegistryService.createSession(user.id, {
+      ip: "127.0.0.1",
+      userAgent: null,
     });
+    const safeUser = toSafeUser(user);
+    const issued = await new RefreshTokenService(this.db).issue(user, undefined, session.id);
 
     // Best-effort: a signup analytics/notification subscriber failing must
     // never fail registration itself, so this uses `publish` (which never
@@ -264,7 +291,7 @@ export class AuthService {
 
     return {
       user: safeUser,
-      token,
+      ...issued,
     };
   }
 
@@ -272,14 +299,21 @@ export class AuthService {
    * Authenticates user with email and password.
    * Returns generic 401 message on any credential mismatch to prevent enumeration.
    *
-   * `context` (client IP / user agent) is optional so existing callers and
-   * tests that don't have request metadata keep working unchanged; when
-   * provided, it drives the anomalous-login detection in issue #117: failed
-   * attempts are tracked per email for spike detection, and a successful
-   * login from a device/IP not seen before for this user triggers an email
-   * alert (see services/security/loginSecurityService.ts).
+   * `context` (client IP / user agent / location) is optional so existing
+   * callers and tests that don't have request metadata keep working
+   * unchanged; when provided, it drives the login security checks (see
+   * services/security/loginSecurityService.ts): failed attempts are tracked
+   * per email for spike detection (#117), an impossible-travel login is
+   * refused with AuthLoginBlockedError, and a login from an unrecognized
+   * device returns a step-up challenge instead of a token (#331).
+   *
+   * An account with a registered passkey always answers a correct password
+   * with a WEBAUTHN step-up challenge instead of a token (#273), with or
+   * without `context`: the passkey is the account's second factor.
    */
-  public async login(input: LoginInput, context?: AuthRequestContext): Promise<AuthResult> {
+  public async login(input: LoginInput): Promise<AuthResult>;
+  public async login(input: LoginInput, context: AuthRequestContext | undefined): Promise<LoginResult>;
+  public async login(input: LoginInput, context?: AuthRequestContext): Promise<LoginResult> {
     if (!input.email || !input.password) {
       throw new AuthUnauthorizedError("Invalid email or password");
     }
@@ -288,6 +322,7 @@ export class AuthService {
 
     const user = await this.db.user.findUnique({
       where: { email: normalizedEmail },
+      include: { webAuthnCredentials: PASSKEY_STEP_UP_SELECT },
     });
 
     // Timing-safe / generic rejection if user does not exist or has no password set (e.g. Google-only user)
@@ -311,27 +346,103 @@ export class AuthService {
       throw new AuthUnauthorizedError("Invalid email or password");
     }
 
+    // A phishing-resistant, device-bound second factor supersedes the
+    // new-device email code and the impossible-travel heuristic
+    const passkeys: Array<{ id: string; transports: string[] }> = user.webAuthnCredentials ?? [];
+    if (passkeys.length > 0) {
+      const { options, expiresAt } = await this.passkeys.generateStepUpOptions(user.id, passkeys);
+      const challenge: PasskeyLoginChallenge = {
+        challengeRequired: true,
+        method: "WEBAUTHN",
+        options,
+        expiresAt: expiresAt.toISOString(),
+      };
+      return challenge;
+    }
+
     if (context) {
-      await this.security.handleSuccessfulLogin({
+      const assessment = await this.security.assessLogin({
         userId: user.id,
         email: user.email,
         username: user.username,
         ip: context.ip,
         userAgent: context.userAgent,
+        deviceFingerprint: typeof input.deviceFingerprint === "string" ? input.deviceFingerprint : null,
+        location: context.location,
       });
+      if (assessment.decision === "BLOCK") {
+        throw new AuthLoginBlockedError();
+      }
+      if (assessment.decision === "CHALLENGE") {
+        return {
+          challengeRequired: true,
+          challengeId: assessment.challengeId,
+          method: "EMAIL_OTP",
+          expiresAt: assessment.expiresAt.toISOString(),
+        };
+      }
+      this.signals.record(user.id, { ...context, deviceFingerprint: input.deviceFingerprint });
     }
 
-    const safeUser = toSafeUser(user);
-    const token = signAccessToken({
-      userId: user.id,
-      email: user.email,
-      username: user.username,
-      role: user.role ?? UserRole.USER,
+    const session = await sessionRegistryService.createSession(user.id, {
+      ip: "127.0.0.1",
+      userAgent: null,
     });
+    return this.issueAuthResult(user, session.id);
+  }
 
+  /**
+   * Completes a passkey sign-in (#273): usernameless passwordless login, or
+   * the WEBAUTHN step-up that followed a verified password.
+   */
+  public async loginWithPasskey(
+    response: unknown,
+    context: AuthRequestContext & { deviceFingerprint?: string | null }
+  ): Promise<AuthResult> {
+    const { userId } = await this.passkeys.verifyAuthentication(response, context);
+    const user = await this.db.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new AuthNotFoundError("User not found");
+    }
+    this.signals.record(user.id, context);
+    return this.issueAuthResult(user);
+  }
+
+  /**
+   * Completes a login that was answered with a step-up challenge: a valid
+   * code issues the token and remembers the device for future logins.
+   * `context` records the sign-in network for Sybil analysis (#274).
+   */
+  public async verifyLoginChallenge(input: LoginChallengeInput, context?: AuthRequestContext): Promise<AuthResult> {
+    if (typeof input.challengeId !== "string" || typeof input.code !== "string" || !/^\d{6}$/.test(input.code)) {
+      throw new AuthValidationError("A challengeId and a 6-digit code are required");
+    }
+
+    const verification = await this.security.verifyChallenge(input.challengeId, input.code);
+    if (!verification.verified) {
+      throw new AuthUnauthorizedError(
+        verification.attemptsRemaining > 0
+          ? `Incorrect verification code. ${verification.attemptsRemaining} attempt(s) remaining.`
+          : "This verification code has expired or been used up. Please sign in again."
+      );
+    }
+
+    const user = await this.db.user.findUnique({ where: { id: verification.userId } });
+    if (!user) {
+      throw new AuthNotFoundError("User not found");
+    }
+    if (context) {
+      this.signals.record(user.id, { ip: context.ip });
+    }
+    return this.issueAuthResult(user);
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async issueAuthResult(user: any, sessionId?: string): Promise<AuthResult> {
+    const issued = await new RefreshTokenService(this.db).issue(user, undefined, sessionId);
     return {
-      user: safeUser,
-      token,
+      user: toSafeUser(user),
+      ...issued,
     };
   }
 
@@ -364,14 +475,7 @@ export class AuthService {
     });
 
     if (user) {
-      const safeUser = toSafeUser(user);
-      const token = signAccessToken({
-        userId: user.id,
-        email: user.email,
-        username: user.username,
-        role: user.role ?? UserRole.USER,
-      });
-      return { user: safeUser, token };
+      return { user: toSafeUser(user), token: signAccessToken({ userId: user.id, email: user.email, username: user.username, role: user.role ?? UserRole.USER }) };
     }
 
     // 2. Check if a user with this email already exists
@@ -437,12 +541,17 @@ export class AuthService {
       }
     }
 
+    const session = await sessionRegistryService.createSession(user.id, {
+      ip: "127.0.0.1",
+      userAgent: null,
+    });
     const safeUser = toSafeUser(user);
     const token = signAccessToken({
       userId: user.id,
       email: user.email,
       username: user.username,
       role: user.role ?? UserRole.USER,
+      sessionId: session.id,
     });
 
     return {

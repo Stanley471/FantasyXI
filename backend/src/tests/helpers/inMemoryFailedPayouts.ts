@@ -30,7 +30,15 @@ export function createInMemoryFailedPayouts() {
     rows,
     create: async ({ data }: { data: Row }) => {
       const now = new Date();
-      const row = { id: randomUUID(), createdAt: now, updatedAt: now, resolvedAt: null, ...data };
+      const row = {
+        id: randomUUID(),
+        createdAt: now,
+        updatedAt: now,
+        resolvedAt: null,
+        retryScheduledAt: null,
+        nextRetryAt: null,
+        ...data,
+      };
       rows.push(row);
       return { ...row };
     },
@@ -39,6 +47,10 @@ export function createInMemoryFailedPayouts() {
       if (orderBy?.createdAt) {
         const dir = orderBy.createdAt === "desc" ? -1 : 1;
         result = [...result].sort((a, b) => dir * (a.createdAt - b.createdAt));
+      }
+      if (orderBy?.lastAttemptAt) {
+        const dir = orderBy.lastAttemptAt === "desc" ? -1 : 1;
+        result = [...result].sort((a, b) => dir * (a.lastAttemptAt - b.lastAttemptAt));
       }
       return result.slice(skip ?? 0, take ? (skip ?? 0) + take : undefined).map((r) => ({ ...r }));
     },

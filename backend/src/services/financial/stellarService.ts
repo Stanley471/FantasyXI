@@ -18,9 +18,9 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import {
-  getHorizonServer,
   getSorobanRpcServer,
   stellarConfig,
+  withHorizonFailover,
 } from "../../config/stellar.js";
 import { PaymentVerificationResult } from "../../types/index.js";
 import {
@@ -37,6 +37,13 @@ export {
   type VerificationFailure,
   type DepositVerificationResult,
 } from "./depositVerificationService.js";
+export {
+  decodeSorobanEscrowEvent,
+  DepositQueue,
+  depositQueue,
+  type DecodedSorobanEscrowEvent,
+  type DepositQueueJobPayload,
+} from "../../queues/depositQueue.js";
 
 export interface VerifyPaymentParams {
   txHash: string;
@@ -62,12 +69,14 @@ export const ESCROW_EVENT_TOPICS = [
   "created",
   "deposit",
   "settle",
+  "m_settle",
   "refund",
   "claimed",
+  "m_claimed",
 ] as const;
 
 export class StellarService {
-  private server: Horizon.Server;
+  private customServer?: Horizon.Server;
   private sorobanClient?: SorobanContractClient;
   private rpcServer?: rpc.Server;
 
@@ -76,9 +85,13 @@ export class StellarService {
     customSorobanClient?: SorobanContractClient,
     customRpcServer?: rpc.Server
   ) {
-    this.server = customServer || getHorizonServer();
+    this.customServer = customServer;
     this.sorobanClient = customSorobanClient;
     this.rpcServer = customRpcServer;
+  }
+
+  private runHorizon<T>(operation: (server: Horizon.Server) => Promise<T>): Promise<T> {
+    return this.customServer ? operation(this.customServer) : withHorizonFailover(operation);
   }
 
   private getRpcServer(): rpc.Server {
@@ -119,6 +132,46 @@ export class StellarService {
   public async getRpcLedgerRange(): Promise<{ oldestLedger: number; latestLedger: number }> {
     const health = await this.getRpcServer().getHealth();
     return { oldestLedger: health.oldestLedger, latestLedger: health.latestLedger };
+  }
+
+  public async getHorizonLatestLedger(): Promise<number> {
+    const page = await this.server.ledgers().order("desc").limit(1).call();
+    const ledger = page.records[0]?.sequence;
+    if (!Number.isInteger(ledger)) {
+      throw new Error("Horizon did not return a latest ledger sequence");
+    }
+    return ledger;
+  }
+
+  public async getContractLeagueStateForAudit(
+    leagueId: number | bigint
+  ): Promise<OnChainLeagueState | null> {
+    const client = this.getSorobanClient();
+    if (!client) {
+      throw new Error("Soroban contract client is not configured");
+    }
+    return client.getLeagueForAudit(leagueId);
+  }
+
+  public async getContractDepositForAudit(
+    leagueId: number | bigint,
+    participantAddress: string
+  ): Promise<bigint> {
+    const client = this.getSorobanClient();
+    if (!client) {
+      throw new Error("Soroban contract client is not configured");
+    }
+    return client.getDepositForAudit(leagueId, participantAddress);
+  }
+
+  public async getContractTokenBalanceForAudit(
+    addressOrContractId: string
+  ): Promise<bigint> {
+    const client = this.getSorobanClient();
+    if (!client) {
+      throw new Error("Soroban contract client is not configured");
+    }
+    return client.getTokenBalanceForAudit(addressOrContractId);
   }
 
   public getSorobanClient(): SorobanContractClient | null {
@@ -188,7 +241,9 @@ export class StellarService {
 
     try {
       // 1. Fetch transaction record from Horizon
-      const tx = await this.server.transactions().transaction(txHash).call();
+      const tx = await this.runHorizon((server) =>
+        server.transactions().transaction(txHash).call()
+      );
 
       if (!tx.successful) {
         return {
@@ -362,10 +417,9 @@ export class StellarService {
       }
 
       // Fetch operations for this transaction
-      const opsPage = await this.server
-        .operations()
-        .forTransaction(txHash)
-        .call();
+      const opsPage = await this.runHorizon((server) =>
+        server.operations().forTransaction(txHash).call()
+      );
 
       // Find payment operation matching criteria
       const matchingOp = opsPage.records.find((op: any) => {
@@ -428,6 +482,7 @@ export class StellarService {
           success: false,
           txHash,
           error: "Transaction not found on Stellar network or ledger not yet closed.",
+          retryable: true,
         };
       }
 
@@ -435,6 +490,7 @@ export class StellarService {
         success: false,
         txHash,
         error: `Stellar network error: ${error?.message || "Unknown error"}`,
+        retryable: true,
       };
     }
   }
@@ -453,7 +509,7 @@ export class StellarService {
     }
 
     try {
-      const account = await this.server.loadAccount(stellarAddress);
+      const account = await this.runHorizon((server) => server.loadAccount(stellarAddress));
       const usdcBalance = account.balances.find((b: any) => {
         if (assetCode === "XLM") return b.asset_type === "native";
         return b.asset_code === assetCode && b.asset_issuer === assetIssuer;
@@ -485,10 +541,22 @@ export class StellarService {
   /**
    * Dispatches an administrator-authorized settlement and waits for finality.
    */
+  public async resumeSettlementEnvelope(envelope: string): Promise<InvocationResult> {
+    const client = this.getSorobanClient();
+    if (!client) throw new Error("Soroban contract client is not configured");
+    return client.resumeEnvelope(envelope);
+  }
+
+  public async getSettlementStatus(hash: string): Promise<{ status: string; ledger?: number }> {
+    return getSorobanRpcServer().getTransaction(hash);
+  }
+
   public async settleLeague(
     leagueId: number | bigint,
     winners: Array<{ winner: string; amount: string }>,
-    platformFeeStroops: bigint
+    platformFeeStroops: bigint,
+    distributionBpsOrBeforeSubmit?: number[] | ((hash: string, envelope: string) => Promise<void>),
+    beforeSubmitArg?: (hash: string, envelope: string) => Promise<void>
   ): Promise<InvocationResult> {
     const client = this.getSorobanClient();
     if (!client) {
@@ -507,7 +575,9 @@ export class StellarService {
       leagueId,
       winners,
       stellarConfig.treasuryAddress,
-      platformFeeStroops
+      platformFeeStroops,
+      distributionBpsOrBeforeSubmit,
+      beforeSubmitArg
     );
   }
 
@@ -555,6 +625,16 @@ export class StellarService {
     }
     const adminPublic = Keypair.fromSecret(adminSecret).publicKey();
     return client.refund(adminSecret, adminPublic, leagueId, participants);
+  }
+
+  /** Refund one authenticated deposit without cancelling the league. */
+  public async refundDeposit(leagueId: number | bigint, participant: string): Promise<InvocationResult> {
+    const client = this.getSorobanClient();
+    if (!client) throw new Error("Soroban contract client is not configured");
+    const adminSecret = process.env.TESTNET_ADMIN_SECRET;
+    if (!adminSecret) throw new Error("TESTNET_ADMIN_SECRET is required to execute refunds");
+    const adminPublic = Keypair.fromSecret(adminSecret).publicKey();
+    return client.refundDeposit(adminSecret, adminPublic, leagueId, participant);
   }
 
   /**
