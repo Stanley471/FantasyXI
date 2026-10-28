@@ -73,8 +73,11 @@ jobs:
       - name: Run clippy linter
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Run contract unit tests
-        run: cargo test --verbose
+      - name: Run contract unit and property tests
+        run: cargo test --verbose --lib --test property_invariants
+
+      - name: Run contract fuzz and invariant harness
+        run: cargo test --verbose --test fuzz_tests --test invariant_tests
 
       - name: Build contract for wasm32 release target
         run: cargo build --target wasm32-unknown-unknown --release --verbose

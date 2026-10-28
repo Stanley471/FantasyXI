@@ -2,7 +2,7 @@
  * Soroban Contract Client for FantasyXI Escrow & Token SAC
  *
  * Provides typed methods to interact with:
- * 1. FantasyXI Escrow Contract (initialize, create_league, deposit, settle, refund, get_league, get_deposit)
+ * 1. FantasyXI Escrow Contract (initialize, create_league, deposit, settle, refund, upgrade, get_league, get_deposit)
  * 2. Testnet USDC SAC (balance)
  *
  * Pure TypeScript implementation on top of @stellar/stellar-sdk's rpc.Server:
@@ -43,6 +43,7 @@ import {
   type StellarTransactionSigner,
   type StellarTransaction,
 } from "./transactionSigner.js";
+import { SorobanFeeOracle } from "./sorobanFeeOracle.js";
 
 // Load testnet deployment configuration
 const envTestnetPath = path.resolve(process.cwd(), ".env.testnet.local");
@@ -123,6 +124,7 @@ export class SorobanContractClient {
   private replayQueue: SorobanTransactionReplayQueue;
   private signer: StellarTransactionSigner;
   private feeBumpFeeSource?: string;
+  private feeOracle: SorobanFeeOracle;
 
   constructor(options?: {
     rpcUrl?: string;
@@ -136,6 +138,7 @@ export class SorobanContractClient {
     replayStore?: SorobanReplayStore;
     signer?: StellarTransactionSigner;
     feeBumpFeeSource?: string;
+    feeOracle?: SorobanFeeOracle;
   }) {
     const rpcUrl =
       options?.rpcUrl ||
@@ -168,6 +171,7 @@ export class SorobanContractClient {
     this.maxPollAttempts = options?.maxPollAttempts ?? 30;
     this.signer = options?.signer || SorobanContractClient.configuredSigner || new LocalSecretTransactionSigner();
     this.feeBumpFeeSource = options?.feeBumpFeeSource || process.env.STELLAR_FEE_BUMP_SOURCE;
+    this.feeOracle = options?.feeOracle || new SorobanFeeOracle(this.server);
 
     if (!this.escrowContractId) {
       throw new Error("STELLAR_ESCROW_CONTRACT_ID not provided or set in environment.");
@@ -298,8 +302,9 @@ export class SorobanContractClient {
     restorePreamble: { minResourceFee: string; transactionData: { build(): xdr.SorobanTransactionData } }
   ): Promise<InvocationResult> {
     const account = await this.server.getAccount(await this.signer.publicKey(sourceKey));
+    const inclusionFee = await this.feeOracle.estimateInclusionFee();
     const restoreTx = new TransactionBuilder(account, {
-      fee: (Number(BASE_FEE) + Number(restorePreamble.minResourceFee)).toString(),
+      fee: (Number(inclusionFee) + Number(restorePreamble.minResourceFee)).toString(),
       networkPassphrase: this.networkPassphrase,
     })
       .setSorobanData(restorePreamble.transactionData.build())
@@ -330,9 +335,10 @@ export class SorobanContractClient {
       async () => {
         try {
           const keypair = Keypair.fromSecret(sourceSecret);
+          const fee = await this.feeOracle.estimateInclusionFee();
 
           let account = await this.server.getAccount(keypair.publicKey());
-          let tx = this.buildInvocation(account, contractId, method, args);
+          let tx = this.buildInvocation(account, contractId, method, args, fee);
           let simulation = await this.server.simulateTransaction(tx);
 
           if (rpc.Api.isSimulationError(simulation)) {
@@ -366,7 +372,7 @@ export class SorobanContractClient {
               return this.failure(`Footprint restoration failed: ${restored.error}`, restored.txHash);
             }
             account = await this.server.getAccount(keypair.publicKey());
-            tx = this.buildInvocation(account, contractId, method, args);
+            tx = this.buildInvocation(account, contractId, method, args, fee);
             simulation = await this.server.simulateTransaction(tx);
             if (rpc.Api.isSimulationError(simulation)) {
               return this.failure(`Simulation failed: ${simulation.error}`);
@@ -661,23 +667,78 @@ export class SorobanContractClient {
       );
     }
 
+    return this.invokeWithMultisig(approverSecrets, "settle_with_multisig", (approvals) => [
+      approvals,
+      SorobanContractClient.u64(leagueId),
+      SorobanContractClient.winnersScVal(winners),
+      SorobanContractClient.address(platformTreasury),
+      SorobanContractClient.i128(platformFeeStroops),
+    ]);
+  }
+
+  /**
+   * Starts the on-chain upgrade timelock for `wasmHashHex` (emits `upgrade_proposed`).
+   * The proposer must be one of the contract's configured admin signers.
+   */
+  public async proposeUpgrade(proposerSecret: string, wasmHashHex: string): Promise<InvocationResult> {
+    if (!/^[0-9a-f]{64}$/i.test(wasmHashHex)) {
+      return this.failure("WASM hash must be a 32-byte hexadecimal hash");
+    }
+    return this.invoke(proposerSecret, this.escrowContractId, "propose_upgrade", [
+      SorobanContractClient.address(Keypair.fromSecret(proposerSecret).publicKey()),
+      nativeToScVal(Buffer.from(wasmHashHex, "hex"), { type: "bytes" }),
+    ]);
+  }
+
+  /**
+   * Executes a proposed WASM upgrade once its timelock has elapsed. Every
+   * approver co-signs the invocation; the contract rejects any approval set
+   * short of its M-of-N threshold (`InvalidMultisig`), so `requiredThreshold`
+   * is only a local pre-check that keeps under-signed upgrades off the network.
+   */
+  public async upgradeWithMultisig(
+    approverSecrets: string[],
+    wasmHashHex: string,
+    requiredThreshold: number
+  ): Promise<InvocationResult> {
+    if (!/^[0-9a-f]{64}$/i.test(wasmHashHex)) {
+      return this.failure("WASM hash must be a 32-byte hexadecimal hash");
+    }
+    if (requiredThreshold < 1) {
+      return this.failure("Upgrade multisig threshold must be at least 1");
+    }
+    const distinctApprovers = new Set(approverSecrets).size;
+    if (distinctApprovers < requiredThreshold) {
+      return this.failure(
+        `Insufficient signatures for contract upgrade: ${distinctApprovers} of ${requiredThreshold} required signer(s) provided`
+      );
+    }
+    return this.invokeWithMultisig(approverSecrets, "upgrade", (approvals) => [
+      approvals,
+      nativeToScVal(Buffer.from(wasmHashHex, "hex"), { type: "bytes" }),
+    ]);
+  }
+
+  /**
+   * Invokes an escrow method whose first argument is a list of approving
+   * signers, collecting a signed Soroban authorization entry from each one.
+   * The first approver pays the fee and submits the transaction.
+   */
+  private async invokeWithMultisig(
+    approverSecrets: string[],
+    method: string,
+    buildArgs: (approvals: xdr.ScVal) => xdr.ScVal[]
+  ): Promise<InvocationResult> {
     try {
       const approverKeypairs = approverSecrets.map((secret) => Keypair.fromSecret(secret));
       const submitterKeypair = approverKeypairs[0];
-      const approvalsScVal = xdr.ScVal.scvVec(
-        approverKeypairs.map((kp) => SorobanContractClient.address(kp.publicKey()))
+      const args = buildArgs(
+        xdr.ScVal.scvVec(approverKeypairs.map((kp) => SorobanContractClient.address(kp.publicKey())))
       );
-      const winnersScVal = SorobanContractClient.winnersScVal(winners);
-      const args = [
-        approvalsScVal,
-        SorobanContractClient.u64(leagueId),
-        winnersScVal,
-        SorobanContractClient.address(platformTreasury),
-        SorobanContractClient.i128(platformFeeStroops),
-      ];
+      const fee = await this.feeOracle.estimateInclusionFee();
 
       let account = await this.server.getAccount(submitterKeypair.publicKey());
-      let tx = this.buildInvocation(account, this.escrowContractId, "settle_with_multisig", args);
+      let tx = this.buildInvocation(account, this.escrowContractId, method, args, fee);
       let simulation = await this.server.simulateTransaction(tx);
 
       if (rpc.Api.isSimulationError(simulation)) {
@@ -690,7 +751,7 @@ export class SorobanContractClient {
           return this.failure(`Footprint restoration failed: ${restored.error}`, restored.txHash);
         }
         account = await this.server.getAccount(submitterKeypair.publicKey());
-        tx = this.buildInvocation(account, this.escrowContractId, "settle_with_multisig", args);
+        tx = this.buildInvocation(account, this.escrowContractId, method, args, fee);
         simulation = await this.server.simulateTransaction(tx);
         if (rpc.Api.isSimulationError(simulation)) {
           return this.failure(`Simulation failed: ${simulation.error}`);
@@ -712,7 +773,7 @@ export class SorobanContractClient {
           const keypair = approverKeypairs.find((kp) => kp.publicKey() === info.address);
           if (!keypair) {
             throw new Error(
-              `No approving signer secret was supplied for required treasury signer ${info.address}`
+              `No approving signer secret was supplied for required signer ${info.address}`
             );
           }
           return authorizeEntry(entry, keypair, validUntilLedgerSeq, this.networkPassphrase);
