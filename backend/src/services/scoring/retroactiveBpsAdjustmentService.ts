@@ -280,7 +280,7 @@ export class RetroactiveBpsAdjustmentService {
     ];
     const [stats, chips] = await Promise.all([
       this.db.playerGameweekStats.findMany({ where: { gameweekId, playerId: { in: lineupPlayerIds } } }),
-      this.db.squadChipUsage.findMany({ where: { gameweekId, squadId: { in: squadIds } } }),
+      this.db.squadChipUsage.findMany({ where: { gameweekId, squadId: { in: squadIds }, cancelledAt: null } }),
     ]);
     const chipBySquad = new Map<string, ChipType>(
       chips.map((c: { squadId: string; chipType: ChipType }) => [c.squadId, c.chipType])

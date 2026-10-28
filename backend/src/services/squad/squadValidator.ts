@@ -46,7 +46,28 @@ export interface ValidatedSquadResult {
   viceCaptainId: number;
 }
 
+export const MIN_SQUAD_NAME_LENGTH = 3;
+
 export class SquadValidator {
+  /**
+   * Normalizes a squad name: whitespace control characters become spaces,
+   * other control/format characters (null bytes, backspaces, zero-width
+   * marks) are stripped, runs of whitespace collapse to one space and the
+   * result is trimmed.
+   */
+  public static sanitizeSquadName(name: unknown): string {
+    const sanitized = (typeof name === "string" ? name : "")
+      .replace(/[\p{Cc}\p{Cf}]/gu, (char) => (/\s/.test(char) ? " " : ""))
+      .replace(/\s+/g, " ")
+      .trim();
+    if (sanitized.length < MIN_SQUAD_NAME_LENGTH) {
+      throw new SquadValidationError(
+        `Squad name must be at least ${MIN_SQUAD_NAME_LENGTH} characters`
+      );
+    }
+    return sanitized;
+  }
+
   /**
    * Enforces that current timestamp has not passed the gameweek deadline.
    */

@@ -30,7 +30,7 @@
 import { randomUUID } from "node:crypto";
 import { rpc, scValToNative } from "@stellar/stellar-sdk";
 import { prisma } from "../../config/db.js";
-import { getHorizonServer, stellarConfig } from "../../config/stellar.js";
+import { stellarConfig, withHorizonFailover } from "../../config/stellar.js";
 import { StellarService, stellarService } from "./stellarService.js";
 import { toContractLeagueId } from "./contractLeagueId.js";
 import {
@@ -316,10 +316,11 @@ export class SorobanEscrowEventSource implements OnChainEventSource {
 
 export class HorizonLedgerLookup implements HorizonTransactionLookup {
   public async lookup(txHash: string): Promise<HorizonLookupResult> {
-    const server = getHorizonServer();
     let tx;
     try {
-      tx = await server.transactions().transaction(txHash).call();
+      tx = await withHorizonFailover((server) =>
+        server.transactions().transaction(txHash).call()
+      );
     } catch (error) {
       const status = (error as { response?: { status?: number } })?.response?.status;
       if (status === 404 || (error as Error)?.name === "NotFoundError") return { status: "NOT_FOUND" };
@@ -329,7 +330,9 @@ export class HorizonLedgerLookup implements HorizonTransactionLookup {
       return { status: "FAILED", ledgerSeq: tx.ledger_attr, closedAt: tx.created_at };
     }
 
-    const ops = await server.operations().forTransaction(txHash).limit(200).call();
+    const ops = await withHorizonFailover((server) =>
+      server.operations().forTransaction(txHash).limit(200).call()
+    );
     let transferred = 0n;
     for (const op of ops.records as unknown as Array<Record<string, any>>) {
       if (op.type === "payment" && op.asset_code === stellarConfig.usdcAssetCode) {

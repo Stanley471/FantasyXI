@@ -3,13 +3,12 @@
 import React, { useState, useEffect } from "react";
 import { api } from "@/lib/api";
 import { Fixture, Gameweek } from "@/types";
-import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import {
   IconCalendar,
   IconChevronLeft,
   IconChevronRight,
-  IconCheck,
 } from "@/components/ui/Icons";
 import { LiveMatchEventsTimeline } from "@/components/live/LiveMatchEventsTimeline";
 
@@ -17,7 +16,7 @@ export default function FixturesPage() {
   const [gameweeks, setGameweeks] = useState<Gameweek[]>([]);
   const [selectedGwId, setSelectedGwId] = useState<number | null>(null);
   const [fixtures, setFixtures] = useState<Fixture[]>([]);
-  const [isLoadingGw, setIsLoadingGw] = useState<boolean>(true);
+  const [, setIsLoadingGw] = useState<boolean>(true);
   const [isLoadingFix, setIsLoadingFix] = useState<boolean>(false);
 
   // Load gameweeks
@@ -159,9 +158,9 @@ export default function FixturesPage() {
           </select>
 
           {selectedGw?.isCurrent && (
-            <Badge variant="success" size="sm">
-              Active Round
-            </Badge>
+            <span className="text-xs font-semibold text-emerald-400">
+              Active round
+            </span>
           )}
         </div>
 
@@ -179,94 +178,106 @@ export default function FixturesPage() {
       </div>
 
       {/* Match Cards Container */}
-      {isLoadingFix ? (
-        <div className="py-24 text-center text-slate-400">
-          <div className="inline-block w-8 h-8 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin mb-3" />
-          <p className="text-xs">Loading Premier League fixtures...</p>
-        </div>
-      ) : fixtures.length > 0 ? (
-        <div className="space-y-6">
-          {Object.entries(fixturesByDate).map(([dateTitle, dateFixtures]) => (
-            <div key={dateTitle} className="space-y-3">
-              {/* Date Header */}
-              <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400 px-1">
-                <IconCalendar className="w-4 h-4 text-emerald-400" />
-                <span>{dateTitle}</span>
-              </div>
+      <ErrorBoundary
+        name="FixturesList"
+        fallbackTitle="Fixtures schedule failed to render"
+        resetKeys={[selectedGwId]}
+      >
+        {isLoadingFix ? (
+          <div className="py-24 text-center text-slate-400">
+            <div className="inline-block w-8 h-8 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin mb-3" />
+            <p className="text-xs">Loading Premier League fixtures...</p>
+          </div>
+        ) : fixtures.length > 0 ? (
+          <div className="space-y-6">
+            {Object.entries(fixturesByDate).map(([dateTitle, dateFixtures]) => (
+              <div key={dateTitle} className="space-y-3">
+                {/* Date Header */}
+                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400 px-1">
+                  <IconCalendar className="w-4 h-4 text-emerald-400" />
+                  <span>{dateTitle}</span>
+                </div>
 
-              {/* Match Cards List */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {dateFixtures.map((fix) => {
-                  const kickoff = fix.kickoffTime ? new Date(fix.kickoffTime) : null;
+                {/* Match Cards List */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {dateFixtures.map((fix) => {
+                    const kickoff = fix.kickoffTime ? new Date(fix.kickoffTime) : null;
 
-                  return (
-                    <div
-                      key={fix.id}
-                      className="bg-pitch-surface border border-pitch-border rounded-xl p-4 shadow-sm hover:border-slate-700 transition-colors flex items-center justify-between"
-                    >
-                      {/* Home Team */}
-                      <div className="flex-1 flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-center font-bold text-xs font-mono text-slate-200">
-                          {fix.homeTeam?.shortName || "PL"}
-                        </div>
-                        <span className="font-bold text-sm text-white truncate">
-                          {fix.homeTeam?.name || `Team ${fix.homeTeamId}`}
-                        </span>
-                      </div>
-
-                      {/* Score or Kickoff Time */}
-                      <div className="px-4 text-center">
-                        {fix.started ? (
-                          <div className="flex flex-col items-center">
-                            <span className="font-mono font-black text-base text-emerald-400 tabular-nums tracking-wider">
-                              {fix.homeScore ?? 0} - {fix.awayScore ?? 0}
-                            </span>
-                            <span className="text-[10px] text-slate-500 font-mono mt-1 font-semibold uppercase">
-                              {fix.finished ? "Full Time" : `${fix.minutes}'`}
-                            </span>
+                    return (
+                      <div
+                        key={fix.id}
+                        className="bg-pitch-surface border border-pitch-border rounded-xl p-4 shadow-sm hover:border-slate-700 transition-colors flex items-center justify-between"
+                      >
+                        {/* Home Team */}
+                        <div className="flex-1 flex items-center gap-3">
+                          <div className="w-8 h-8 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-center font-bold text-xs font-mono text-slate-200">
+                            {fix.homeTeam?.shortName || "PL"}
                           </div>
-                        ) : (
-                          <div className="flex flex-col items-center">
-                            <span className="font-mono font-bold text-xs text-slate-300">
-                              {kickoff
-                                ? kickoff.toLocaleTimeString([], {
-                                    hour: "2-digit",
-                                    minute: "2-digit",
-                                  })
-                                : "TBD"}
-                            </span>
-                            <span className="text-[10px] text-slate-500 mt-0.5">Kickoff</span>
-                          </div>
-                        )}
-                      </div>
+                          <span className="font-bold text-sm text-white truncate">
+                            {fix.homeTeam?.name || `Team ${fix.homeTeamId}`}
+                          </span>
+                        </div>
 
-                      {/* Away Team */}
-                      <div className="flex-1 flex items-center justify-end gap-3 text-right">
-                        <span className="font-bold text-sm text-white truncate">
-                          {fix.awayTeam?.name || `Team ${fix.awayTeamId}`}
-                        </span>
-                        <div className="w-8 h-8 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-center font-bold text-xs font-mono text-slate-200">
-                          {fix.awayTeam?.shortName || "PL"}
+                        {/* Score or Kickoff Time */}
+                        <div className="px-4 text-center">
+                          {fix.started ? (
+                            <div className="flex flex-col items-center">
+                              <span className="font-mono font-black text-base text-emerald-400 tabular-nums tracking-wider">
+                                {fix.homeScore ?? 0} - {fix.awayScore ?? 0}
+                              </span>
+                              <span className="text-[10px] text-slate-500 font-mono mt-1 font-semibold uppercase">
+                                {fix.finished ? "Full Time" : `${fix.minutes}'`}
+                              </span>
+                            </div>
+                          ) : (
+                            <div className="flex flex-col items-center">
+                              <span className="font-mono font-bold text-xs text-slate-300">
+                                {kickoff
+                                  ? kickoff.toLocaleTimeString([], {
+                                      hour: "2-digit",
+                                      minute: "2-digit",
+                                    })
+                                  : "TBD"}
+                              </span>
+                              <span className="text-[10px] text-slate-500 mt-0.5">Kickoff</span>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Away Team */}
+                        <div className="flex-1 flex items-center justify-end gap-3 text-right">
+                          <span className="font-bold text-sm text-white truncate">
+                            {fix.awayTeam?.name || `Team ${fix.awayTeamId}`}
+                          </span>
+                          <div className="w-8 h-8 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-center font-bold text-xs font-mono text-slate-200">
+                            {fix.awayTeam?.shortName || "PL"}
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  );
-                })}
+                    );
+                  })}
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className="py-20 text-center bg-pitch-surface border border-pitch-border rounded-xl p-8 text-slate-500 text-xs">
-          No matches scheduled for {selectedGw ? selectedGw.name : "this gameweek"}.
-        </div>
-      )}
+            ))}
+          </div>
+        ) : (
+          <div className="py-20 text-center bg-pitch-surface border border-pitch-border rounded-xl p-8 text-slate-500 text-xs">
+            No matches scheduled for {selectedGw ? selectedGw.name : "this gameweek"}.
+          </div>
+        )}
+      </ErrorBoundary>
 
       {/* Live Match Events Timeline */}
-      <LiveMatchEventsTimeline
-        gameweekId={selectedGwId ?? 1}
-        className="mt-8"
-      />
+      <ErrorBoundary
+        name="LiveMatchEventsTimeline"
+        fallbackTitle="Live match events feed encountered an error"
+        resetKeys={[selectedGwId]}
+      >
+        <LiveMatchEventsTimeline
+          gameweekId={selectedGwId ?? 1}
+          className="mt-8"
+        />
+      </ErrorBoundary>
     </div>
   );
 }

@@ -5,7 +5,8 @@ import { api, ApiError } from "@/lib/api";
 import { CreatedLeagueInvitation, LeagueInvitation, LeagueInvitationState } from "@/types";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { IconCheck, IconCopy, IconAlertCircle, IconPlus } from "@/components/ui/Icons";
+import { IconAlertCircle, IconPlus } from "@/components/ui/Icons";
+import { CopyButton } from "@/components/ui/CopyButton";
 import { useToast } from "@/context/ToastContext";
 
 const EXPIRY_OPTIONS = [
@@ -14,6 +15,8 @@ const EXPIRY_OPTIONS = [
   { hours: 168, label: "7 days" },
   { hours: 720, label: "30 days" },
 ];
+
+const USAGE_OPTIONS = [1, 5, 10, 25, 50];
 
 const STATE_BADGE: Record<LeagueInvitationState, "success" | "neutral" | "danger" | "warning"> = {
   ACTIVE: "success",
@@ -35,15 +38,16 @@ function inviteUrl(token: string): string {
 }
 
 /**
- * Lets the creator of a private league issue single-use, expiring invitation
+ * Lets the creator of a private league issue expiring invitation links with a
+ * configurable redemption limit
  * links, and review or revoke the ones already issued.
  */
 export const InvitationManager: React.FC<{ leagueId: string }> = ({ leagueId }) => {
   const { toast } = useToast();
   const [invitations, setInvitations] = useState<LeagueInvitation[]>([]);
   const [expiresInHours, setExpiresInHours] = useState<number>(72);
+  const [maxUses, setMaxUses] = useState<number>(1);
   const [created, setCreated] = useState<CreatedLeagueInvitation | null>(null);
-  const [copied, setCopied] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -72,11 +76,10 @@ export const InvitationManager: React.FC<{ leagueId: string }> = ({ leagueId }) 
   const handleCreate = async () => {
     setIsCreating(true);
     setError(null);
-    setCopied(false);
     try {
       const res = await api.post<{ success: boolean; data: CreatedLeagueInvitation }>(
         `/api/v1/leagues/${leagueId}/invitations`,
-        { expiresInHours }
+        { expiresInHours, maxUses }
       );
       setCreated(res.data);
       toast.success("Invitation link generated successfully!");
@@ -88,14 +91,6 @@ export const InvitationManager: React.FC<{ leagueId: string }> = ({ leagueId }) 
     } finally {
       setIsCreating(false);
     }
-  };
-
-  const handleCopy = async () => {
-    if (!created) return;
-    await navigator.clipboard.writeText(inviteUrl(created.token));
-    setCopied(true);
-    toast.success("Invitation link copied to clipboard!");
-    setTimeout(() => setCopied(false), 2000);
   };
 
   const handleRevoke = async (invitationId: string) => {
@@ -117,7 +112,7 @@ export const InvitationManager: React.FC<{ leagueId: string }> = ({ leagueId }) 
       <div>
         <h3 className="font-bold text-white uppercase tracking-wider text-[11px]">Invitation Links</h3>
         <p className="text-[11px] text-slate-500 mt-1">
-          Each link admits one manager and expires automatically.
+          Each link expires automatically and can be used up to its configured limit.
         </p>
       </div>
 
@@ -138,6 +133,18 @@ export const InvitationManager: React.FC<{ leagueId: string }> = ({ leagueId }) 
           {EXPIRY_OPTIONS.map((o) => (
             <option key={o.hours} value={o.hours}>
               Expires in {o.label}
+            </option>
+          ))}
+        </select>
+        <select
+          value={maxUses}
+          onChange={(e) => setMaxUses(Number(e.target.value))}
+          aria-label="Invitation usage limit"
+          className="flex-1 px-3 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-white text-xs focus:outline-none focus:border-emerald-500"
+        >
+          {USAGE_OPTIONS.map((uses) => (
+            <option key={uses} value={uses}>
+              {uses === 1 ? "One use" : `${uses} uses`}
             </option>
           ))}
         </select>
@@ -167,9 +174,7 @@ export const InvitationManager: React.FC<{ leagueId: string }> = ({ leagueId }) 
               aria-label="Invitation link"
               className="flex-1 min-w-0 px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-slate-200 font-mono text-[11px]"
             />
-            <Button type="button" variant="secondary" size="sm" onClick={handleCopy} title="Copy link">
-              {copied ? <IconCheck className="w-3.5 h-3.5 text-emerald-400" /> : <IconCopy className="w-3.5 h-3.5" />}
-            </Button>
+            <CopyButton value={inviteUrl(created.token)} ariaLabel="Copy invitation link" />
           </div>
         </div>
       )}
@@ -181,9 +186,9 @@ export const InvitationManager: React.FC<{ leagueId: string }> = ({ leagueId }) 
               <div className="min-w-0">
                 <Badge variant={STATE_BADGE[inv.state]}>{inv.state}</Badge>
                 <span className="ml-2 text-slate-400">
-                  {inv.state === "USED" && inv.usedBy
-                    ? `by ${inv.usedBy.username}`
-                    : `expires ${new Date(inv.expiresAt).toLocaleString()}`}
+                  {inv.usesCount}/{inv.maxUses} uses
+                  {inv.usedBy ? ` · last used by ${inv.usedBy.username}` : ""}
+                  {` · expires ${new Date(inv.expiresAt).toLocaleString()}`}
                 </span>
               </div>
               {inv.state === "ACTIVE" && (

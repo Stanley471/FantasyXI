@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import { liveTimelineService } from "../services/live/liveTimelineService.js";
+import { liveProvisionalLeaderboardService } from "../services/live/liveProvisionalLeaderboardService.js";
 
 /**
  * GET /api/v1/live/timeline/:gameweekId
@@ -96,6 +97,86 @@ export async function streamLiveTimeline(
     }, intervalMs);
 
     req.on("close", () => clearInterval(timer));
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * GET /api/v1/live/leaderboard/:leagueId
+ *
+ * Returns the live provisional leaderboard rankings for a league without
+ * hitting the database if the daemon is already hydrated.
+ */
+export async function getLiveProvisionalLeaderboard(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const leagueId = String(req.params.leagueId ?? "");
+    if (!leagueId) {
+      res.status(400).json({ success: false, message: "leagueId is required" });
+      return;
+    }
+
+    const rankings = liveProvisionalLeaderboardService.getLeagueLeaderboard(leagueId);
+    res.json({
+      success: true,
+      data: {
+        leagueId,
+        rankings,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * GET /api/v1/live/leaderboard/:leagueId/stream
+ *
+ * Real-time SSE stream pushing rank & point delta diffs to clients whenever a
+ * match event alters league standings.
+ */
+export async function streamLiveProvisionalLeaderboard(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const leagueId = String(req.params.leagueId ?? "");
+    if (!leagueId) {
+      res.status(400).json({ success: false, message: "leagueId is required" });
+      return;
+    }
+
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+
+    const send = (event: string, data: unknown) => {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+
+    send("standings", {
+      leagueId,
+      rankings: liveProvisionalLeaderboardService.getLeagueLeaderboard(leagueId),
+    });
+
+    const unsubscribe = liveProvisionalLeaderboardService.subscribeLeagueDiffs(
+      leagueId,
+      (diff) => {
+        send("diff", diff);
+      }
+    );
+
+    req.on("close", () => {
+      unsubscribe();
+    });
   } catch (error) {
     next(error);
   }

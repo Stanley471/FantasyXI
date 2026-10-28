@@ -4,15 +4,26 @@
  * Offline Squad Mutation Queue backed by IndexedDB with Background Sync
  * support via Service Worker. Persists lineup changes when offline and
  * syncs them when network connectivity is restored.
+ *
+ * Issue #334 adds causal ordering (a persisted, monotonically increasing
+ * `seq`), cross-tab mutual exclusion (Web Locks API) and deterministic
+ * conflict resolution: transient failures stop the flush so later mutations
+ * never overtake earlier ones, while server rejections (deadline passed,
+ * invalid formation) are dropped and reported so the UI can roll back.
  */
 
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
+import { isOfflineError } from "@/lib/offlineStore";
 
 export const DB_NAME = "fantasyxi-offline-queue";
 export const DB_VERSION = 1;
 export const STORE_NAME = "squad_mutations";
 export const SYNC_TAG = "sync-squad-mutations";
 export const MAX_QUEUE_RETRIES = 5;
+/** Short critical sections that read-modify-write queue entries. */
+const QUEUE_LOCK = "fantasyxi-offline-queue";
+/** Held for a whole flush, so only one tab replays the queue at a time. */
+const FLUSH_LOCK = "fantasyxi-offline-flush";
 
 export interface SquadPlayerMutation {
   playerId: number;
@@ -35,9 +46,13 @@ export interface QueuedSquadMutation {
   action: "update" | "create";
   payload: SquadMutationPayload;
   timestamp: number;
+  /** Causal position: replay order, persisted so it survives reloads (issue #334). */
+  seq?: number;
   retryCount: number;
-  status: "pending" | "syncing" | "failed";
+  status: "pending" | "syncing" | "failed" | "conflict";
   lastError?: string;
+  baseRevision?: string;
+  serverRevision?: string;
 }
 
 export interface OfflineQueueStorage {
@@ -48,12 +63,17 @@ export interface OfflineQueueStorage {
   clear(): Promise<void>;
 }
 
+/** Replay order: by causal sequence, entries from before #334 (no seq) first by time. */
+export function compareCausalOrder(a: QueuedSquadMutation, b: QueuedSquadMutation): number {
+  return (a.seq ?? 0) - (b.seq ?? 0) || a.timestamp - b.timestamp;
+}
+
 // In-memory fallback / testing storage
 export class MemoryQueueStorage implements OfflineQueueStorage {
   private store = new Map<string, QueuedSquadMutation>();
 
   async getAll(): Promise<QueuedSquadMutation[]> {
-    return Array.from(this.store.values()).sort((a, b) => a.timestamp - b.timestamp);
+    return Array.from(this.store.values()).sort(compareCausalOrder);
   }
 
   async get(id: string): Promise<QueuedSquadMutation | undefined> {
@@ -114,7 +134,7 @@ export class IndexedDBQueueStorage implements OfflineQueueStorage {
       const req = store.getAll();
       req.onsuccess = () => {
         const results = (req.result as QueuedSquadMutation[]) || [];
-        results.sort((a, b) => a.timestamp - b.timestamp);
+        results.sort(compareCausalOrder);
         resolve(results);
       };
       req.onerror = () => reject(req.error);
@@ -183,6 +203,41 @@ export function setCustomStorageForTest(storage: OfflineQueueStorage | null): vo
 }
 
 // ---------------------------------------------------------------------------
+// Mutual Exclusion
+// ---------------------------------------------------------------------------
+
+const inTabLocks = new Map<string, Promise<unknown>>();
+
+/**
+ * Runs `task` while holding the named lock. Uses the Web Locks API, which
+ * excludes every tab of this origin, and falls back to an in-tab promise
+ * chain where it is unavailable. With `ifAvailable`, returns null instead of
+ * waiting when the lock is held.
+ */
+export async function runExclusive<T>(
+  name: string,
+  task: () => Promise<T>,
+  options: { ifAvailable?: boolean } = {}
+): Promise<T | null> {
+  const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
+  if (locks?.request) {
+    return locks.request(name, { ifAvailable: options.ifAvailable ?? false }, (lock) =>
+      lock ? task() : null
+    );
+  }
+
+  const previous = inTabLocks.get(name);
+  if (previous && options.ifAvailable) return null;
+  const run = (previous ?? Promise.resolve()).catch(() => undefined).then(task);
+  inTabLocks.set(name, run);
+  try {
+    return await run;
+  } finally {
+    if (inTabLocks.get(name) === run) inTabLocks.delete(name);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Serialization & Deserialization
 // ---------------------------------------------------------------------------
 
@@ -235,32 +290,41 @@ function notifyQueueChange(): void {
 /**
  * Enqueue squad mutation. If a pending mutation for the same squad already exists,
  * conflict resolution replaces the older mutation with the latest squad tactics.
+ * Payloads are full lineup states (the API replaces the squad), so the newest
+ * one subsumes the older; the merged entry moves to the end of the causal order.
+ * O(n) in the queue length, which coalescing bounds by the number of squads.
  */
 export async function enqueueSquadMutation(data: {
   squadId?: number | string | null;
   userId?: string | null;
   action?: "update" | "create";
   payload: SquadMutationPayload;
+  baseRevision?: string;
 }): Promise<QueuedSquadMutation> {
-  const storage = getQueueStorage();
-  const existingMutations = await storage.getAll();
+  const mutation = (await runExclusive(QUEUE_LOCK, async () => {
+    const storage = getQueueStorage();
+    const existingMutations = await storage.getAll();
 
-  const conflicting = existingMutations.find(
-    (m) => m.status === "pending" && detectMutationConflict(m, data)
-  );
+    const conflicting = existingMutations.find(
+      (m) => m.status === "pending" && detectMutationConflict(m, data)
+    );
 
-  const mutation: QueuedSquadMutation = {
-    id: conflicting ? conflicting.id : `mut_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    squadId: data.squadId ?? null,
-    userId: data.userId ?? null,
-    action: data.action ?? (data.squadId ? "update" : "create"),
-    payload: data.payload,
-    timestamp: Date.now(),
-    retryCount: 0,
-    status: "pending",
-  };
+    const queued: QueuedSquadMutation = {
+      id: conflicting ? conflicting.id : `mut_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      squadId: data.squadId ?? null,
+      userId: data.userId ?? null,
+      action: data.action ?? (data.squadId ? "update" : "create"),
+      payload: data.payload,
+      baseRevision: conflicting?.baseRevision ?? data.baseRevision,
+      timestamp: Date.now(),
+      seq: existingMutations.reduce((max, m) => Math.max(max, m.seq ?? 0), 0) + 1,
+      retryCount: 0,
+      status: "pending",
+    };
 
-  await storage.put(mutation);
+    await storage.put(queued);
+    return queued;
+  }))!;
   notifyQueueChange();
 
   // Attempt to register background sync with the service worker
@@ -274,10 +338,16 @@ export async function getQueuedMutations(): Promise<QueuedSquadMutation[]> {
   return storage.getAll();
 }
 
+/** Whether a manager has lineup changes that the server has not accepted yet. */
+export async function hasUnsyncedMutations(userId: string): Promise<boolean> {
+  const all = await getQueueStorage().getAll();
+  return all.some((m) => m.userId === userId && m.status !== "failed");
+}
+
 export async function getQueuedMutationCount(): Promise<number> {
   const storage = getQueueStorage();
   const all = await storage.getAll();
-  return all.filter((m) => m.status === "pending" || m.status === "syncing").length;
+  return all.filter((m) => m.status === "pending" || m.status === "syncing" || m.status === "conflict").length;
 }
 
 export async function removeQueuedMutation(id: string): Promise<void> {
@@ -314,6 +384,19 @@ export async function clearQueuedMutations(): Promise<void> {
   notifyQueueChange();
 }
 
+export async function updateQueuedMutationRevision(id: string, revision: string): Promise<void> {
+  const storage = getQueueStorage();
+  const mutation = await storage.get(id);
+  if (!mutation) return;
+  mutation.baseRevision = revision;
+  mutation.serverRevision = undefined;
+  mutation.status = "pending";
+  mutation.retryCount = 0;
+  mutation.lastError = undefined;
+  await storage.put(mutation);
+  notifyQueueChange();
+}
+
 // ---------------------------------------------------------------------------
 // Background Sync Registration
 // ---------------------------------------------------------------------------
@@ -336,34 +419,125 @@ export async function registerBackgroundSync(): Promise<boolean> {
 }
 
 // ---------------------------------------------------------------------------
-// Sync Dispatcher
+// Sync Dispatcher & Conflict Resolution
 // ---------------------------------------------------------------------------
+
+/**
+ * offline / unauthorized / transient: the mutation stays queued and the flush
+ * stops, so later mutations cannot overtake it. rejected: the server refused
+ * the mutation itself; replaying it can never succeed.
+ */
+export type SyncFailureKind = "offline" | "unauthorized" | "transient" | "rejected";
+
+export type RejectionReason =
+  | "DEADLINE_PASSED"
+  | "INVALID_SQUAD"
+  | "FORBIDDEN"
+  | "NOT_FOUND"
+  | "RETRIES_EXHAUSTED"
+  | "REJECTED";
+
+export interface RejectedMutation {
+  mutation: QueuedSquadMutation;
+  reason: RejectionReason;
+  message: string;
+}
 
 export interface SyncResult {
   succeeded: number;
   failed: number;
   syncedIds: string[];
+  /** Mutations dropped from the queue; the local lineup must be rolled back. */
+  rejected: RejectedMutation[];
+  /** Why the flush stopped early, if it did; "busy" when another tab is flushing. */
+  halted: Exclude<SyncFailureKind, "rejected"> | "busy" | null;
+  conflicts: Array<{ id: string; squadId?: number | string | null; serverRevision: string }>;
 }
 
-export async function syncQueuedMutations(apiClient = api): Promise<SyncResult> {
-  const storage = getQueueStorage();
-  const all = await storage.getAll();
-  const pending = all.filter((m) => m.status === "pending");
+export function classifySyncError(error: unknown): SyncFailureKind {
+  if (isOfflineError(error)) return "offline";
+  if (!(error instanceof ApiError)) return "transient";
+  if (error.status === 401) return "unauthorized";
+  if (error.status === 408 || error.status === 425 || error.status === 429 || error.status >= 500) {
+    return "transient";
+  }
+  return error.status >= 400 ? "rejected" : "transient";
+}
 
+function rejectionReason(error: unknown): RejectionReason {
+  if (!(error instanceof ApiError)) return "REJECTED";
+  // SquadLockedError responses carry the gameweek deadline (squad.controller.ts)
+  if (error.status === 403 && (error.data as { deadline?: unknown } | undefined)?.deadline) {
+    return "DEADLINE_PASSED";
+  }
+  if (error.status === 400 || error.status === 422) return "INVALID_SQUAD";
+  if (error.status === 403) return "FORBIDDEN";
+  if (error.status === 404) return "NOT_FOUND";
+  return "REJECTED";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "Network error during squad sync";
+}
+
+/** Atomically moves a pending mutation to "syncing" and returns its latest payload. */
+async function claimMutation(id: string): Promise<QueuedSquadMutation | null> {
+  return runExclusive(QUEUE_LOCK, async () => {
+    const storage = getQueueStorage();
+    const mutation = await storage.get(id);
+    if (!mutation || mutation.status !== "pending") return null;
+    mutation.status = "syncing";
+    await storage.put(mutation);
+    return mutation;
+  });
+}
+
+/** Puts a claimed mutation back in the queue untouched (no retry is charged). */
+async function releaseMutation(mutation: QueuedSquadMutation): Promise<void> {
+  await getQueueStorage().put({ ...mutation, status: "pending" });
+}
+
+/**
+ * Replays queued mutations in causal order. Only one tab flushes at a time; a
+ * concurrent call returns immediately with `halted: "busy"`.
+ */
+export async function syncQueuedMutations(apiClient = api): Promise<SyncResult> {
   const result: SyncResult = {
     succeeded: 0,
     failed: 0,
     syncedIds: [],
+    rejected: [],
+    halted: null,
+    conflicts: [],
   };
+  const flushed = await runExclusive(FLUSH_LOCK, () => flushQueue(apiClient, result), { ifAvailable: true });
+  if (flushed === null) result.halted = "busy";
+  notifyQueueChange();
+  return result;
+}
 
-  for (const mutation of pending) {
-    // Mark mutation as syncing
-    mutation.status = "syncing";
-    await storage.put(mutation);
+async function flushQueue(apiClient: typeof api, result: SyncResult): Promise<SyncResult> {
+  const storage = getQueueStorage();
+
+  // Holding the flush lock, any "syncing" entry was stranded by a closed tab or reload
+  await runExclusive(QUEUE_LOCK, async () => {
+    for (const stale of (await storage.getAll()).filter((m) => m.status === "syncing")) {
+      await storage.put({ ...stale, status: "pending" });
+    }
+  });
+
+  const pendingIds = (await storage.getAll()).filter((m) => m.status === "pending").map((m) => m.id);
+
+  for (const id of pendingIds) {
+    const mutation = await claimMutation(id);
+    if (!mutation) continue;
 
     try {
       if (mutation.action === "update" && mutation.squadId) {
-        await apiClient.put(`/api/v1/squads/${mutation.squadId}`, mutation.payload);
+        await apiClient.put(`/api/v1/squads/${mutation.squadId}`, {
+          ...mutation.payload,
+          expectedUpdatedAt: mutation.baseRevision,
+        });
       } else {
         await apiClient.post("/api/v1/squads", {
           ...mutation.payload,
@@ -375,13 +549,41 @@ export async function syncQueuedMutations(apiClient = api): Promise<SyncResult> 
       result.succeeded += 1;
       result.syncedIds.push(mutation.id);
     } catch (err: unknown) {
+      const kind = classifySyncError(err);
+      if (kind === "offline" || kind === "unauthorized") {
+        await releaseMutation(mutation);
+        result.halted = kind;
+        break;
+      }
+
+      const conflictData = err instanceof ApiError
+        ? err.data as { data?: { revision?: unknown } }
+        : undefined;
+      if (err instanceof ApiError && err.status === 409 && typeof conflictData?.data?.revision === "string") {
+        mutation.status = "conflict";
+        mutation.serverRevision = conflictData.data.revision;
+        mutation.lastError = err.message;
+        await storage.put(mutation);
+        result.conflicts.push({ id: mutation.id, squadId: mutation.squadId, serverRevision: mutation.serverRevision });
+        continue;
+      }
       result.failed += 1;
-      const errorMsg =
-        err instanceof Error ? err.message : "Network error during squad sync";
-      await incrementMutationRetry(mutation.id, errorMsg);
+      if (kind === "rejected") {
+        await storage.delete(mutation.id);
+        result.rejected.push({ mutation, reason: rejectionReason(err), message: errorMessage(err) });
+        continue;
+      }
+
+      const retried = await incrementMutationRetry(mutation.id, errorMessage(err));
+      if (retried?.status === "failed") {
+        await storage.delete(mutation.id);
+        result.rejected.push({ mutation: retried, reason: "RETRIES_EXHAUSTED", message: errorMessage(err) });
+        continue;
+      }
+      result.halted = "transient";
+      break;
     }
   }
 
-  notifyQueueChange();
   return result;
 }

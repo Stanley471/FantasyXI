@@ -7,6 +7,7 @@ import { MobileNav } from "./MobileNav";
 import { GameweekBanner } from "./GameweekBanner";
 import { OfflineIndicator } from "./OfflineIndicator";
 import { PushNotificationPrompt } from "./PushNotificationPrompt";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { FootballIcon } from "@/components/ui/Icons";
 
 export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -39,7 +40,13 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
 
           {/* Desktop Left / Gameweek Status */}
           <div className="flex items-center gap-3">
-            <GameweekBanner />
+            <ErrorBoundary
+              name="GameweekBanner"
+              fallbackTitle="Gameweek countdown unavailable"
+              compact
+            >
+              <GameweekBanner />
+            </ErrorBoundary>
           </div>
 
           {/* Top Right Quick Actions */}
@@ -55,7 +62,9 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
 
         {/* Page Body Container */}
         <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-8 py-6">
-          {children}
+          <ErrorBoundary name="PageContent" fallbackTitle="Something went wrong in this view">
+            {children}
+          </ErrorBoundary>
         </main>
       </div>
 

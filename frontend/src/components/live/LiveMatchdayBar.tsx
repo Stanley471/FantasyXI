@@ -93,7 +93,7 @@ export const LiveMatchdayBar: React.FC<LiveMatchdayBarProps> = ({
             return (
               <div
                 key={e.playerId}
-                className={`flex-shrink-0 flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] border transition-colors ${
+                className={`flex-shrink-0 flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] border transition-colors ${
                   fresh
                     ? "border-emerald-400/60 bg-emerald-500/10 animate-pulse"
                     : "border-slate-800 bg-slate-950/60"

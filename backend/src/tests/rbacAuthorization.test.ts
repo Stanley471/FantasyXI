@@ -210,6 +210,8 @@ describe("Route authorization audit", () => {
   const PUBLIC_ROUTES = new Set([
     "POST /auth/register",
     "POST /auth/login",
+    // Completes a challenged sign-in: the caller has no session yet (issue #331)
+    "POST /auth/login/verify",
     "GET /auth/google",
     "GET /auth/google/callback",
     "GET /players/",
@@ -280,9 +282,8 @@ describe("Route authorization audit", () => {
   });
 
   it("keeps every public route read-only apart from sign-up and sign-in", () => {
-    const mutatingPublic = [...PUBLIC_ROUTES].filter(
-      (key) => !key.startsWith("GET ") && key !== "POST /auth/register" && key !== "POST /auth/login"
-    );
+    const SIGN_IN_ROUTES = new Set(["POST /auth/register", "POST /auth/login", "POST /auth/login/verify"]);
+    const mutatingPublic = [...PUBLIC_ROUTES].filter((key) => !key.startsWith("GET ") && !SIGN_IN_ROUTES.has(key));
     assert.deepEqual(mutatingPublic, []);
   });
 });

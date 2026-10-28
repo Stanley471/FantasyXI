@@ -130,6 +130,42 @@ export async function getPlayers(
   }
 }
 
+/** Fetches gameweek statistics for up to 50 players in one database query. */
+export async function batchPlayerStats(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const { playerIds, gameweekId } = req.body ?? {};
+    if (
+      !Array.isArray(playerIds) ||
+      playerIds.length > 50 ||
+      !playerIds.every((id) => Number.isSafeInteger(id) && id > 0) ||
+      !Number.isSafeInteger(gameweekId) ||
+      gameweekId <= 0
+    ) {
+      res.status(400).json({
+        success: false,
+        message: "playerIds must contain at most 50 positive integers and gameweekId must be a positive integer",
+      });
+      return;
+    }
+
+    const stats = await prisma.playerGameweekStats.findMany({
+      where: { playerId: { in: playerIds }, gameweekId },
+    });
+
+    res.json({
+      success: true,
+      data: stats,
+      byPlayerId: Object.fromEntries(stats.map((stat) => [stat.playerId, stat])),
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 export async function getPlayerById(
   req: Request,
   res: Response,

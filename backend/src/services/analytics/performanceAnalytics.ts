@@ -27,6 +27,8 @@ export interface GameweekScoreInput {
   benchPoints: number;
   captainPoints: number;
   transferCost: number;
+  transferCount?: number;
+  rank?: number | null;
 }
 
 export interface GameweekBenchmark {
@@ -47,9 +49,11 @@ export interface GameweekPerformance {
   gameweekName: string;
   deadline: string;
   points: number;
+  rank: number | null;
   benchPoints: number;
   captainPoints: number;
   transferCost: number;
+  transferCount: number;
   cumulativePoints: number;
   rollingAverage: number;
   averagePoints: number | null;
@@ -145,9 +149,11 @@ export function buildPerformanceAnalytics(
       gameweekName: score.gameweekName,
       deadline: score.deadline.toISOString(),
       points: score.points,
+      rank: score.rank ?? null,
       benchPoints: score.benchPoints,
       captainPoints: score.captainPoints,
       transferCost: score.transferCost,
+      transferCount: score.transferCount ?? 0,
       cumulativePoints,
       rollingAverage: round1(mean(window.map((w) => w.points))),
       averagePoints: benchmark ? round1(benchmark.averagePoints) : null,
@@ -241,15 +247,46 @@ export class AnalyticsService {
     ]);
 
     const gameweekIds = scores.map((s) => s.gameweekId);
-    const benchmarks =
-      gameweekIds.length === 0
-        ? []
-        : await this.db.squadGameweekScore.groupBy({
+    const [benchmarks, groupedScores, transferCounts] = gameweekIds.length === 0
+      ? [[], [], []]
+      : await Promise.all([
+        this.db.squadGameweekScore.groupBy({
             by: ["gameweekId"],
             where: { gameweekId: { in: gameweekIds } },
             _avg: { points: true },
             _max: { points: true },
-          });
+          }),
+        this.db.squadGameweekScore.groupBy({
+          by: ["gameweekId", "points"],
+          where: { gameweekId: { in: gameweekIds } },
+          _count: { _all: true },
+        }),
+        this.db.squadTransfer.groupBy({
+          by: ["gameweekId"],
+          where: { squadId: selected.id, gameweekId: { in: gameweekIds } },
+          _count: { _all: true },
+        }),
+      ]);
+
+    const rankByGameweekAndPoints = new Map<number, Map<number, number>>();
+    const groupsByGameweek = new Map<number, Array<{ points: number; count: number }>>();
+    for (const group of groupedScores) {
+      const groups = groupsByGameweek.get(group.gameweekId) ?? [];
+      groups.push({ points: group.points, count: group._count._all });
+      groupsByGameweek.set(group.gameweekId, groups);
+    }
+    for (const [gameweekId, groups] of groupsByGameweek) {
+      const byPoints = new Map<number, number>();
+      let squadsAhead = 0;
+      for (const group of groups.sort((a, b) => b.points - a.points)) {
+        byPoints.set(group.points, squadsAhead + 1);
+        squadsAhead += group.count;
+      }
+      rankByGameweekAndPoints.set(gameweekId, byPoints);
+    }
+    const transferCountByGameweek = new Map<number, number>(
+      transferCounts.map((row) => [row.gameweekId, row._count._all])
+    );
 
     const analytics = buildPerformanceAnalytics(
       scores.map((s) => ({
@@ -258,9 +295,11 @@ export class AnalyticsService {
         gameweekName: s.gameweek.name,
         deadline: s.gameweek.deadline,
         points: s.points,
+        rank: rankByGameweekAndPoints.get(s.gameweekId)?.get(s.points) ?? null,
         benchPoints: s.benchPoints,
         captainPoints: s.captainPoints,
         transferCost: s.transferCost,
+        transferCount: transferCountByGameweek.get(s.gameweekId) ?? 0,
       })),
       benchmarks.map((b) => ({
         gameweekId: b.gameweekId,

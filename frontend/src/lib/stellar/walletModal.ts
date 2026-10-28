@@ -1,5 +1,5 @@
 /**
- * Stellar Multi-Wallet Connect Support (Issue #223)
+ * Stellar Multi-Wallet Connect Support (Issue #223 & Issue #355)
  *
  * Configures @creit.tech/stellar-wallets-kit to provide a seamless modal
  * and wallet adapter abstraction supporting:
@@ -7,10 +7,12 @@
  * - Albedo (web popup — no browser extension required)
  * - xBull (extension and web)
  * - Hana (multi-chain / Stellar extension)
+ * - Ledger (hardware wallet via WebUSB/WebHID with on-device verification)
  *
  * Features:
  * - Persists selected wallet provider in localStorage
  * - Unified signTransaction abstraction invoking active wallet transparently
+ * - Hardware wallet signing with on-device confirmation for treasury/escrow safety
  * - Proper error handling for user signature rejection and modal close
  */
 
@@ -25,14 +27,36 @@ import { AlbedoModule } from "@creit.tech/stellar-wallets-kit/modules/albedo";
 import { xBullModule } from "@creit.tech/stellar-wallets-kit/modules/xbull";
 import { HanaModule } from "@creit.tech/stellar-wallets-kit/modules/hana";
 import type { WalletAdapter, WalletTransactionSigner } from "./sorobanDeposit";
+import {
+  LedgerWalletAdapter,
+  LedgerError,
+  LedgerUserRejectedError,
+  LedgerDeviceLockedError,
+  LedgerAppNotOpenError,
+  LedgerDeviceDisconnectedError,
+} from "./ledgerAdapter";
 
-export type SupportedWalletId = "freighter" | "albedo" | "xbull" | "hana";
+export type SupportedSoftwareWalletId = "freighter" | "albedo" | "xbull" | "hana";
+export type SupportedHardwareWalletId = "ledger";
+export type SupportedWalletId = SupportedSoftwareWalletId | SupportedHardwareWalletId;
 
-export const SUPPORTED_WALLET_IDS: readonly SupportedWalletId[] = [
+export const SUPPORTED_WALLET_IDS: readonly SupportedSoftwareWalletId[] = [
   "freighter",
   "albedo",
   "xbull",
   "hana",
+] as const;
+
+export const SUPPORTED_HARDWARE_WALLET_IDS: readonly SupportedHardwareWalletId[] = [
+  "ledger",
+] as const;
+
+export const ALL_SUPPORTED_WALLET_IDS: readonly SupportedWalletId[] = [
+  "freighter",
+  "albedo",
+  "xbull",
+  "hana",
+  "ledger",
 ] as const;
 
 export const WALLET_STORAGE_KEY = "fantasyxi.selected-wallet";
@@ -40,7 +64,7 @@ export const WALLET_STORAGE_KEY = "fantasyxi.selected-wallet";
 export interface WalletInfo {
   id: SupportedWalletId;
   name: string;
-  type: "extension" | "web";
+  type: "extension" | "web" | "hardware";
   description: string;
   isAvailable: boolean;
   requiresExtension: boolean;
@@ -88,7 +112,7 @@ export interface WalletModalOptions {
 }
 
 /**
- * Creates module instances for the 4 supported Stellar wallets.
+ * Creates module instances for the supported software Stellar wallets.
  */
 export function createSupportedWalletModules(): ModuleInterface[] {
   return [
@@ -105,7 +129,7 @@ export function createSupportedWalletModules(): ModuleInterface[] {
 export function getPersistedWallet(): SupportedWalletId | null {
   if (typeof window === "undefined" || !window.localStorage) return null;
   const item = window.localStorage.getItem(WALLET_STORAGE_KEY) as SupportedWalletId | null;
-  if (item && SUPPORTED_WALLET_IDS.includes(item)) {
+  if (item && ALL_SUPPORTED_WALLET_IDS.includes(item)) {
     return item;
   }
   return null;
@@ -127,20 +151,26 @@ export class WalletModalManager {
   private activeAddress: string | null = null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private kitInstance: any = StellarWalletsKit;
+  private ledgerAdapter: LedgerWalletAdapter;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  constructor(customKit?: any) {
+  constructor(customKit?: any, customLedger?: LedgerWalletAdapter) {
     if (customKit) {
       this.kitInstance = customKit;
     }
+    this.ledgerAdapter = customLedger ?? new LedgerWalletAdapter();
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  public static getInstance(customKit?: any): WalletModalManager {
-    if (!WalletModalManager.instance || customKit) {
-      WalletModalManager.instance = new WalletModalManager(customKit);
+  public static getInstance(customKit?: any, customLedger?: LedgerWalletAdapter): WalletModalManager {
+    if (!WalletModalManager.instance || customKit || customLedger) {
+      WalletModalManager.instance = new WalletModalManager(customKit, customLedger);
     }
     return WalletModalManager.instance;
+  }
+
+  public getLedgerAdapter(): LedgerWalletAdapter {
+    return this.ledgerAdapter;
   }
 
   public init(network: WalletKitNetworks = WalletKitNetworks.TESTNET): void {
@@ -187,6 +217,16 @@ export class WalletModalManager {
         requiresExtension: !isWeb,
       });
     }
+
+    // Ledger Hardware Wallet
+    results.push({
+      id: "ledger",
+      name: "Ledger",
+      type: "hardware",
+      description: "Hardware wallet via WebUSB/WebHID with on-device signature verification",
+      isAvailable: true,
+      requiresExtension: false,
+    });
 
     return results;
   }
@@ -236,6 +276,28 @@ export class WalletModalManager {
   }
 
   public async connect(walletId: SupportedWalletId): Promise<WalletConnectionResult> {
+    if (walletId === "ledger") {
+      try {
+        const res = await this.ledgerAdapter.connect();
+        this.activeWallet = "ledger";
+        this.activeAddress = res.address;
+        setPersistedWallet("ledger");
+        return {
+          address: res.address,
+          walletId: "ledger",
+        };
+      } catch (err: unknown) {
+        if (err instanceof LedgerUserRejectedError) {
+          throw new WalletUserRejectedError("connection");
+        }
+        if (err instanceof LedgerError) {
+          throw new WalletError(err.message, err.code);
+        }
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new WalletError(`Failed to connect to Ledger: ${msg}`, "CONNECTION_FAILED");
+      }
+    }
+
     this.init();
     try {
       this.kitInstance.setWallet(walletId);
@@ -262,7 +324,11 @@ export class WalletModalManager {
 
   public async disconnect(): Promise<void> {
     try {
-      await this.kitInstance.disconnect();
+      if (this.activeWallet === "ledger") {
+        await this.ledgerAdapter.disconnect();
+      } else {
+        await this.kitInstance.disconnect();
+      }
     } finally {
       this.activeWallet = null;
       this.activeAddress = null;
@@ -278,12 +344,29 @@ export class WalletModalManager {
       const saved = getPersistedWallet();
       if (saved) {
         this.activeWallet = saved;
-        this.kitInstance.setWallet(saved);
+        if (saved !== "ledger") {
+          this.kitInstance.setWallet(saved);
+        }
       } else {
         throw new WalletError(
           "No active wallet connected. Please connect a wallet before signing.",
           "NOT_CONNECTED"
         );
+      }
+    }
+
+    if (this.activeWallet === "ledger") {
+      try {
+        return await this.ledgerAdapter.signTransaction(xdr, options);
+      } catch (err: unknown) {
+        if (err instanceof LedgerUserRejectedError) {
+          throw new WalletUserRejectedError("signature");
+        }
+        if (err instanceof LedgerError) {
+          throw new WalletError(err.message, err.code);
+        }
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new WalletError(`Ledger transaction signing failed: ${msg}`, "SIGNING_FAILED");
       }
     }
 
@@ -305,6 +388,28 @@ export class WalletModalManager {
 
   public createWalletAdapter(walletId?: SupportedWalletId): WalletAdapter {
     const targetWallet = walletId || this.activeWallet || "freighter";
+
+    if (targetWallet === "ledger") {
+      return {
+        id: "ledger",
+        connect: async () => {
+          await this.connect("ledger");
+        },
+        disconnect: async () => {
+          await this.disconnect();
+        },
+        getPublicKey: async () => {
+          if (this.activeAddress) return this.activeAddress;
+          const res = await this.ledgerAdapter.getPublicKey();
+          this.activeAddress = res.address;
+          return res.address;
+        },
+        signTransaction: async (xdr, options) => {
+          return this.signTransaction(xdr, options);
+        },
+      };
+    }
+
     return {
       id: targetWallet,
       connect: async () => {
@@ -349,3 +454,12 @@ export const signTransaction: WalletTransactionSigner = (xdr, options) =>
 
 export const createWalletAdapter = (walletId?: SupportedWalletId) =>
   walletModalManager.createWalletAdapter(walletId);
+
+export {
+  LedgerWalletAdapter,
+  LedgerError,
+  LedgerUserRejectedError,
+  LedgerDeviceLockedError,
+  LedgerAppNotOpenError,
+  LedgerDeviceDisconnectedError,
+};

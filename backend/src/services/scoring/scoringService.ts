@@ -1,6 +1,10 @@
 import type { PrismaClient } from "@prisma/client";
 import { prisma } from "../../config/db.js";
 import { ChipType, Position, SQUAD_RULES } from "../../types/index.js";
+import type {
+  LeagueScoringConfig,
+} from "../../models/leagueScoringConfig.js";
+import { parseLeagueScoringConfig } from "../../models/leagueScoringConfig.js";
 
 /**
  * Scoring and Fantasy Points Calculation Service.
@@ -37,6 +41,23 @@ export interface LineupScoreOptions {
   chip?: ChipType | null;
   /** Transfer point deduction for the gameweek (e.g. 4 per extra transfer) */
   transferCost?: number;
+  scoringConfig?: LeagueScoringConfig;
+}
+
+export interface PlayerGameweekScoringStats {
+  minutes: number;
+  totalPoints: number;
+  goals?: number;
+  assists?: number;
+  cleanSheet?: boolean;
+  goalsConceded?: number;
+  saves?: number;
+  penaltiesSaved?: number;
+  penaltiesMissed?: number;
+  yellowCards?: number;
+  redCards?: number;
+  ownGoals?: number;
+  bonus?: number;
 }
 
 export interface GameweekCalculationResult {
@@ -201,6 +222,59 @@ export class AutoSubstitutionEngine {
 }
 
 export class ScoringService {
+  private static readonly MAX_COMPILED_SCORERS = 256;
+  private static readonly compiledScorers = new Map<
+    string,
+    (position: Position, stats: PlayerGameweekScoringStats) => number
+  >();
+
+  private static getCompiledScorer(config: LeagueScoringConfig) {
+    const canonical = parseLeagueScoringConfig(config);
+    const key = JSON.stringify(canonical);
+    const cached = this.compiledScorers.get(key);
+    if (cached) return this.refreshCompiledScorer(key, cached);
+
+    const scorer = (position: Position, stats: PlayerGameweekScoringStats) => {
+      const minutes = stats.minutes ?? 0;
+      const goalsConcededWeight = canonical.goalsConcededPerTwo[position];
+      return (
+        (minutes > 0
+          ? minutes >= 60
+            ? canonical.appearance.sixtyOrMoreMinutes
+            : canonical.appearance.underSixtyMinutes
+          : 0) +
+        (stats.goals ?? 0) * canonical.goals[position] +
+        (stats.assists ?? 0) * canonical.assists +
+        (stats.cleanSheet ? canonical.cleanSheets[position] : 0) +
+        Math.floor((stats.goalsConceded ?? 0) / 2) * goalsConcededWeight +
+        Math.floor((stats.saves ?? 0) / 3) * canonical.savesPerThree +
+        (stats.penaltiesSaved ?? 0) * canonical.penaltySaves +
+        (stats.penaltiesMissed ?? 0) * canonical.penaltyMisses +
+        (stats.yellowCards ?? 0) * canonical.yellowCards +
+        (stats.redCards ?? 0) * canonical.redCards +
+        (stats.ownGoals ?? 0) * canonical.ownGoals +
+        (stats.bonus ?? 0) * canonical.bonus
+      );
+    };
+
+    if (this.compiledScorers.size >= this.MAX_COMPILED_SCORERS) {
+      const oldestKey = this.compiledScorers.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.compiledScorers.delete(oldestKey);
+      }
+    }
+    this.compiledScorers.set(key, scorer);
+    return scorer;
+  }
+
+  private static refreshCompiledScorer(
+    key: string,
+    scorer: (position: Position, stats: PlayerGameweekScoringStats) => number
+  ) {
+    this.compiledScorers.delete(key);
+    this.compiledScorers.set(key, scorer);
+    return scorer;
+  }
   /** The database client is injectable so scoring can be exercised against in-memory fakes. */
   constructor(private readonly db: PrismaClient = prisma) {}
 
@@ -217,7 +291,7 @@ export class ScoringService {
       isViceCaptain: boolean;
       positionOrder: number; // 1 to 15 (1-11 starters, 12 bench GKP, 13-15 bench outfield)
     }>,
-    statsMap: Map<number, { minutes: number; totalPoints: number }>,
+    statsMap: Map<number, PlayerGameweekScoringStats>,
     options: LineupScoreOptions = {}
   ): {
     startingPoints: number;
@@ -229,6 +303,24 @@ export class ScoringService {
   } {
     const chip = options.chip ?? null;
     const isBenchBoost = chip === ChipType.BENCH_BOOST;
+    if (options.scoringConfig) {
+      const scorer = this.getCompiledScorer(options.scoringConfig);
+      const calculatedStats = new Map<number, PlayerGameweekScoringStats>();
+      for (const player of players) {
+        const stats = statsMap.get(player.playerId) ?? {
+          minutes: 0,
+          totalPoints: 0,
+        };
+        calculatedStats.set(player.playerId, {
+          minutes: stats.minutes,
+          totalPoints: scorer(player.position, stats),
+        });
+      }
+      return this.calculateLineupScore(players, calculatedStats, {
+        chip,
+        transferCost: options.transferCost,
+      });
+    }
 
     // 1. Separate starters and bench
     const starterDetails: PlayerScoreDetail[] = [];
@@ -381,7 +473,7 @@ export class ScoringService {
       },
     });
 
-    const statsMap = new Map<number, { minutes: number; totalPoints: number }>();
+    const statsMap = new Map<number, PlayerGameweekScoringStats>();
     for (const st of statsList) {
       const existing = statsMap.get(st.playerId);
       if (existing) {
@@ -412,7 +504,7 @@ export class ScoringService {
         where: { squadId_gameweekId: { squadId, gameweekId } },
       }),
     ]);
-    const chip = chipUsage?.chipType ?? null;
+    const chip = chipUsage && !chipUsage.cancelledAt ? chipUsage.chipType : null;
 
     const result = ScoringService.calculateLineupScore(formattedPlayers, statsMap, {
       chip,
@@ -467,6 +559,83 @@ export class ScoringService {
       totalPoints: result.totalPoints,
       lineupDetails: result.details,
     };
+  }
+
+  /**
+   * Calculates one squad's score under a private league's rules and persists it
+   * independently of the platform-wide FPL score.
+   */
+  public async calculateAndPersistLeagueScore(
+    leagueId: string,
+    squadId: string,
+    gameweekId: number,
+    scoringConfig: LeagueScoringConfig
+  ): Promise<number> {
+    const squad = await prisma.squad.findUnique({
+      where: { id: squadId },
+      include: {
+        players: {
+          include: { player: true },
+          orderBy: { positionOrder: "asc" },
+        },
+      },
+    });
+    if (!squad) {
+      throw new Error(`Squad ${squadId} not found`);
+    }
+
+    const playerIds = squad.players.map((player) => player.playerId);
+    const [statsList, chipUsage, existingScore] = await Promise.all([
+      prisma.playerGameweekStats.findMany({
+        where: { gameweekId, playerId: { in: playerIds } },
+      }),
+      prisma.squadChipUsage.findUnique({
+        where: { squadId_gameweekId: { squadId, gameweekId } },
+      }),
+      prisma.squadGameweekScore.findUnique({
+        where: { squadId_gameweekId: { squadId, gameweekId } },
+      }),
+    ]);
+    const statsMap = new Map<number, PlayerGameweekScoringStats>();
+    for (const stats of statsList) {
+      statsMap.set(stats.playerId, {
+        minutes: stats.minutes,
+        totalPoints: stats.totalPoints,
+        goals: stats.goals,
+        assists: stats.assists,
+        cleanSheet: stats.cleanSheet,
+        goalsConceded: stats.goalsConceded,
+        saves: stats.saves,
+        penaltiesSaved: stats.penaltiesSaved,
+        penaltiesMissed: stats.penaltiesMissed,
+        yellowCards: stats.yellowCards,
+        redCards: stats.redCards,
+        ownGoals: stats.ownGoals,
+        bonus: stats.bonus,
+      });
+    }
+    const players = squad.players.map((player) => ({
+      playerId: player.playerId,
+      position: player.player.position,
+      isStarter: player.isStarter,
+      isCaptain: player.isCaptain,
+      isViceCaptain: player.isViceCaptain,
+      positionOrder: player.positionOrder,
+    }));
+    const result = ScoringService.calculateLineupScore(players, statsMap, {
+      chip: chipUsage?.chipType ?? null,
+      transferCost: existingScore?.transferCost ?? 0,
+      scoringConfig,
+    });
+
+    await prisma.leagueGameweekScore.upsert({
+      where: {
+        leagueId_squadId_gameweekId: { leagueId, squadId, gameweekId },
+      },
+      update: { points: result.totalPoints },
+      create: { leagueId, squadId, gameweekId, points: result.totalPoints },
+    });
+    return result.totalPoints;
   }
 
   /**

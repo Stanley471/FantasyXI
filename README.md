@@ -94,6 +94,12 @@ FantasyXI enforces a strict boundary between Web2 application gameplay and Web3 
 | **Soroban RPC Server** | `https://soroban-testnet.stellar.org` |
 | **Horizon API Server** | `https://horizon-testnet.stellar.org` |
 
+### Financial Ledger Auditing
+
+The backend runs a PostgreSQL-backed escrow reconciliation every five minutes. It compares confirmed league transactions and active member deposits with the Soroban USDC escrow balance, and cross-checks indexed deposit, settlement, refund, and claim events. Reports and their findings are stored in `ledger_audit_runs` / `ledger_audit_findings`; each report includes Horizon, Soroban, and event-indexer ledger sequences and a SHA-256 hash linked to the previous report. High-severity findings are logged as operational alerts. The auditor is read-only and never applies balance corrections.
+
+Staff can review recent reports at `GET /api/v1/admin/ledger-audits` (ADMIN or MODERATOR). Configure `LEDGER_AUDIT_THRESHOLD_STROOPS` to set the global balance alert threshold; the default is `100000` stroops (0.01 USDC). Apply the added Prisma models before deploying the auditor with `cd backend && npx prisma db push`.
+
 ---
 
 ## Core Subsystems
@@ -267,6 +273,9 @@ For the current Next.js setup, `npm run dev` starts the local development server
 
 ## Testing & Quality Assurance
 
+See [backend resilience checks](backend/RESILIENCE.md) for financial chaos testing,
+read-replica consistency, Redis Streams fanout, and local k6 load testing.
+
 FantasyXI maintains automated test suites across all architectural layers.
 
 ### 1. Backend Automated Unit Tests (118 Tests)
@@ -352,6 +361,7 @@ npm run build && npm start
 - **Google Sign-In & Account Linking**: Managers can sign in with email/password or Google (OAuth 2.0 / OpenID Connect); both open the same account. A verified Google email matching an existing account is linked automatically, and signed-in managers can link or unlink Google (and add a password to a Google-only account) from their profile. The OAuth state is HMAC-signed and bound to the initiating browser with an HttpOnly nonce cookie, return paths are restricted to same-site paths, and the issued JWT is handed to the frontend in the URL fragment so it never reaches server logs.
 - **Envelope XDR Verification**: Payments are verified on-chain by decoding `invokeHostFunction` transaction envelopes, matching contract ID, function call, sender public key, and league ID.
 - **SQL & Injection Protection**: Database interactions are performed using Prisma ORM with parameterized queries.
+- **Rate Limiting & Authentication**: Public API traffic uses an atomic Redis sliding-window limiter with per-route-group anonymous, authenticated-user, and webhook tiers. Configure `RATE_LIMIT_REDIS_URL` (or `REDIS_URL`) for shared limits across instances; while Redis is unavailable, a bounded conservative in-process limiter is used. Route thresholds and windows are defined in `backend/src/config/rateLimit.ts`. The higher webhook tier is enabled only on webhook paths when `WEBHOOK_RATE_LIMIT_SECRET` matches the `X-Webhook-Secret` header. Authentication endpoints retain a separate strict IP limiter.
 - **Rate Limiting & Authentication**: Endpoints requiring user context are guarded by JWT authorization middleware with CSRF-protected OAuth state tokens.
 - **Role-Based Access Control**: Every protected endpoint declares the permission it needs via `requirePermission`; the role-to-permission matrix lives in [`backend/src/config/permissions.ts`](backend/src/config/permissions.ts). Roles are `USER` (managers), `MODERATOR`, `ADMIN` and `SERVICE` (automated callers). Elevated permissions are re-checked against the database on each request, so demoting an account takes effect immediately. A route audit test fails the build if a non-public endpoint is added without a permission guard.
 - **Service Credentials**: Schedulers and monitoring authenticate with the `X-Service-Key` header using keys from `SERVICE_API_KEYS` (`name:key` pairs, keys of at least 32 characters). The `SERVICE` role can run syncs, score calculation, reconciliation and queue health checks, but cannot act as a manager, and it can never be claimed through a user JWT.

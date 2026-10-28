@@ -1,9 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import jwt from "jsonwebtoken";
 import { Request, Response, NextFunction } from "express";
 import { requireAuth, optionalAuth } from "../middleware/authMiddleware.js";
-import { signAccessToken, getJwtSecret } from "../config/jwt.js";
+import { signAccessToken, jwtKeyRing } from "../config/jwt.js";
 
 /**
  * Creates mock Express Request and Response objects.
@@ -103,16 +102,14 @@ describe("JWT Authentication Middleware", () => {
   });
 
   it("should reject expired token with clear 401 expiration message", () => {
-    // Generate a token that expired 10 seconds ago
-    const secret = getJwtSecret();
-    const expiredToken = jwt.sign(
+    // Generate a token that expired 10 seconds ago, signed with the current key
+    const expiredToken = jwtKeyRing.sign(
       {
         userId: "usr_expired",
         email: "expired@example.com",
         username: "expired",
       },
-      secret,
-      { expiresIn: "-10s" }
+      "-10s"
     );
 
     const { req, res, next, wasNextCalled, getStatusCode, getJsonResponse } =

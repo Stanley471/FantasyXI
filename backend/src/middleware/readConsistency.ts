@@ -1,5 +1,19 @@
 import { Request, Response, NextFunction } from "express";
-import { runWithReplicaReads, runOnPrimary } from "../config/readReplicas.js";
+import { readConsistencyStorage, runWithReplicaReads, runOnPrimary } from "../config/readReplicas.js";
+
+import { verifyAccessToken } from "../config/jwt.js";
+
+/** Establish identity before optional route auth; the verified token is used only for routing. */
+export function requestReadConsistency(req: Request, _res: Response, next: NextFunction): void {
+  let verifiedUserId: string | undefined;
+  const match = /^Bearer\s+(\S+)$/i.exec(req.headers.authorization ?? "");
+  if (match) {
+    try { verifiedUserId = verifyAccessToken(match[1]).userId; } catch { /* auth guards reject invalid tokens */ }
+  }
+  readConsistencyStorage.run({
+    allowReplica: false, hasWritten: false, userId: () => req.user?.id ?? verifiedUserId,
+  }, next);
+}
 
 /**
  * Read-consistency middleware for multi-region read replicas.
