@@ -157,7 +157,7 @@ export function LiveMatchEventsTimeline({
               Live Match Events
             </h3>
           </div>
-          <span className="text-xs px-2.5 py-0.5 rounded-full font-medium bg-gray-800 text-gray-400 border border-gray-700">
+          <span className="text-xs font-medium text-gray-400">
             {timeline?.gameweek?.name ?? `Gameweek ${gameweekId}`}
           </span>
         </div>
@@ -296,7 +296,7 @@ export function LiveMatchEventsTimeline({
                 {/* Main Content */}
                 <div className="flex-1 min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-xs font-mono font-semibold px-1.5 py-0.5 rounded bg-gray-800 text-gray-300">
+                    <span className="text-xs font-mono font-semibold text-gray-300 tabular-nums">
                       {evt.minute}&apos;
                     </span>
 
@@ -310,8 +310,8 @@ export function LiveMatchEventsTimeline({
 
                     {/* User Team Badge */}
                     {inUserTeam && (
-                      <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 flex items-center gap-1">
-                        <span>YOUR SQUAD</span>
+                      <span className="text-[11px] font-bold uppercase tracking-wide text-emerald-400 flex items-center gap-1">
+                        <span>Your squad</span>
                         {isCaptain && (
                           <span className="bg-amber-400 text-gray-900 px-1 rounded text-[9px] font-black">
                             C

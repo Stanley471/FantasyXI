@@ -228,3 +228,28 @@ describe("SquadValidator Domain Rules", () => {
     );
   });
 });
+
+describe("SquadValidator.sanitizeSquadName", () => {
+  it("trims leading and trailing whitespace", () => {
+    assert.equal(SquadValidator.sanitizeSquadName(" My Team "), "My Team");
+  });
+
+  it("collapses consecutive whitespace into a single space", () => {
+    assert.equal(SquadValidator.sanitizeSquadName("My    Fantasy \t\n XI"), "My Fantasy XI");
+  });
+
+  it("strips control and invisible format characters", () => {
+    assert.equal(SquadValidator.sanitizeSquadName("My\u0000 Te\bam​\u007F"), "My Team");
+  });
+
+  it("rejects names shorter than 3 printable characters", () => {
+    for (const name of ["", "     ", " \t\n ", "ab", " a\u0000b ", "​​​", undefined]) {
+      assert.throws(
+        () => SquadValidator.sanitizeSquadName(name),
+        (err: unknown) =>
+          err instanceof SquadValidationError && err.message === "Squad name must be at least 3 characters"
+      );
+    }
+    assert.equal(SquadValidator.sanitizeSquadName(" abc "), "abc");
+  });
+});

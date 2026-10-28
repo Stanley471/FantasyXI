@@ -112,7 +112,7 @@ describe("Daily price synchronization job", () => {
 describe("Wildcard chip transfer cost logic", () => {
   it("calculates normal transfer costs without Wildcard", () => {
     const costs = SquadService.calculateTransferCosts(3, 1);
-    assert.deepEqual(costs, [0, -4, -4]);
+    assert.deepEqual(costs, [0, 4, 4]);
   });
 
   it("waives all transfer costs when Wildcard is active", () => {

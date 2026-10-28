@@ -71,7 +71,8 @@ export function clearOfflineData(): void {
  * flagged `offline: true`.
  */
 export function isOfflineError(error: unknown): boolean {
-  if (typeof navigator !== "undefined" && !navigator.onLine) return true;
+  // Strict check: non-browser runtimes expose a navigator without onLine
+  if (typeof navigator !== "undefined" && navigator.onLine === false) return true;
   if (error instanceof TypeError) return true;
   return (
     error instanceof ApiError &&

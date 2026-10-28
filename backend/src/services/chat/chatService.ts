@@ -312,12 +312,12 @@ export class ChatService {
 export const chatService = new ChatService();
 
 export async function initRedisChat(service: ChatService = chatService): Promise<any> {
-  const { RedisChatAdapter } = await import("./redisChatAdapter.js");
+  const { StreamChatAdapter } = await import("./streamChatAdapter.js");
   const { getRedisConfig } = await import("../../config/redis.js");
   const config = getRedisConfig();
   if (config.enabled) {
-    const adapter = new RedisChatAdapter();
-    adapter.attach(service.hub);
+    const adapter = new StreamChatAdapter(service.hub);
+    service.hub.setAdapter(adapter);
     return adapter;
   }
   return null;

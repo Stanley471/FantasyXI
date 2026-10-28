@@ -8,6 +8,7 @@ import { api } from "@/lib/api";
 import { Squad, League, GameweekHistoryEntry } from "@/types";
 import { Button } from "@/components/ui/Button";
 import { SignInMethods } from "@/components/auth/SignInMethods";
+import { ActiveSessionsManager } from "@/components/profile/ActiveSessionsManager";
 import {
   IconUser,
   IconFootball,
@@ -227,6 +228,9 @@ export default function ProfilePage() {
 
       {/* Email/password and Google sign-in management */}
       <SignInMethods />
+
+      {/* Active multi-device sessions & remote invalidation (Issue #342) */}
+      <ActiveSessionsManager />
 
       {/* Account & Security Information */}
       <div className="bg-pitch-surface border border-pitch-border rounded-xl p-6 shadow-md space-y-4">

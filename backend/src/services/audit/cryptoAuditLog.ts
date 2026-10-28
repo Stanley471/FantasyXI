@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { prisma } from "../../config/db.js";
 
 export const GENESIS_HASH = "0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -181,3 +182,61 @@ export class CryptographicAuditLog {
 }
 
 export const cryptoAuditLog = new CryptographicAuditLog();
+
+/** Minimal Prisma surface used by PersistentCryptoAuditLog, injectable for tests. */
+export interface CryptoAuditLogStore {
+  cryptoAuditLogEntry: {
+    findFirst(args: { orderBy: { sequence: "desc" } }): Promise<CryptoAuditEntry | null>;
+    findMany(args: { orderBy: { sequence: "asc" } }): Promise<CryptoAuditEntry[]>;
+    create(args: { data: Omit<CryptoAuditEntry, "id"> }): Promise<CryptoAuditEntry>;
+  };
+}
+
+const MAX_APPEND_ATTEMPTS = 3;
+
+/**
+ * PostgreSQL-backed hash chain (`crypto_audit_log`). Appends read the chain
+ * head and insert the next link; the unique `sequence` and `hash` columns
+ * reject a concurrent append that raced on the same head, which is retried.
+ */
+export class PersistentCryptoAuditLog {
+  constructor(private readonly db: CryptoAuditLogStore = prisma as unknown as CryptoAuditLogStore) {}
+
+  public async append(
+    action: string,
+    actorId: string,
+    entityType: string,
+    entityId: string,
+    payload: Record<string, unknown>
+  ): Promise<CryptoAuditEntry> {
+    for (let attempt = 1; ; attempt++) {
+      const head = await this.db.cryptoAuditLogEntry.findFirst({ orderBy: { sequence: "desc" } });
+      const previousHash = head?.hash ?? GENESIS_HASH;
+      const timestamp = new Date().toISOString();
+      try {
+        return await this.db.cryptoAuditLogEntry.create({
+          data: {
+            sequence: (head?.sequence ?? 0) + 1,
+            action,
+            actorId,
+            entityType,
+            entityId,
+            payload,
+            timestamp,
+            previousHash,
+            hash: calculateAuditHash(previousHash, payload, timestamp, actorId),
+          },
+        });
+      } catch (error) {
+        const isRace = (error as { code?: string }).code === "P2002";
+        if (!isRace || attempt >= MAX_APPEND_ATTEMPTS) throw error;
+      }
+    }
+  }
+
+  /** Re-verifies the whole persisted chain from genesis. */
+  public async verify(): Promise<VerificationResult> {
+    const entries = await this.db.cryptoAuditLogEntry.findMany({ orderBy: { sequence: "asc" } });
+    return new CryptographicAuditLog().verify(entries);
+  }
+}

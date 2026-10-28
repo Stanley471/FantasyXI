@@ -241,5 +241,55 @@ describe("Webhook Retry Engine & Dead-Letter Queue (#219)", () => {
       assert.equal(reactivate.getStatus(), 200);
       assert.equal(reactivate.getBody().endpoint.isActive, true);
     });
+
+    it("rejects duplicate normalized subscriptions and updates disjoint events", async () => {
+      const { createEndpoint } = await import("../controllers/webhook.controller.js");
+      function makeReqRes(body: any) {
+        let statusCode = 200;
+        let jsonResponse: any;
+        const res: any = {
+          status(code: number) {
+            statusCode = code;
+            return res;
+          },
+          json(value: any) {
+            jsonResponse = value;
+            return res;
+          },
+        };
+        return {
+          req: { body, user: { id: "webhook-uniqueness-user" } } as any,
+          res,
+          getStatus: () => statusCode,
+          getBody: () => jsonResponse,
+        };
+      }
+
+      const suffix = `/${Date.now()}-duplicate`;
+      const first = makeReqRes({
+        url: ` HTTPS://Example.COM/hooks${suffix}/ `,
+        events: ["league.created"],
+      });
+      await createEndpoint(first.req, first.res);
+      assert.equal(first.getStatus(), 201);
+      assert.equal(first.getBody().endpoint.url, `https://example.com/hooks${suffix}`);
+
+      const duplicate = makeReqRes({
+        url: `https://EXAMPLE.com/hooks${suffix}`,
+        events: ["league.created"],
+      });
+      await createEndpoint(duplicate.req, duplicate.res);
+      assert.equal(duplicate.getStatus(), 409);
+      assert.equal(duplicate.getBody().error, "Webhook subscription already exists for this URL and event");
+
+      const updated = makeReqRes({
+        url: `https://example.com/hooks${suffix}/`,
+        events: ["league.updated"],
+      });
+      await createEndpoint(updated.req, updated.res);
+      assert.equal(updated.getStatus(), 200);
+      assert.deepEqual(updated.getBody().endpoint.events, ["league.created", "league.updated"]);
+      assert.equal(updated.getBody().updated, true);
+    });
   });
 });

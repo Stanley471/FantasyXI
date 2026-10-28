@@ -4,6 +4,14 @@ import React, { useEffect, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
 import { api, ApiError } from "@/lib/api";
 import { describeGoogleAuthError, redirectToGoogleLink } from "@/lib/googleAuth";
+import {
+  deletePasskey,
+  describePasskeyError,
+  listPasskeys,
+  registerPasskey,
+  usePasskeySupport,
+  type Passkey,
+} from "@/lib/passkeys";
 import { Button } from "@/components/ui/Button";
 import { IconGoogle, IconShield, IconCheck, IconAlertCircle } from "@/components/ui/Icons";
 
@@ -24,8 +32,9 @@ const inputClass =
   "w-full px-3 py-2 bg-slate-950/70 border border-slate-700/80 rounded-lg text-slate-100 placeholder-slate-500 text-sm focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors";
 
 /**
- * Lets a manager see and manage how they sign in: email & password and/or
- * Google. Either method opens the same account.
+ * Lets a manager see and manage how they sign in: email & password, Google
+ * and/or passkeys (issue #273). Every method opens the same account; a
+ * registered passkey also confirms every password sign-in.
  */
 export function SignInMethods() {
   const { user, refreshUser } = useAuth();
@@ -33,7 +42,15 @@ export function SignInMethods() {
   const hasGoogle = Boolean(user?.authProviders?.google);
 
   const [notice, setNotice] = useState<Notice>(readLinkResult);
-  const [busy, setBusy] = useState<"link" | "unlink" | "password" | null>(null);
+  const [busy, setBusy] = useState<"link" | "unlink" | "password" | "passkey" | `remove:${string}` | null>(null);
+  const [passkeys, setPasskeys] = useState<Passkey[]>([]);
+  const canUsePasskey = usePasskeySupport();
+
+  useEffect(() => {
+    listPasskeys()
+      .then(setPasskeys)
+      .catch(() => setPasskeys([]));
+  }, []);
   const [showPasswordForm, setShowPasswordForm] = useState(false);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -73,6 +90,37 @@ export function SignInMethods() {
       setNotice({ kind: "success", text: "Google account unlinked." });
     } catch (err) {
       setNotice({ kind: "error", text: errorText(err, "Could not unlink Google.") });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleAddPasskey = async () => {
+    setNotice(null);
+    setBusy("passkey");
+    try {
+      const added = await registerPasskey();
+      setPasskeys((current) => [...current, added]);
+      setNotice({
+        kind: "success",
+        text: "Passkey added. Use it to sign in without a password; it will also confirm password sign-ins.",
+      });
+    } catch (err) {
+      setNotice({ kind: "error", text: describePasskeyError(err, "Could not add a passkey.") });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleRemovePasskey = async (id: string) => {
+    setNotice(null);
+    setBusy(`remove:${id}`);
+    try {
+      await deletePasskey(id);
+      setPasskeys((current) => current.filter((passkey) => passkey.id !== id));
+      setNotice({ kind: "success", text: "Passkey removed." });
+    } catch (err) {
+      setNotice({ kind: "error", text: errorText(err, "Could not remove the passkey.") });
     } finally {
       setBusy(null);
     }
@@ -225,6 +273,64 @@ export function SignInMethods() {
             <Button type="button" variant="secondary" size="sm" onClick={handleLink} isLoading={busy === "link"}>
               Link Google
             </Button>
+          )}
+        </div>
+
+        {/* Passkeys */}
+        <div className="py-3 space-y-2">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <IconShield className="w-4 h-4 flex-shrink-0 text-emerald-400" />
+              <div>
+                <p className="text-slate-200 font-semibold">Passkeys</p>
+                <p className="text-slate-500 mt-0.5">
+                  {passkeys.length > 0
+                    ? `${passkeys.length} registered · required after your password`
+                    : canUsePasskey
+                      ? "Face ID, Touch ID, Windows Hello or a security key"
+                      : "Not supported by this browser"}
+                </p>
+              </div>
+            </div>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={handleAddPasskey}
+              isLoading={busy === "passkey"}
+              disabled={!canUsePasskey}
+            >
+              Add passkey
+            </Button>
+          </div>
+
+          {passkeys.length > 0 && (
+            <ul className="space-y-1.5">
+              {passkeys.map((passkey) => (
+                <li
+                  key={passkey.id}
+                  className="flex items-center justify-between gap-3 rounded-lg bg-slate-950/40 px-3 py-2"
+                >
+                  <div>
+                    <p className="text-slate-200">{passkey.name}</p>
+                    <p className="text-slate-500">
+                      {passkey.backedUp ? "Synced" : "This device only"} · added{" "}
+                      {new Date(passkey.createdAt).toLocaleDateString()}
+                      {passkey.lastUsedAt && ` · last used ${new Date(passkey.lastUsedAt).toLocaleDateString()}`}
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleRemovePasskey(passkey.id)}
+                    isLoading={busy === `remove:${passkey.id}`}
+                  >
+                    Remove
+                  </Button>
+                </li>
+              ))}
+            </ul>
           )}
         </div>
       </div>

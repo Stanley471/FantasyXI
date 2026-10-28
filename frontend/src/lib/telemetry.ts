@@ -42,6 +42,9 @@ function scheduleFlush(): void {
     flushTimer = null;
     flush();
   }, BATCH_INTERVAL_MS);
+  if (typeof flushTimer === 'object' && flushTimer !== null && 'unref' in flushTimer) {
+    (flushTimer as { unref?: () => void }).unref?.();
+  }
 }
 
 export function track(event: Omit<TelemetryEvent, 'timestamp'>): void {
@@ -53,10 +56,6 @@ export function track(event: Omit<TelemetryEvent, 'timestamp'>): void {
 
   // Flush immediately when batch is full
   if (queue.length >= BATCH_MAX_SIZE) {
-    if (flushTimer !== null) {
-      clearTimeout(flushTimer);
-      flushTimer = null;
-    }
     flush();
     return;
   }
@@ -65,6 +64,10 @@ export function track(event: Omit<TelemetryEvent, 'timestamp'>): void {
 }
 
 export function flush(): void {
+  if (flushTimer !== null) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
   if (queue.length === 0) return;
   const events = queue.splice(0);
   const payload = JSON.stringify({ events });
@@ -80,15 +83,33 @@ export function flush(): void {
   }
 }
 
-export function trackError(error: Error, componentStack?: string): void {
+export function trackError(
+  error: Error,
+  componentStack?: string,
+  extraMetadata?: Record<string, string | number | boolean>
+): void {
   track({
     type: 'error',
     name: error.name || 'UnknownError',
     metadata: {
-      message: error.message.substring(0, 200),
+      ...extraMetadata,
+      message: (error.message || '').substring(0, 200),
       stack: (componentStack || error.stack || '').substring(0, 500),
     },
   });
+}
+
+/**
+ * Returns a callback to report caught widget/component errors to client telemetry.
+ */
+export function useErrorReporter(boundaryName?: string) {
+  return (error: Error, componentStack?: string) => {
+    trackError(
+      error,
+      componentStack,
+      boundaryName ? { boundary: boundaryName } : undefined
+    );
+  };
 }
 
 export function initWebVitals(): void {

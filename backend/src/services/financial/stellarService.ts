@@ -7,7 +7,11 @@
  */
 
 import {
+  Asset,
+  BASE_FEE,
   Horizon,
+  Memo,
+  Operation,
   StrKey,
   TransactionBuilder,
   Networks,
@@ -18,9 +22,9 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import {
-  getHorizonServer,
   getSorobanRpcServer,
   stellarConfig,
+  withHorizonFailover,
 } from "../../config/stellar.js";
 import { PaymentVerificationResult } from "../../types/index.js";
 import {
@@ -37,6 +41,13 @@ export {
   type VerificationFailure,
   type DepositVerificationResult,
 } from "./depositVerificationService.js";
+export {
+  decodeSorobanEscrowEvent,
+  DepositQueue,
+  depositQueue,
+  type DecodedSorobanEscrowEvent,
+  type DepositQueueJobPayload,
+} from "../../queues/depositQueue.js";
 
 export interface VerifyPaymentParams {
   txHash: string;
@@ -62,12 +73,114 @@ export const ESCROW_EVENT_TOPICS = [
   "created",
   "deposit",
   "settle",
+  "m_settle",
   "refund",
   "claimed",
+  "m_claimed",
 ] as const;
 
+/** Horizon operation types that deliver a destination asset to `to`. */
+export const DEPOSIT_PAYMENT_OPERATION_TYPES = [
+  "payment",
+  "path_payment_strict_receive",
+  "path_payment_strict_send",
+] as const;
+
+export const PATH_PAYMENT_DEFAULT_SLIPPAGE_BPS = 50;
+export const PATH_PAYMENT_MAX_SLIPPAGE_BPS = 500;
+/** Quotes go stale fast on the DEX; envelopes are only valid this long. */
+export const PATH_PAYMENT_QUOTE_TTL_SECONDS = 60;
+
+export type PathPaymentErrorCode = "INVALID_AMOUNT" | "INVALID_SLIPPAGE" | "NO_PATH" | "QUOTE_EXPIRED";
+
+export class PathPaymentError extends Error {
+  constructor(public readonly code: PathPaymentErrorCode, message: string) {
+    super(message);
+    this.name = "PathPaymentError";
+  }
+}
+
+export interface PathPaymentQuote {
+  sendAsset: Asset;
+  destAsset: Asset;
+  /** Exact amount delivered (strict receive) */
+  destAmount: string;
+  /** Best-path cost at quote time */
+  sourceAmount: string;
+  /** Hard cap on the amount spent: sourceAmount + slippage */
+  sendMax: string;
+  path: Asset[];
+  slippageBps: number;
+  /** Unix seconds after which the envelope can no longer execute */
+  expiresAt: number;
+}
+
+export interface PathPaymentEnvelope {
+  xdr: string;
+  networkPassphrase: string;
+  /**
+   * True when the swap pays the escrow account directly. Classic operations
+   * cannot pay a Soroban contract, so for a contract escrow the swap lands in
+   * the depositor's wallet and the contract `deposit` follows.
+   */
+  settlesIntoEscrow: boolean;
+  expiresAt: number;
+}
+
+export type PathPaymentSubmission =
+  | { status: "SETTLED"; txHash: string; ledger: number }
+  | {
+      status: "ABORTED";
+      txHash?: string;
+      reason: string;
+      resultCodes: { transaction?: string; operations?: string[] };
+      /** Re-quote and retry (price moved, liquidity gone, quote expired) */
+      retryable: boolean;
+      /** Path payments are atomic: a failed one moves no funds */
+      fundsMoved: false;
+    }
+  | { status: "PENDING"; txHash: string; expiresAt?: number };
+
+/** Result codes that a fresh quote can fix. */
+const RETRYABLE_PATH_PAYMENT_CODES = new Set([
+  "op_over_source_max",
+  "op_under_dest_min",
+  "op_too_few_offers",
+  "op_cross_self",
+  "tx_too_late",
+  "tx_bad_seq",
+]);
+
+const STROOPS_PER_UNIT = 10_000_000n;
+
+function amountToStroops(amount: string): bigint {
+  if (!/^\d+(\.\d{1,7})?$/.test(amount)) {
+    throw new PathPaymentError("INVALID_AMOUNT", `Invalid amount: ${amount}`);
+  }
+  const [whole, fraction = ""] = amount.split(".");
+  return BigInt(whole) * STROOPS_PER_UNIT + BigInt(fraction.padEnd(7, "0"));
+}
+
+function stroopsToAmount(stroops: bigint): string {
+  const fraction = (stroops % STROOPS_PER_UNIT).toString().padStart(7, "0");
+  return `${stroops / STROOPS_PER_UNIT}.${fraction}`;
+}
+
+function horizonAsset(type: string, code?: string, issuer?: string): Asset {
+  return type === "native" ? Asset.native() : new Asset(code!, issuer!);
+}
+
+function validateSlippage(slippageBps: number): void {
+  if (!Number.isInteger(slippageBps) || slippageBps < 0 || slippageBps > PATH_PAYMENT_MAX_SLIPPAGE_BPS) {
+    throw new PathPaymentError(
+      "INVALID_SLIPPAGE",
+      `Slippage must be an integer between 0 and ${PATH_PAYMENT_MAX_SLIPPAGE_BPS} bps`
+    );
+  }
+}
+
 export class StellarService {
-  private server: Horizon.Server;
+  private customServer?: Horizon.Server;
   private sorobanClient?: SorobanContractClient;
   private rpcServer?: rpc.Server;
 
@@ -76,9 +189,13 @@ export class StellarService {
     customSorobanClient?: SorobanContractClient,
     customRpcServer?: rpc.Server
   ) {
-    this.server = customServer || getHorizonServer();
+    this.customServer = customServer;
     this.sorobanClient = customSorobanClient;
     this.rpcServer = customRpcServer;
+  }
+
+  private runHorizon<T>(operation: (server: Horizon.Server) => Promise<T>): Promise<T> {
+    return this.customServer ? operation(this.customServer) : withHorizonFailover(operation);
   }
 
   private getRpcServer(): rpc.Server {
@@ -119,6 +236,46 @@ export class StellarService {
   public async getRpcLedgerRange(): Promise<{ oldestLedger: number; latestLedger: number }> {
     const health = await this.getRpcServer().getHealth();
     return { oldestLedger: health.oldestLedger, latestLedger: health.latestLedger };
+  }
+
+  public async getHorizonLatestLedger(): Promise<number> {
+    const page = await this.server.ledgers().order("desc").limit(1).call();
+    const ledger = page.records[0]?.sequence;
+    if (!Number.isInteger(ledger)) {
+      throw new Error("Horizon did not return a latest ledger sequence");
+    }
+    return ledger;
+  }
+
+  public async getContractLeagueStateForAudit(
+    leagueId: number | bigint
+  ): Promise<OnChainLeagueState | null> {
+    const client = this.getSorobanClient();
+    if (!client) {
+      throw new Error("Soroban contract client is not configured");
+    }
+    return client.getLeagueForAudit(leagueId);
+  }
+
+  public async getContractDepositForAudit(
+    leagueId: number | bigint,
+    participantAddress: string
+  ): Promise<bigint> {
+    const client = this.getSorobanClient();
+    if (!client) {
+      throw new Error("Soroban contract client is not configured");
+    }
+    return client.getDepositForAudit(leagueId, participantAddress);
+  }
+
+  public async getContractTokenBalanceForAudit(
+    addressOrContractId: string
+  ): Promise<bigint> {
+    const client = this.getSorobanClient();
+    if (!client) {
+      throw new Error("Soroban contract client is not configured");
+    }
+    return client.getTokenBalanceForAudit(addressOrContractId);
   }
 
   public getSorobanClient(): SorobanContractClient | null {
@@ -188,7 +345,9 @@ export class StellarService {
 
     try {
       // 1. Fetch transaction record from Horizon
-      const tx = await this.server.transactions().transaction(txHash).call();
+      const tx = await this.runHorizon((server) =>
+        server.transactions().transaction(txHash).call()
+      );
 
       if (!tx.successful) {
         return {
@@ -362,15 +521,14 @@ export class StellarService {
       }
 
       // Fetch operations for this transaction
-      const opsPage = await this.server
-        .operations()
-        .forTransaction(txHash)
-        .call();
+      const opsPage = await this.runHorizon((server) =>
+        server.operations().forTransaction(txHash).call()
+      );
 
       // Find payment operation matching criteria
       const matchingOp = opsPage.records.find((op: any) => {
-        // We look for payment operations
-        if (op.type !== "payment") return false;
+        // We look for payment operations (including DEX path payments)
+        if (!DEPOSIT_PAYMENT_OPERATION_TYPES.includes(op.type)) return false;
 
         // Check destination
         if (op.to !== expectedDestination) return false;
@@ -428,6 +586,7 @@ export class StellarService {
           success: false,
           txHash,
           error: "Transaction not found on Stellar network or ledger not yet closed.",
+          retryable: true,
         };
       }
 
@@ -435,6 +594,7 @@ export class StellarService {
         success: false,
         txHash,
         error: `Stellar network error: ${error?.message || "Unknown error"}`,
+        retryable: true,
       };
     }
   }
@@ -453,7 +613,7 @@ export class StellarService {
     }
 
     try {
-      const account = await this.server.loadAccount(stellarAddress);
+      const account = await this.runHorizon((server) => server.loadAccount(stellarAddress));
       const usdcBalance = account.balances.find((b: any) => {
         if (assetCode === "XLM") return b.asset_type === "native";
         return b.asset_code === assetCode && b.asset_issuer === assetIssuer;
@@ -485,10 +645,22 @@ export class StellarService {
   /**
    * Dispatches an administrator-authorized settlement and waits for finality.
    */
+  public async resumeSettlementEnvelope(envelope: string): Promise<InvocationResult> {
+    const client = this.getSorobanClient();
+    if (!client) throw new Error("Soroban contract client is not configured");
+    return client.resumeEnvelope(envelope);
+  }
+
+  public async getSettlementStatus(hash: string): Promise<{ status: string; ledger?: number }> {
+    return getSorobanRpcServer().getTransaction(hash);
+  }
+
   public async settleLeague(
     leagueId: number | bigint,
     winners: Array<{ winner: string; amount: string }>,
-    platformFeeStroops: bigint
+    platformFeeStroops: bigint,
+    distributionBpsOrBeforeSubmit?: number[] | ((hash: string, envelope: string) => Promise<void>),
+    beforeSubmitArg?: (hash: string, envelope: string) => Promise<void>
   ): Promise<InvocationResult> {
     const client = this.getSorobanClient();
     if (!client) {
@@ -507,7 +679,9 @@ export class StellarService {
       leagueId,
       winners,
       stellarConfig.treasuryAddress,
-      platformFeeStroops
+      platformFeeStroops,
+      distributionBpsOrBeforeSubmit,
+      beforeSubmitArg
     );
   }
 
@@ -557,6 +731,16 @@ export class StellarService {
     return client.refund(adminSecret, adminPublic, leagueId, participants);
   }
 
+  /** Refund one authenticated deposit without cancelling the league. */
+  public async refundDeposit(leagueId: number | bigint, participant: string): Promise<InvocationResult> {
+    const client = this.getSorobanClient();
+    if (!client) throw new Error("Soroban contract client is not configured");
+    const adminSecret = process.env.TESTNET_ADMIN_SECRET;
+    if (!adminSecret) throw new Error("TESTNET_ADMIN_SECRET is required to execute refunds");
+    const adminPublic = Keypair.fromSecret(adminSecret).publicKey();
+    return client.refundDeposit(adminSecret, adminPublic, leagueId, participant);
+  }
+
   /**
    * Reconcile database expectations with live on-chain Soroban escrow state.
    */
@@ -585,6 +769,216 @@ export class StellarService {
       onChainStatus: statusNames[state.status] || "Unknown",
       discrepancyUsdc: parseFloat(discrepancyUsdc.toFixed(4)),
     };
+  }
+
+  /** USDC as configured for entry fees. */
+  public static entryFeeAsset(): Asset {
+    return new Asset(stellarConfig.usdcAssetCode, stellarConfig.usdcIssuer);
+  }
+
+  /**
+   * Finds the cheapest Stellar DEX path that delivers exactly `destAmount` of
+   * the entry-fee asset when paying with `sendAsset`, and caps the spend at
+   * the quoted cost plus `slippageBps`.
+   */
+  public async quoteEntryFeePathPayment(params: {
+    sendAsset: Asset;
+    destAmount: string;
+    destAsset?: Asset;
+    slippageBps?: number;
+    now?: number;
+  }): Promise<PathPaymentQuote> {
+    const destAsset = params.destAsset ?? StellarService.entryFeeAsset();
+    const slippageBps = params.slippageBps ?? PATH_PAYMENT_DEFAULT_SLIPPAGE_BPS;
+    validateSlippage(slippageBps);
+    if (amountToStroops(params.destAmount) <= 0n) {
+      throw new PathPaymentError("INVALID_AMOUNT", "Entry fee amount must be positive");
+    }
+
+    const page = await this.server
+      .strictReceivePaths([params.sendAsset], destAsset, params.destAmount)
+      .call();
+    const candidates = page.records.filter((record) =>
+      horizonAsset(record.source_asset_type, record.source_asset_code, record.source_asset_issuer).equals(
+        params.sendAsset
+      )
+    );
+    if (candidates.length === 0) {
+      throw new PathPaymentError("NO_PATH", "No DEX liquidity path delivers the entry fee from this asset");
+    }
+    const best = candidates.reduce((a, b) =>
+      amountToStroops(b.source_amount) < amountToStroops(a.source_amount) ? b : a
+    );
+
+    const sourceStroops = amountToStroops(best.source_amount);
+    const sendMaxStroops = (sourceStroops * BigInt(10_000 + slippageBps) + 9_999n) / 10_000n;
+    const now = params.now ?? Math.floor(Date.now() / 1000);
+    return {
+      sendAsset: params.sendAsset,
+      destAsset,
+      destAmount: stroopsToAmount(amountToStroops(params.destAmount)),
+      sourceAmount: stroopsToAmount(sourceStroops),
+      sendMax: stroopsToAmount(sendMaxStroops),
+      path: best.path.map((hop) => horizonAsset(hop.asset_type, hop.asset_code, hop.asset_issuer)),
+      slippageBps,
+      expiresAt: now + PATH_PAYMENT_QUOTE_TTL_SECONDS,
+    };
+  }
+
+  /**
+   * Builds the unsigned single-operation `pathPaymentStrictReceive` envelope
+   * for the depositor to sign. The operation is atomic: it either delivers
+   * exactly `destAmount` while spending at most `sendMax`, or fails without
+   * moving funds. Its time bounds end at the quote expiry.
+   */
+  public async buildPathPaymentEnvelope(params: {
+    sourceAccount: string;
+    quote: PathPaymentQuote;
+    destination: string;
+    memo?: string;
+    now?: number;
+  }): Promise<PathPaymentEnvelope> {
+    const { quote } = params;
+    const now = params.now ?? Math.floor(Date.now() / 1000);
+    if (now >= quote.expiresAt) {
+      throw new PathPaymentError("QUOTE_EXPIRED", "Path payment quote has expired; request a new quote");
+    }
+    const settlesIntoEscrow = StrKey.isValidEd25519PublicKey(params.destination);
+    const account = await this.server.loadAccount(params.sourceAccount);
+    const builder = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: stellarConfig.networkPassphrase,
+      timebounds: { minTime: 0, maxTime: quote.expiresAt },
+    }).addOperation(
+      Operation.pathPaymentStrictReceive({
+        sendAsset: quote.sendAsset,
+        sendMax: quote.sendMax,
+        destination: settlesIntoEscrow ? params.destination : params.sourceAccount,
+        destAsset: quote.destAsset,
+        destAmount: quote.destAmount,
+        path: quote.path,
+      })
+    );
+    if (params.memo) builder.addMemo(Memo.text(params.memo));
+    return {
+      xdr: builder.build().toXDR(),
+      networkPassphrase: stellarConfig.networkPassphrase,
+      settlesIntoEscrow,
+      expiresAt: quote.expiresAt,
+    };
+  }
+
+  /**
+   * Fallback for the two-step contract-escrow flow: when the swap settled but
+   * the Soroban `deposit` then failed, swaps the received entry-fee asset back
+   * into the original asset (strict send, accepting at most `slippageBps` less
+   * than the best path currently returns).
+   */
+  public async buildPathPaymentRefundEnvelope(params: {
+    sourceAccount: string;
+    quote: PathPaymentQuote;
+    slippageBps?: number;
+    now?: number;
+  }): Promise<PathPaymentEnvelope> {
+    const { quote } = params;
+    const slippageBps = params.slippageBps ?? quote.slippageBps;
+    validateSlippage(slippageBps);
+
+    const page = await this.server
+      .strictSendPaths(quote.destAsset, quote.destAmount, [quote.sendAsset])
+      .call();
+    const candidates = page.records.filter((record) =>
+      horizonAsset(
+        record.destination_asset_type,
+        record.destination_asset_code,
+        record.destination_asset_issuer
+      ).equals(quote.sendAsset)
+    );
+    if (candidates.length === 0) {
+      throw new PathPaymentError("NO_PATH", "No DEX liquidity path to swap the entry fee back");
+    }
+    const best = candidates.reduce((a, b) =>
+      amountToStroops(b.destination_amount) > amountToStroops(a.destination_amount) ? b : a
+    );
+    const destMin =
+      (amountToStroops(best.destination_amount) * BigInt(10_000 - slippageBps)) / 10_000n;
+
+    const expiresAt = (params.now ?? Math.floor(Date.now() / 1000)) + PATH_PAYMENT_QUOTE_TTL_SECONDS;
+    const account = await this.server.loadAccount(params.sourceAccount);
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: stellarConfig.networkPassphrase,
+      timebounds: { minTime: 0, maxTime: expiresAt },
+    })
+      .addOperation(
+        Operation.pathPaymentStrictSend({
+          sendAsset: quote.destAsset,
+          sendAmount: quote.destAmount,
+          destination: params.sourceAccount,
+          destAsset: quote.sendAsset,
+          destMin: stroopsToAmount(destMin),
+          path: best.path.map((hop) => horizonAsset(hop.asset_type, hop.asset_code, hop.asset_issuer)),
+        })
+      )
+      .build();
+    return {
+      xdr: tx.toXDR(),
+      networkPassphrase: stellarConfig.networkPassphrase,
+      settlesIntoEscrow: false,
+      expiresAt,
+    };
+  }
+
+  /**
+   * Submits a signed path payment envelope. A rejected transaction is
+   * reported as a clean abort (no funds moved) with a retry hint; an
+   * ambiguous network failure is resolved by looking the hash up on Horizon.
+   */
+  public async submitPathPayment(signedXdr: string): Promise<PathPaymentSubmission> {
+    const tx = TransactionBuilder.fromXDR(signedXdr, stellarConfig.networkPassphrase);
+    const txHash = Buffer.from(tx.hash()).toString("hex");
+    try {
+      const result = await this.server.submitTransaction(tx);
+      return { status: "SETTLED", txHash: result.hash, ledger: result.ledger };
+    } catch (error) {
+      const resultCodes = (error as {
+        response?: { data?: { extras?: { result_codes?: { transaction?: string; operations?: string[] } } } };
+      }).response?.data?.extras?.result_codes;
+
+      if (resultCodes) {
+        const codes = [resultCodes.transaction, ...(resultCodes.operations ?? [])].filter(
+          (code): code is string => !!code && code !== "op_success" && code !== "tx_failed"
+        );
+        return {
+          status: "ABORTED",
+          txHash,
+          reason: codes.join(", ") || "transaction rejected",
+          resultCodes,
+          retryable: codes.some((code) => RETRYABLE_PATH_PAYMENT_CODES.has(code)),
+          fundsMoved: false,
+        };
+      }
+
+      // No result codes: the submission may or may not have reached the network.
+      try {
+        const record = await this.server.transactions().transaction(txHash).call();
+        if (record.successful) {
+          return { status: "SETTLED", txHash, ledger: record.ledger_attr };
+        }
+        return {
+          status: "ABORTED",
+          txHash,
+          reason: "transaction failed on-chain",
+          resultCodes: {},
+          retryable: true,
+          fundsMoved: false,
+        };
+      } catch {
+        const timeBounds = "timeBounds" in tx ? tx.timeBounds : undefined;
+        const maxTime = timeBounds?.maxTime ? Number(timeBounds.maxTime) : undefined;
+        return { status: "PENDING", txHash, expiresAt: maxTime };
+      }
+    }
   }
 }
 

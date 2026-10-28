@@ -1,10 +1,16 @@
 import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
+import { JwtKeyRing } from "../services/auth/jwtKeyRing.js";
 
 dotenv.config();
 
 /**
  * Centralized JWT Authentication Configuration.
+ *
+ * Access tokens are signed with rotating ES256 keys (issue #332, see
+ * services/auth/jwtKeyRing.ts and jwtKeyRotationService.ts). JWT_SECRET is no
+ * longer a signing key: it encrypts the stored private keys and verifies
+ * legacy HS256 tokens until JWT_LEGACY_HS256_UNTIL.
  *
  * Laravel equivalent: config/sanctum.php or config/jwt.php.
  */
@@ -31,6 +37,33 @@ export function getJwtExpiresIn(): string {
   return process.env.JWT_EXPIRES_IN || "7d";
 }
 
+/** Lifetime of a newly issued access token in seconds, parsed exactly as jsonwebtoken parses JWT_EXPIRES_IN. */
+export function getJwtLifetimeSeconds(): number {
+  const probe = jwt.decode(
+    jwt.sign({}, "lifetime-probe", { expiresIn: getJwtExpiresIn() as jwt.SignOptions["expiresIn"] })
+  ) as jwt.JwtPayload;
+  return (probe.exp as number) - (probe.iat as number);
+}
+
+/**
+ * Secret for HS256 tokens issued before key rotation was deployed. Returns it
+ * only until JWT_LEGACY_HS256_UNTIL (ISO-8601); unset or past means legacy
+ * tokens are rejected. Set it to deploy time + JWT_EXPIRES_IN so sessions
+ * issued just before the deploy are not dropped.
+ */
+export function getLegacyJwtSecret(): string | null {
+  const until = Date.parse(process.env.JWT_LEGACY_HS256_UNTIL ?? "");
+  return Number.isFinite(until) && Date.now() < until ? getJwtSecret() : null;
+}
+
+/** The process-wide key ring; populated by jwtKeyRotationService.start(). */
+export const jwtKeyRing = new JwtKeyRing({
+  legacySecret: getLegacyJwtSecret,
+  // A process-local key is fine for development and tests, but in production
+  // every node must sign with the shared, persisted keys.
+  allowEphemeralKeys: process.env.NODE_ENV !== "production",
+});
+
 export interface JwtPayload {
   userId: string;
   email?: string;
@@ -40,15 +73,10 @@ export interface JwtPayload {
 }
 
 /**
- * Signs a minimal JWT payload.
+ * Signs a minimal JWT payload with the current signing key.
  */
 export function signAccessToken(payload: JwtPayload): string {
-  const secret = getJwtSecret();
-  const expiresIn = getJwtExpiresIn();
-
-  return jwt.sign(payload, secret, {
-    expiresIn: expiresIn as jwt.SignOptions["expiresIn"],
-  });
+  return jwtKeyRing.sign(payload, getJwtExpiresIn() as jwt.SignOptions["expiresIn"]);
 }
 
 /**
@@ -56,7 +84,5 @@ export function signAccessToken(payload: JwtPayload): string {
  * Throws JsonWebTokenError or TokenExpiredError if invalid.
  */
 export function verifyAccessToken(token: string): JwtPayload {
-  const secret = getJwtSecret();
-  const decoded = jwt.verify(token, secret);
-  return decoded as JwtPayload;
+  return jwtKeyRing.verify(token) as JwtPayload;
 }

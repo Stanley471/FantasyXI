@@ -13,7 +13,7 @@ import {
   applyTierTransitions,
   listH2HAnomalies,
 } from "../controllers/leagueAdmin.controller.js";
-import { listSecurityAnomalies } from "../controllers/securityAdmin.controller.js";
+import { listSecurityAnomalies, getLeagueSybilReport } from "../controllers/securityAdmin.controller.js";
 import { verifyAuditChainHandler } from "../controllers/audit.controller.js";
 import {
   runLedgerReconciliation,
@@ -69,6 +69,14 @@ router.post(
 // GET /api/v1/admin/security/anomalies (issue #117): failed-login spikes and
 // new-device/new-IP logins detected across all accounts, for admin review.
 router.get("/security/anomalies", listSecurityAnomalies);
+
+// GET /api/v1/admin/security/sybil/leagues/:leagueId[?refresh=true] (issue #274, ADMIN only):
+// suspected multi-account clusters with per-link evidence and risk scores
+router.get(
+  "/security/sybil/leagues/:leagueId",
+  requirePermission(Permission.SECURITY_REVIEW),
+  getLeagueSybilReport
+);
 
 // GET /api/v1/admin/leagues/:leagueId/h2h-anomalies
 router.get("/leagues/:leagueId/h2h-anomalies", listH2HAnomalies);

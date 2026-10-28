@@ -1,0 +1,44 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: fantasyxi-chaos-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+      POSTGRES_DB: fantasyxi_chaos
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    container_name: fantasyxi-chaos-toxiproxy
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8474:8474" # Toxiproxy API
+      - "5433:5433" # Proxied Postgres TCP port
+    command: ["-host=0.0.0.0"]
+
+  chaos-runner:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: fantasyxi-chaos-runner
+    depends_on:
+      postgres:
+        condition: service_healthy
+      toxiproxy:
+        condition: service_started
+    environment:
+      NODE_ENV: test
+      CHAOS_DATABASE_URL: "postgresql://postgres:postgrespassword@toxiproxy:5433/fantasyxi_chaos"
+      DATABASE_URL: "postgresql://postgres:postgrespassword@postgres:5432/fantasyxi_chaos"
+    command: ["npm", "run", "test:chaos"]

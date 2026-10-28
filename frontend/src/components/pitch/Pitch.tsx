@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useMemo } from "react";
-import { Position, SquadPlayer, Player } from "@/types";
+import { Position } from "@/types";
 import { PlayerCard } from "./PlayerCard";
 import { detectFormation } from "@/lib/formation";
 
@@ -19,6 +19,10 @@ export const Pitch: React.FC<PitchProps> = ({ isLoading = false }) => {
   // Select the stable players array and derive from it: a selector returning a
   // new array on every call makes zustand re-render forever
   const players = useTeamStore((state) => state.players);
+  const selectedPlayerId = useTeamStore((state) => state.selectedPlayerId);
+  const selectedPlayer = players.find(
+    (player) => player.player.id === selectedPlayerId,
+  );
   const starters = useMemo(
     () => players.filter((p) => p.isStarter).sort((a, b) => a.positionOrder - b.positionOrder),
     [players]
@@ -44,7 +48,7 @@ export const Pitch: React.FC<PitchProps> = ({ isLoading = false }) => {
   const midSlots = midStarters.length > 0 ? midStarters : [null, null, null, null];
   const fwdSlots = fwdStarters.length > 0 ? fwdStarters : [null, null];
 
-  const currentFormation = detectFormation(starters as any);
+  const currentFormation = detectFormation(starters);
 
   return (
     <div className="w-full relative rounded-2xl overflow-hidden shadow-2xl border border-pitch-border bg-slate-950" data-testid="pitch">
@@ -82,6 +86,16 @@ export const Pitch: React.FC<PitchProps> = ({ isLoading = false }) => {
           </div>
         </div>
 
+        <p
+          role="status"
+          aria-live="polite"
+          className="relative z-10 px-3 pb-1 text-center text-[11px] text-emerald-200 sm:hidden"
+        >
+          {selectedPlayer
+            ? `Selected ${selectedPlayer.player.displayName || selectedPlayer.player.lastName}. Tap a substitute to swap.`
+            : "Tap a starter, then a substitute to swap."}
+        </p>
+
         {/* Row 1: Goalkeeper (GKP) */}
         <div className="relative z-10 flex justify-center items-center py-2">
           {gkpSlots.map((item, idx) => {
@@ -100,7 +114,7 @@ export const Pitch: React.FC<PitchProps> = ({ isLoading = false }) => {
         </div>
 
         {/* Row 2: Defenders (DEF) */}
-        <div className="relative z-10 flex justify-around items-center py-2 gap-1 sm:gap-2">
+        <div className="relative z-10 flex justify-around items-center py-2 gap-x-1 sm:gap-2">
           {defSlots.map((item, idx) => {
             return (
               <PlayerCard
@@ -117,7 +131,7 @@ export const Pitch: React.FC<PitchProps> = ({ isLoading = false }) => {
         </div>
 
         {/* Row 3: Midfielders (MID) */}
-        <div className="relative z-10 flex justify-around items-center py-2 gap-1 sm:gap-2">
+        <div className="relative z-10 flex justify-around items-center py-2 gap-x-1 sm:gap-2">
           {midSlots.map((item, idx) => {
             return (
               <PlayerCard
@@ -134,7 +148,7 @@ export const Pitch: React.FC<PitchProps> = ({ isLoading = false }) => {
         </div>
 
         {/* Row 4: Forwards (FWD) */}
-        <div className="relative z-10 flex justify-around items-center py-2 gap-1 sm:gap-2">
+        <div className="relative z-10 flex justify-around items-center py-2 gap-x-1 sm:gap-2">
           {fwdSlots.map((item, idx) => {
             return (
               <PlayerCard

@@ -7,6 +7,7 @@ import {
   FPL_SYNC_RETRY_LIMIT,
   FPL_SYNC_RETRY_DELAY_SECONDS,
   fplSyncQueueConfig,
+  fplTaskPriority,
   shouldRouteToDlq,
   runFplSyncTaskWithRetry,
   type FplSyncTask,
@@ -14,6 +15,11 @@ import {
 import { fplSyncService } from "../services/fpl/fplSyncService.js";
 
 describe("Background Job Queue & Matchday Lifecycle", () => {
+  it("prioritizes live match stats ahead of daily info and fixtures", () => {
+    assert.ok(fplTaskPriority({ type: "gameweek-live", gameweekFplId: 1 }) > fplTaskPriority({ type: "daily-players" }));
+    assert.ok(fplTaskPriority({ type: "daily-players" }) > fplTaskPriority({ type: "fixtures" }));
+  });
+
   it("locks squads 90 minutes before the first kickoff", () => {
     assert.equal(LOCK_LEAD_MINUTES, 90);
     const lock = computeLockTime(new Date("2026-09-12T11:30:00Z"));
@@ -32,6 +38,7 @@ describe("Background Job Queue & Matchday Lifecycle", () => {
     assert.equal(byName.get("deadline-lock"), "* * * * *");
     assert.ok(byName.has("gameweek-settlement"));
     assert.ok(byName.has("league-refunds"));
+    assert.equal(byName.get("ledger-delta-audit"), "*/5 * * * *");
     assert.equal(byName.get("price-sync"), "0 3 * * *");
   });
 

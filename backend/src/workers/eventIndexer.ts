@@ -1,22 +1,25 @@
 /**
- * Soroban Escrow Event Indexer Worker
+ * Soroban Escrow Event Indexer & Streaming Subscriber Daemon (Issue #403)
  *
- * Polls Soroban RPC getEvents for the escrow contract (created, deposit, settle, refund)
- * and reconciles deposits into the database, so a payment is confirmed even if the
- * user's browser never called the verify endpoint.
+ * Polls Soroban RPC getEvents for the escrow contract (created, deposit, settle,
+ * m_settle, refund, DepositRefunded, EmergencyRefund, LeagueRefundClaimed, claimed,
+ * m_claimed) and reconciles deposits/claims/refunds into the database while
+ * dispatching confirmed events to `depositQueue` with idempotency deduplication.
  *
- * - Cursor persistence: the RPC paging cursor and last ledger are stored in
- *   IndexerCursor and saved only after a batch is processed, so restarts resume
- *   where they left off (events may be replayed, never skipped).
- * - Idempotency: replayed deposits upsert the Transaction by tx hash and re-apply
- *   the same member state, so processing an event twice has no extra effect.
- * - Resilience: RPC errors (rate limits, disconnects) back off exponentially.
- *   Stellar ledgers are final once closed (no re-orgs); a cursor that fell out of the
- *   RPC retention window restarts from the oldest retained ledger.
+ * - Cursor persistence: the RPC paging cursor and last ledger are stored in both
+ *   Redis (`soroban:indexer:cursor:escrow-events`) and PostgreSQL (`IndexerCursor`)
+ *   and saved only after a batch is processed, so restarts resume where they left
+ *   off without skipping event blocks.
+ * - Idempotency: replayed deposits are deduplicated in `depositQueue` and upsert
+ *   the Transaction by tx hash and re-apply the same member state, so processing
+ *   an event twice has no extra effect.
+ * - Resilience: RPC errors (rate limits, timeouts, disconnects) back off
+ *   exponentially without advancing the cursor.
  */
 
-import { rpc, scValToNative } from "@stellar/stellar-sdk";
+import { rpc } from "@stellar/stellar-sdk";
 import { prisma } from "../config/db.js";
+import { getRedisClient, type IRedisCacheClient } from "../config/redis.js";
 import { stellarConfig } from "../config/stellar.js";
 import { StellarService, stellarService } from "../services/financial/stellarService.js";
 import { leagueIdPrefixFromContractId } from "../services/financial/contractLeagueId.js";
@@ -33,12 +36,27 @@ import {
   TransactionStatus,
   TransactionType,
 } from "../types/index.js";
+import {
+  decodeSorobanEscrowEvent,
+  DepositQueue,
+  depositQueue,
+  type DecodedSorobanEscrowEvent,
+} from "../queues/depositQueue.js";
 
 export const INDEXER_CURSOR_ID = "escrow-events";
+export const REDIS_CURSOR_KEY = `soroban:indexer:cursor:${INDEXER_CURSOR_ID}`;
+
+export interface PersistedIndexerCursor {
+  id: string;
+  lastLedger: number;
+  cursor: string | null;
+}
 
 export interface EventIndexerOptions {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   db?: any;
+  redis?: IRedisCacheClient | null;
+  queue?: DepositQueue;
   stellar?: StellarService;
   email?: EmailService;
   audit?: FinancialAuditRecorder;
@@ -53,6 +71,8 @@ export interface EventIndexerOptions {
 export class EscrowEventIndexer {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly db: any;
+  private readonly redis: IRedisCacheClient | null;
+  private readonly queue: DepositQueue;
   private readonly stellar: StellarService;
   private readonly email: EmailService;
   private readonly audit: FinancialAuditRecorder;
@@ -67,6 +87,13 @@ export class EscrowEventIndexer {
 
   constructor(options: EventIndexerOptions = {}) {
     this.db = options.db ?? prisma;
+    this.redis =
+      options.redis !== undefined
+        ? options.redis
+        : options.db
+          ? null
+          : getRedisClient();
+    this.queue = options.queue ?? depositQueue;
     this.stellar = options.stellar ?? stellarService;
     this.email = options.email ?? emailService;
     this.audit = options.audit ?? financialAuditLog;
@@ -89,13 +116,67 @@ export class EscrowEventIndexer {
   }
 
   /**
+   * Loads the saved cursor from Redis first (if configured), falling back to PostgreSQL (`IndexerCursor`).
+   */
+  public async loadSavedCursor(): Promise<PersistedIndexerCursor | null> {
+    if (this.redis) {
+      try {
+        const cached = await this.redis.get(REDIS_CURSOR_KEY);
+        if (cached) {
+          const parsed = JSON.parse(cached) as PersistedIndexerCursor;
+          if (parsed && typeof parsed.lastLedger === "number") {
+            return parsed;
+          }
+        }
+      } catch {
+        // Fallback to PostgreSQL cursor
+      }
+    }
+
+    const dbCursor = await this.db.indexerCursor?.findUnique?.({
+      where: { id: INDEXER_CURSOR_ID },
+    });
+    if (dbCursor) {
+      if (this.redis) {
+        try {
+          await this.redis.set(REDIS_CURSOR_KEY, JSON.stringify(dbCursor));
+        } catch {
+          // Non-fatal
+        }
+      }
+      return dbCursor as PersistedIndexerCursor;
+    }
+    return null;
+  }
+
+  /**
+   * Persists the pagination cursor to both PostgreSQL (`IndexerCursor`) and Redis.
+   */
+  public async saveCursor(lastLedger: number, cursor: string | null): Promise<void> {
+    await this.db.indexerCursor.upsert({
+      where: { id: INDEXER_CURSOR_ID },
+      create: { id: INDEXER_CURSOR_ID, lastLedger, cursor },
+      update: { lastLedger, cursor },
+    });
+
+    if (this.redis) {
+      try {
+        await this.redis.set(
+          REDIS_CURSOR_KEY,
+          JSON.stringify({ id: INDEXER_CURSOR_ID, lastLedger, cursor })
+        );
+      } catch {
+        // Redis failure should not fail indexing once Postgres cursor is committed
+      }
+    }
+  }
+
+  /**
    * Fetches and processes one page of events, then persists the cursor.
    * Returns the number of events processed.
    */
   public async pollOnce(): Promise<number> {
-    const saved = await this.db.indexerCursor.findUnique({
-      where: { id: INDEXER_CURSOR_ID },
-    });
+    const saved = await this.loadSavedCursor();
 
     let response: rpc.Api.GetEventsResponse;
     try {
@@ -130,11 +211,7 @@ export class EscrowEventIndexer {
 
     const lastLedger =
       response.events.at(-1)?.ledger ?? saved?.lastLedger ?? response.latestLedger;
-    await this.db.indexerCursor.upsert({
-      where: { id: INDEXER_CURSOR_ID },
-      create: { id: INDEXER_CURSOR_ID, lastLedger, cursor: response.cursor },
-      update: { lastLedger, cursor: response.cursor },
-    });
+    await this.saveCursor(lastLedger, response.cursor ?? null);
 
     return response.events.length;
   }
@@ -143,12 +220,15 @@ export class EscrowEventIndexer {
    * Applies a single escrow event. Returns true when an event was processed.
    */
   public async handleEvent(event: rpc.Api.EventResponse): Promise<boolean> {
-    const name = String(scValToNative(event.topic[0]));
-    const contractLeagueId = BigInt(scValToNative(event.topic[1]));
-
-    if (!event.inSuccessfulContractCall) {
+    const decoded: DecodedSorobanEscrowEvent | null = decodeSorobanEscrowEvent(
+      event as unknown as Parameters<typeof decodeSorobanEscrowEvent>[0]
+    );
+    if (!decoded) {
       return false;
     }
+
+    const name = decoded.rawTopicName;
+    const contractLeagueId = decoded.contractLeagueId;
 
     const league = await this.db.league.findFirst({
       where: { id: { startsWith: leagueIdPrefixFromContractId(contractLeagueId) } },
@@ -159,7 +239,7 @@ export class EscrowEventIndexer {
       try {
         let serializedValue: unknown;
         try {
-          const raw = scValToNative(event.value);
+          const raw = decoded.rawValue;
           if (typeof raw === "bigint") {
             serializedValue = raw.toString();
           } else if (Array.isArray(raw)) {
@@ -174,7 +254,7 @@ export class EscrowEventIndexer {
         await this.db.contractEvent.create({
           data: {
             contractId:
-              (event as { contractId?: string }).contractId ??
+              decoded.contractId ??
               process.env.STELLAR_ESCROW_CONTRACT_ID ??
               stellarConfig.escrowContractId,
             eventType: name,
@@ -193,13 +273,41 @@ export class EscrowEventIndexer {
       }
     }
 
+    // Dispatch decoded event to depositQueue with idempotency deduplication
+    await this.queue.enqueue(decoded);
+
     const confirmedAt = new Date(event.ledgerClosedAt);
 
     switch (name) {
-      case "deposit": {
-        const [participant, amountStroops] = scValToNative(event.value) as [string, bigint];
+      case "deposit":
+      case "Deposit": {
+        const participant = decoded.participant!;
+        const amountStroops = decoded.amountStroops ?? 0n;
+        const amountUsdc = decoded.amountUsdc ?? Number(amountStroops) / 10_000_000;
+
+        const flagDeposit = async (
+          reason: string,
+          leagueId: string | null,
+          expectedAmount?: number
+        ) => {
+          if (!this.db.depositException) return;
+          await this.db.depositException.upsert({
+            where: { txHash: event.txHash },
+            create: {
+              txHash: event.txHash,
+              leagueId,
+              contractLeagueId: contractLeagueId.toString(),
+              senderAddress: participant,
+              amount: amountUsdc,
+              expectedAmount: expectedAmount ?? null,
+              reason,
+            },
+            update: {},
+          });
+        };
 
         if (!league) {
+          await flagDeposit("UNKNOWN_LEAGUE", null);
           console.warn(`[indexer] Deposit for unknown league ${contractLeagueId} (tx ${event.txHash})`);
           return false;
         }
@@ -217,9 +325,32 @@ export class EscrowEventIndexer {
           },
         });
         if (!member) {
+          const occupiedSlots = await this.db.leagueMember.count({
+            where: { leagueId: league.id },
+          });
+          await flagDeposit(
+            occupiedSlots >= league.maxMembers ? "LEAGUE_OVER_CAPACITY" : "UNLINKED_SENDER",
+            league.id
+          );
           console.warn(
             `[indexer] No member of league ${league.id} for ${participant} (tx ${event.txHash})`
           );
+          return false;
+        }
+
+        const expectedAmount = Number(league.entryFee);
+        if (Math.abs(amountUsdc - expectedAmount) > 0.0000001) {
+          await flagDeposit("AMOUNT_MISMATCH", league.id, expectedAmount);
+          console.warn(
+            `[indexer] Deposit amount mismatch for member ${member.id} (tx ${event.txHash})`
+          );
+          return false;
+        }
+        const memberCount = await this.db.leagueMember.count({
+          where: { leagueId: league.id },
+        });
+        if (memberCount > league.maxMembers) {
+          await flagDeposit("LEAGUE_OVER_CAPACITY", league.id, expectedAmount);
           return false;
         }
 
@@ -231,10 +362,9 @@ export class EscrowEventIndexer {
           return false;
         }
         const wasConfirmed = member.paymentStatus === PaymentStatus.PAYMENT_CONFIRMED;
-
         const isAlreadyConfirmed = member.paymentStatus === PaymentStatus.PAYMENT_CONFIRMED;
 
-        await this.db.$transaction([
+        const depositUpdates: Promise<unknown>[] = [
           this.db.leagueMember.update({
             where: { id: member.id },
             data: {
@@ -257,7 +387,7 @@ export class EscrowEventIndexer {
               leagueId: league.id,
               memberId: member.id,
               type: TransactionType.ENTRY_FEE,
-              amount: Number(amountStroops) / 10_000_000,
+              amount: amountUsdc,
               asset: stellarConfig.usdcAssetCode,
               assetIssuer: stellarConfig.usdcIssuer,
               stellarTxHash: event.txHash,
@@ -266,7 +396,13 @@ export class EscrowEventIndexer {
               confirmedAt,
             },
           }),
-        ]);
+        ];
+        if (this.db.depositException?.deleteMany) {
+          depositUpdates.push(
+            this.db.depositException.deleteMany({ where: { txHash: event.txHash } })
+          );
+        }
+        await this.db.$transaction(depositUpdates);
 
         if (!isAlreadyConfirmed && member.user?.email) {
           try {
@@ -274,7 +410,7 @@ export class EscrowEventIndexer {
               to: member.user.email,
               username: member.user.username || member.user.name || "Manager",
               leagueName: league.name,
-              amount: Number(amountStroops) / 10_000_000,
+              amount: amountUsdc,
               txHash: event.txHash,
             });
           } catch (err) {
@@ -288,10 +424,15 @@ export class EscrowEventIndexer {
             userId: member.userId,
             actorId: SYSTEM_ACTOR,
             leagueId: league.id,
-            amount: Number(amountStroops) / 10_000_000,
+            amount: amountUsdc,
             asset: stellarConfig.usdcAssetCode,
             stellarTxHash: event.txHash,
-            metadata: { memberId: member.id, participant, ledgerSeq: event.ledger, source: "indexer" },
+            metadata: {
+              memberId: member.id,
+              participant,
+              ledgerSeq: event.ledger,
+              source: "indexer",
+            },
           });
         }
 
@@ -301,14 +442,18 @@ export class EscrowEventIndexer {
         return true;
       }
 
-      case "settle": {
-        const [totalPayoutStroops, platformFeeStroops] = scValToNative(event.value) as [bigint, bigint];
+      case "settle":
+      case "m_settle": {
+        const totalPayoutStroops = decoded.totalPayoutStroops ?? 0n;
+        const platformFeeStroops = decoded.platformFeeStroops ?? 0n;
         console.log(
           `[indexer] Settle event for league ${contractLeagueId} (payout: ${totalPayoutStroops}, fee: ${platformFeeStroops})`
         );
 
         if (!league) {
-          console.warn(`[indexer] Settle for unknown league ${contractLeagueId} (tx ${event.txHash})`);
+          console.warn(
+            `[indexer] Settle for unknown league ${contractLeagueId} (tx ${event.txHash})`
+          );
           return false;
         }
 
@@ -367,19 +512,78 @@ export class EscrowEventIndexer {
         return true;
       }
 
-      case "refund": {
-        const count = Number(scValToNative(event.value));
-        console.log(`[indexer] Refund event for league ${contractLeagueId} (${count} participants)`);
+      case "refund":
+      case "EmergencyRefund":
+      case "LeagueRefundClaimed": {
+        // Single-participant refund events (EmergencyRefund / LeagueRefundClaimed)
+        if (
+          (name === "EmergencyRefund" || name === "LeagueRefundClaimed") &&
+          decoded.participant
+        ) {
+          if (!league) return false;
+          const member = await this.db.leagueMember.findFirst({
+            where: {
+              leagueId: league.id,
+              OR: [
+                { stellarAddress: decoded.participant },
+                { user: { wallet: { stellarAddress: decoded.participant } } },
+              ],
+            },
+          });
+          if (member) {
+            const refundUsdc = decoded.amountUsdc ?? Number(league.entryFee ?? 0);
+            await this.db.$transaction([
+              this.db.leagueMember.update({
+                where: { id: member.id },
+                data: {
+                  paymentStatus: PaymentStatus.REFUNDED,
+                  status: MembershipStatus.REFUNDED,
+                },
+              }),
+              this.db.transaction.upsert({
+                where: { stellarTxHash: `${event.txHash}-${member.id}` },
+                update: {
+                  status: TransactionStatus.CONFIRMED,
+                  ledgerSeq: event.ledger,
+                  confirmedAt,
+                },
+                create: {
+                  userId: member.userId,
+                  leagueId: league.id,
+                  memberId: member.id,
+                  type: TransactionType.REFUND,
+                  amount: refundUsdc,
+                  asset: stellarConfig.usdcAssetCode,
+                  assetIssuer: stellarConfig.usdcIssuer,
+                  stellarTxHash: `${event.txHash}-${member.id}`,
+                  ledgerSeq: event.ledger,
+                  status: TransactionStatus.CONFIRMED,
+                  confirmedAt,
+                },
+              }),
+            ]);
+          }
+          return true;
+        }
+
+        const count = decoded.refundCount ?? 0;
+        console.log(
+          `[indexer] Refund event for league ${contractLeagueId} (${count} participants)`
+        );
 
         if (!league) {
-          console.warn(`[indexer] Refund for unknown league ${contractLeagueId} (tx ${event.txHash})`);
+          console.warn(
+            `[indexer] Refund for unknown league ${contractLeagueId} (tx ${event.txHash})`
+          );
           return false;
         }
 
         const membersToRefund = await this.db.leagueMember.findMany({
           where: {
             leagueId: league.id,
-            paymentStatus: { in: [PaymentStatus.PAYMENT_CONFIRMED, PaymentStatus.REFUND_PENDING] },
+            paymentStatus: {
+              in: [PaymentStatus.PAYMENT_CONFIRMED, PaymentStatus.REFUND_PENDING],
+            },
           },
         });
 
@@ -442,8 +646,33 @@ export class EscrowEventIndexer {
         return true;
       }
 
-      case "claimed": {
-        const [winner, amountStroops] = scValToNative(event.value) as [string, bigint];
+      case "DepositRefunded": {
+        const participant = decoded.participant!;
+        if (this.db.depositRefundClaim) {
+          const claim = await this.db.depositRefundClaim.findFirst({
+            where: {
+              exception: {
+                contractLeagueId: contractLeagueId.toString(),
+                senderAddress: participant,
+              },
+            },
+          });
+          if (claim && claim.status !== "PAID") {
+            await this.db.depositRefundClaim.update({
+              where: { id: claim.id },
+              data: { status: "PAID", completedAt: confirmedAt },
+            });
+          }
+        }
+        return true;
+      }
+
+      case "claimed":
+      case "m_claimed":
+      case "claim":
+      case "PrizeClaimed": {
+        const winner = decoded.participant!;
+        const amountStroops = decoded.amountStroops ?? 0n;
         console.log(
           `[indexer] Claimed prize for league ${contractLeagueId} by ${winner} (amount: ${amountStroops})`
         );
@@ -522,22 +751,27 @@ export class EscrowEventIndexer {
    */
   public async resetCursor(startLedger?: number): Promise<void> {
     if (startLedger !== undefined) {
-      await this.db.indexerCursor.upsert({
-        where: { id: INDEXER_CURSOR_ID },
-        create: { id: INDEXER_CURSOR_ID, lastLedger: startLedger - 1, cursor: null },
-        update: { lastLedger: startLedger - 1, cursor: null },
-      });
+      await this.saveCursor(startLedger - 1, null);
     } else {
       await this.db.indexerCursor.deleteMany({
         where: { id: INDEXER_CURSOR_ID },
       });
+      if (this.redis) {
+        try {
+          await this.redis.del(REDIS_CURSOR_KEY);
+        } catch {
+          // Ignore Redis delete error
+        }
+      }
     }
   }
 
   /**
    * Retrieves stored contract events for a league or event type.
    */
-  public async getIndexedEvents(query: { leagueId?: string; eventType?: string; limit?: number } = {}) {
+  public async getIndexedEvents(
+    query: { leagueId?: string; eventType?: string; limit?: number } = {}
+  ) {
     if (!this.db.contractEvent) return [];
     return this.db.contractEvent.findMany({
       where: {
@@ -575,7 +809,11 @@ export class EscrowEventIndexer {
       this.schedule(processed >= this.batchSize ? 0 : this.pollIntervalMs);
     } catch (error) {
       this.failures++;
-      const delay = EscrowEventIndexer.backoffDelay(this.failures, this.baseBackoffMs, this.maxBackoffMs);
+      const delay = EscrowEventIndexer.backoffDelay(
+        this.failures,
+        this.baseBackoffMs,
+        this.maxBackoffMs
+      );
       console.error(
         `[indexer] Poll failed (attempt ${this.failures}), retrying in ${delay}ms:`,
         (error as Error).message
@@ -584,3 +822,5 @@ export class EscrowEventIndexer {
     }
   }
 }
+
+export { EscrowEventIndexer as SorobanEventSubscriberDaemon };

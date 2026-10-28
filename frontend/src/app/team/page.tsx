@@ -5,10 +5,15 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { api, ApiError } from "@/lib/api";
 import { isOfflineError, loadSquadSnapshot, saveSquadSnapshot } from "@/lib/offlineStore";
+import { flushOfflineQueue } from "@/lib/offlineSyncCoordinator";
 import {
   enqueueSquadMutation,
+  getQueuedMutations,
   getQueuedMutationCount,
-  syncQueuedMutations,
+  hasUnsyncedMutations,
+  removeQueuedMutation,
+  updateQueuedMutationRevision,
+  type QueuedSquadMutation,
 } from "@/lib/offlineQueue";
 import { registerServiceWorker } from "@/lib/pushNotifications";
 import { useOnlineStatus } from "@/lib/useOnlineStatus";
@@ -16,14 +21,15 @@ import { Squad, Player, Position, SQUAD_RULES, ChipType, SquadChipUsage } from "
 import { Pitch } from "@/components/pitch/Pitch";
 import { Bench } from "@/components/pitch/Bench";
 import { BudgetBar } from "@/components/team/BudgetBar";
+import { CountdownTimer } from "@/components/team/CountdownTimer";
 import { PlayerPickerModal } from "@/components/team/PlayerPickerModal";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { validateCompleteSquad, detectFormation } from "@/lib/formation";
+import { useSquadSolver } from "@/hooks/useSquadSolver";
 import {
-  IconFootball,
   IconCheck,
   IconAlertCircle,
   IconSwap,
-  IconPlus,
 } from "@/components/ui/Icons";
 import { Button } from "@/components/ui/Button";
 import { PositionBadge } from "@/components/ui/Badge";
@@ -39,7 +45,7 @@ import {
   DragOverlay,
 } from "@dnd-kit/core";
 
-import { useTeamStore, LocalSquadPlayer } from "@/store/teamStore";
+import { useTeamStore, LocalSquadPlayer, buildSquadPayload } from "@/store/teamStore";
 import { PlayerCard } from "@/components/pitch/PlayerCard";
 
 export default function TeamPage() {
@@ -47,16 +53,33 @@ export default function TeamPage() {
   const { user, isAuthenticated, isLoading: authLoading } = useAuth();
   const { toast } = useToast();
 
-  const { 
-    squadId, setSquadId, 
-    squadName, setSquadName, 
-    players, setPlayers, 
+  const {
+    squadId, setSquadId,
+    squadName, setSquadName,
+    players, setPlayers,
     selectedPlayerId, setSelectedPlayerId,
     activeDragPlayer, setActiveDragPlayer,
     substitutionFeedback, setSubstitutionFeedback,
     activeModalState, setActiveModalState,
-    handleSwap, handleSetCaptain, handleSetViceCaptain
+    handleSwap, handleSetCaptain, handleSetViceCaptain,
+    setOwnerId, hydrateFromSquad, persistLineupOffline
   } = useTeamStore();
+
+  const { validateSquad: solveSquad } = useSquadSolver();
+  const [, setSolverResult] = useState<{ valid: boolean; errors: string[] } | null>(null);
+
+  useEffect(() => {
+    const solverPayload = players.map((p) => ({
+      id: p.playerId,
+      position: p.player.position,
+      teamId: p.player.teamId,
+      price: p.player.price,
+      isStarter: p.isStarter,
+    }));
+    solveSquad(solverPayload)
+      .then((res) => setSolverResult(res))
+      .catch(() => {});
+  }, [players, solveSquad]);
 
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isSaving, setIsSaving] = useState<boolean>(false);
@@ -65,41 +88,50 @@ export default function TeamPage() {
   const isOnline = useOnlineStatus();
   const [offlineSnapshotAt, setOfflineSnapshotAt] = useState<string | null>(null);
   const [queuedMutationsCount, setQueuedMutationsCount] = useState<number>(0);
+  const [squadRevision, setSquadRevision] = useState<string | undefined>();
+  const [conflictMutation, setConflictMutation] = useState<QueuedSquadMutation | null>(null);
   const [isSyncingOfflineQueue, setIsSyncingOfflineQueue] = useState<boolean>(false);
   const showingSnapshot = useRef(false);
-  const prevOnlineRef = useRef(isOnline);
   const userId = user?.id;
 
   // Refresh queued mutations count
   const refreshQueueCount = async () => {
     try {
-      const count = await getQueuedMutationCount();
+      const [count, queued] = await Promise.all([getQueuedMutationCount(), getQueuedMutations()]);
       setQueuedMutationsCount(count);
+      setConflictMutation(queued.find((mutation) => mutation.status === "conflict") ?? null);
     } catch {
       // Ignore in unsupported environments
     }
   };
 
-  const handleManualSync = async (isAuto = false) => {
+  // Toasts, retries and conflict rollback are handled by the sync coordinator
+  const handleManualSync = async (_isAuto = false) => {
     if (isSyncingOfflineQueue) return;
     setIsSyncingOfflineQueue(true);
     try {
-      const res = await syncQueuedMutations();
+      await flushOfflineQueue();
       await refreshQueueCount();
-      if (res.succeeded > 0) {
-        const msg = isAuto
-          ? `Auto-synced ${res.succeeded} squad update(s) to server!`
-          : `Successfully synced ${res.succeeded} queued change(s)!`;
-        toast.success(msg);
-      }
-      if (res.failed > 0) {
-        toast.error(`Failed to sync ${res.failed} squad change(s). Will retry automatically.`);
-      }
     } catch (err) {
       console.error("Failed to sync queued mutations:", err);
     } finally {
       setIsSyncingOfflineQueue(false);
     }
+  };
+
+  const useServerSquadVersion = async () => {
+    if (!conflictMutation) return;
+    await removeQueuedMutation(conflictMutation.id);
+    setConflictMutation(null);
+    await refreshQueueCount();
+    window.location.reload();
+  };
+
+  const keepOfflineSquadVersion = async () => {
+    if (!conflictMutation?.serverRevision) return;
+    await updateQueuedMutationRevision(conflictMutation.id, conflictMutation.serverRevision);
+    setConflictMutation(null);
+    await handleManualSync(false);
   };
 
   // Listen to queue changes, SW messages, and register SW
@@ -111,40 +143,19 @@ export default function TeamPage() {
       refreshQueueCount();
     };
 
-    const handleSwMessage = (event: MessageEvent) => {
-      if (event.data?.type === "SYNC_SQUAD_MUTATIONS") {
-        handleManualSync();
-      }
-    };
-
-    if (typeof window !== "undefined") {
-      window.addEventListener("offline-queue-change", handleQueueChange);
-      if ("serviceWorker" in navigator) {
-        navigator.serviceWorker.addEventListener("message", handleSwMessage);
-      }
-    }
-
-    return () => {
-      if (typeof window !== "undefined") {
-        window.removeEventListener("offline-queue-change", handleQueueChange);
-        if ("serviceWorker" in navigator) {
-          navigator.serviceWorker.removeEventListener("message", handleSwMessage);
-        }
-      }
-    };
+    window.addEventListener("offline-queue-change", handleQueueChange);
+    return () => window.removeEventListener("offline-queue-change", handleQueueChange);
   }, []);
 
-  // Auto-sync when reconnecting online
+  // Offline lineup edits are queued for this manager (issue #334)
   useEffect(() => {
-    if (!prevOnlineRef.current && isOnline) {
-      handleManualSync(true);
-    }
-    prevOnlineRef.current = isOnline;
-  }, [isOnline]);
-  
+    setOwnerId(userId ?? null);
+  }, [userId, setOwnerId]);
+
   // Wildcard chip state
   const [isWildcardActive, setIsWildcardActive] = useState<boolean>(false);
   const [currentGameweek, setCurrentGameweek] = useState<{ id: number; name: string; deadline: string } | null>(null);
+  const [isDeadlinePassed, setIsDeadlinePassed] = useState(false);
   const [chipUsages, setChipUsages] = useState<SquadChipUsage[]>([]);
   const [isActivatingChip, setIsActivatingChip] = useState<boolean>(false);
 
@@ -159,10 +170,12 @@ export default function TeamPage() {
     let cancelled = false;
 
     const applySquads = (squads: Squad[]) => {
+      if (squads.length > 0) hydrateFromSquad(squads[0]);
       if (squads.length === 0) return;
       const s = squads[0];
       setSquadId(s.id);
       setSquadName(s.name);
+      setSquadRevision(s.updatedAt);
 
       if (s.players && s.players.length > 0) {
         const mapped: LocalSquadPlayer[] = s.players
@@ -188,17 +201,21 @@ export default function TeamPage() {
           api.get<{ success: boolean; data: { id: number; name: string; deadline: string } | null }>("/api/v1/gameweeks/current"),
         ]);
         if (cancelled) return;
-        
-        if (squadRes?.data) {
+
+        const pendingSnapshot = (await hasUnsyncedMutations(userId!)) ? loadSquadSnapshot(userId!) : null;
+        if (cancelled) return;
+
+        if (pendingSnapshot) {
+          applySquads(pendingSnapshot.squads);
+        } else if (squadRes?.data) {
           saveSquadSnapshot(userId!, squadRes.data);
           applySquads(squadRes.data);
-          
-          // Load chip usages if squad has them
+
           if (squadRes.data[0]?.chipUsages) {
             setChipUsages(squadRes.data[0].chipUsages);
           }
         }
-        
+
         if (gameweekRes?.data) {
           setCurrentGameweek({
             id: gameweekRes.data.id,
@@ -206,7 +223,7 @@ export default function TeamPage() {
             deadline: gameweekRes.data.deadline,
           });
         }
-        
+
         showingSnapshot.current = false;
         setOfflineSnapshotAt(null);
       } catch (err) {
@@ -228,7 +245,6 @@ export default function TeamPage() {
 
     loadSquad();
 
-    // Swap the saved copy for live data as soon as the connection returns
     const handleOnline = () => {
       if (showingSnapshot.current) {
         setErrorMessage(null);
@@ -240,15 +256,11 @@ export default function TeamPage() {
       cancelled = true;
       window.removeEventListener("online", handleOnline);
     };
-  }, [isAuthenticated, authLoading, router, userId, setSquadId, setSquadName, setPlayers]);
+  }, [isAuthenticated, authLoading, router, userId, hydrateFromSquad, setPlayers, setSquadId, setSquadName]);
 
   // Derived state
   const starters = players
     .filter((p) => p.isStarter)
-    .sort((a, b) => a.positionOrder - b.positionOrder);
-
-  const bench = players
-    .filter((p) => !p.isStarter)
     .sort((a, b) => a.positionOrder - b.positionOrder);
 
   const totalSpent = players.reduce((sum, p) => sum + (p.player?.price || 0), 0);
@@ -264,7 +276,11 @@ export default function TeamPage() {
 
   // Validation
   const validation = validateCompleteSquad(players);
-  const canSave = players.length === 15 && validation.valid && totalSpent <= SQUAD_RULES.STARTING_BUDGET * 10;
+  const canSave =
+    players.length === 15 &&
+    validation.valid &&
+    totalSpent <= SQUAD_RULES.STARTING_BUDGET * 10 &&
+    !isDeadlinePassed;
 
   // Selected player object
   const selectedPlayer = players.find((p) => p.playerId === selectedPlayerId);
@@ -278,8 +294,8 @@ export default function TeamPage() {
     }),
     useSensor(TouchSensor, {
       activationConstraint: {
-        delay: 250,
-        tolerance: 5,
+        delay: 350,
+        tolerance: 8,
       },
     })
   );
@@ -300,7 +316,7 @@ export default function TeamPage() {
     if (over && active.id !== over.id) {
       const activeIdNum = Number(active.id);
       const overIdNum = Number(over.id);
-      
+
       if (!isNaN(activeIdNum) && !isNaN(overIdNum)) {
         handleSwap(activeIdNum, overIdNum);
       }
@@ -313,7 +329,6 @@ export default function TeamPage() {
     setIsLoading(true);
     setErrorMessage(null);
     try {
-      // Fetch pool of available players sorted by points
       const res = await api.get<{
         success: boolean;
         data: { players: Player[] } | Player[];
@@ -331,7 +346,6 @@ export default function TeamPage() {
         return;
       }
 
-      // Draft: 2 GKP, 5 DEF, 5 MID, 3 FWD, obeying max 3 per club and budget
       const picked: Player[] = [];
       const teamCounts: Record<number, number> = {};
 
@@ -355,8 +369,6 @@ export default function TeamPage() {
       pickPosition(Position.FWD, 3);
 
       if (picked.length === 15) {
-        // Starters: 1 GKP, 4 DEF, 4 MID, 2 FWD (standard 4-4-2)
-        // Bench: 1 GKP, 1 DEF, 1 MID, 1 FWD
         const gks = picked.filter((p) => p.position === Position.GKP);
         const defs = picked.filter((p) => p.position === Position.DEF);
         const mids = picked.filter((p) => p.position === Position.MID);
@@ -364,7 +376,6 @@ export default function TeamPage() {
 
         const newPlayers: LocalSquadPlayer[] = [];
 
-        // Starters (11)
         newPlayers.push({
           playerId: gks[0].id,
           player: gks[0],
@@ -390,7 +401,7 @@ export default function TeamPage() {
             playerId: p.id,
             player: p,
             isStarter: true,
-            isCaptain: i === 0, // Make first midfielder Captain
+            isCaptain: i === 0,
             isViceCaptain: false,
             positionOrder: 6 + i,
           });
@@ -402,12 +413,11 @@ export default function TeamPage() {
             player: p,
             isStarter: true,
             isCaptain: false,
-            isViceCaptain: i === 0, // Make first forward Vice-Captain
+            isViceCaptain: i === 0,
             positionOrder: 10 + i,
           });
         });
 
-        // Bench (4)
         newPlayers.push({
           playerId: gks[1].id,
           player: gks[1],
@@ -455,29 +465,6 @@ export default function TeamPage() {
     }
   };
 
-  // Click on a player in Pitch or Bench
-  const handlePlayerClick = (clickedPlayer: Player | null, position?: Position) => {
-    if (!clickedPlayer) {
-      // Empty slot clicked -> open picker for this position
-      setActiveModalState({
-        isOpen: true,
-        requiredPosition: position || null,
-        replacingPlayer: null,
-      });
-      return;
-    }
-
-    // If another player is already selected, perform swap!
-    if (selectedPlayerId && selectedPlayerId !== clickedPlayer.id) {
-      handleSwap(selectedPlayerId, clickedPlayer.id);
-      setSelectedPlayerId(null);
-      return;
-    }
-
-    // Otherwise toggle selection
-    setSelectedPlayerId(selectedPlayerId === clickedPlayer.id ? null : clickedPlayer.id);
-  };
-
   // Transfer player (replace with someone from picker)
   const handleReplacePlayer = (newPlayer: Player) => {
     const replacing = activeModalState.replacingPlayer;
@@ -503,38 +490,31 @@ export default function TeamPage() {
   const handleSaveSquad = async () => {
     if (!canSave) return;
 
-    const payload = {
-      name: squadName.trim() || "My Fantasy XI",
-      players: players.map((p, idx) => ({
-        playerId: p.playerId,
-        isStarter: p.isStarter,
-        isCaptain: p.isCaptain,
-        isViceCaptain: p.isViceCaptain,
-        positionOrder: idx + 1,
-      })),
-    };
+    const payload = buildSquadPayload(squadName, players);
 
     if (!isOnline) {
       setIsSaving(true);
       setErrorMessage(null);
       try {
-        await enqueueSquadMutation({
-          squadId,
-          userId,
-          action: squadId ? "update" : "create",
-          payload,
-        });
+        if (!(await persistLineupOffline())) {
+          await enqueueSquadMutation({
+            squadId,
+            userId,
+            action: squadId ? "update" : "create",
+            payload,
+            baseRevision: squadRevision,
+          });
+        }
 
-        // Also update local snapshot so the squad stays visible offline
         if (userId) {
           saveSquadSnapshot(userId, [
             {
-              id: squadId || 0,
+              id: squadId || "0",
               userId,
               name: payload.name,
               players: players.map((p, idx) => ({
                 id: p.id || idx + 1,
-                squadId: squadId || 0,
+                squadId: squadId || "0",
                 playerId: p.playerId,
                 isStarter: p.isStarter,
                 isCaptain: p.isCaptain,
@@ -542,7 +522,7 @@ export default function TeamPage() {
                 positionOrder: idx + 1,
                 player: p.player,
               })),
-            } as Squad,
+            } as unknown as Squad,
           ]);
         }
 
@@ -565,20 +545,20 @@ export default function TeamPage() {
     setErrorMessage(null);
     setSaveSuccessMsg(null);
 
-    // Snapshot current state for rollback
     const previousPlayers: LocalSquadPlayer[] = players.map((p) => ({ ...p, player: { ...p.player } }));
 
     try {
       if (squadId) {
-        // Optimistic update: assume success, rollback on failure
-        let rollback = false;
         try {
-          await api.put(`/api/v1/squads/${squadId}`, payload);
+          const response = await api.put<{ success: boolean; data: Squad }>(`/api/v1/squads/${squadId}`, {
+            ...payload,
+            expectedUpdatedAt: squadRevision,
+          });
+          setSquadRevision(response.data.updatedAt);
           const msg = "Squad lineup and tactics updated successfully!";
           setSaveSuccessMsg(msg);
           toast.success(msg);
         } catch (err: unknown) {
-          rollback = true;
           const msg =
             err instanceof ApiError
               ? err.message || "Failed to save squad."
@@ -590,7 +570,6 @@ export default function TeamPage() {
           toast.error(msg);
         }
       } else {
-        // Create new squad
         const createPayload = {
           ...payload,
           userId: user?.id,
@@ -649,7 +628,7 @@ export default function TeamPage() {
         usedAt: new Date().toISOString(),
       };
       setChipUsages([...chipUsages, newUsage]);
-      
+
       toast.success("Wildcard activated! All transfers this gameweek are free.");
     } catch (err: unknown) {
       const msg =
@@ -706,8 +685,12 @@ export default function TeamPage() {
             canSave={canSave}
           />
 
-          <Pitch isLoading />
-          <Bench isLoading />
+          <ErrorBoundary name="TeamBuilderPitch" fallbackTitle="Pitch tactical view failed to render">
+            <Pitch isLoading />
+          </ErrorBoundary>
+          <ErrorBoundary name="TeamBuilderBench" fallbackTitle="Substitute bench failed to render">
+            <Bench isLoading />
+          </ErrorBoundary>
         </div>
       </DndContext>
     );
@@ -737,14 +720,17 @@ export default function TeamPage() {
           </div>
 
           {/* Formation & Rules status */}
-          <div className="flex items-center gap-4 text-xs font-mono">
+          <div className="flex flex-wrap items-center gap-4 text-xs font-mono">
+            {currentGameweek && (
+              <CountdownTimer deadline={currentGameweek.deadline} onExpiredChange={setIsDeadlinePassed} />
+            )}
             <div className="flex items-center gap-2">
               <span className="text-slate-400 uppercase tracking-wider text-[11px]">Formation</span>
               <span className="text-emerald-400 font-bold text-sm">
                 {detectFormation(starters)}
               </span>
             </div>
-            
+
             {/* Wildcard Chip Toggle */}
             {currentGameweek && (
               <div className="flex items-center gap-2">
@@ -782,18 +768,53 @@ export default function TeamPage() {
             <div className="flex items-center gap-3">
               <IconAlertCircle className="w-4 h-4 text-amber-400 flex-shrink-0" />
               <span className="font-semibold">
-                {`Offline: ${queuedMutationsCount} change${queuedMutationsCount === 1 ? "" : "s"} queued for sync`}
+                {conflictMutation
+                  ? "An offline lineup edit needs conflict resolution"
+                  : `${queuedMutationsCount} squad change${queuedMutationsCount === 1 ? "" : "s"} queued for sync`}
               </span>
             </div>
             <button
               type="button"
               onClick={() => handleManualSync(false)}
-              disabled={isSyncingOfflineQueue || !isOnline}
+              disabled={isSyncingOfflineQueue || !isOnline || Boolean(conflictMutation)}
               className="px-3 py-1.5 rounded-md bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 font-bold uppercase tracking-wider text-[11px] transition-all disabled:opacity-50 flex items-center gap-1.5 self-start sm:self-auto cursor-pointer disabled:cursor-not-allowed"
             >
               {isSyncingOfflineQueue ? "Syncing..." : "Sync Now"}
             </button>
           </div>
+        )}
+
+        {conflictMutation && (
+          <section
+            role="alertdialog"
+            aria-labelledby="offline-conflict-title"
+            aria-describedby="offline-conflict-description"
+            className="rounded-xl border border-amber-500/50 bg-amber-950/70 p-5 space-y-3"
+            data-testid="offline-conflict-dialog"
+          >
+            <h2 id="offline-conflict-title" className="text-sm font-bold text-amber-100">Your squad changed elsewhere</h2>
+            <p id="offline-conflict-description" className="text-xs text-amber-200">
+              Another update reached the server while this device was offline. Use the current server squad or retry your lineup against its latest revision.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={useServerSquadVersion}
+                disabled={!isOnline}
+                className="rounded-md bg-slate-700 px-3 py-2 text-xs font-bold text-white disabled:opacity-50"
+              >
+                Use server version
+              </button>
+              <button
+                type="button"
+                onClick={keepOfflineSquadVersion}
+                disabled={!isOnline || !conflictMutation.serverRevision}
+                className="rounded-md bg-amber-500/20 px-3 py-2 text-xs font-bold text-amber-100 disabled:opacity-50"
+              >
+                Keep my offline changes
+              </button>
+            </div>
+          </section>
         )}
 
         {/* Offline mode: read-only view of the squad saved on this device */}
@@ -952,10 +973,14 @@ export default function TeamPage() {
         )}
 
         {/* Main Pitch View */}
-        <Pitch />
+        <ErrorBoundary name="TeamBuilderPitch" fallbackTitle="Pitch tactical view failed to render">
+          <Pitch />
+        </ErrorBoundary>
 
         {/* Dugout Substitute Bench */}
-        <Bench />
+        <ErrorBoundary name="TeamBuilderBench" fallbackTitle="Substitute bench failed to render">
+          <Bench />
+        </ErrorBoundary>
 
         {/* Transfer & Player Picker Modal */}
         <PlayerPickerModal

@@ -1,5 +1,12 @@
 import { Router } from "express";
 import {
+  initSwissTournament,
+  getSwissStandings,
+  getSwissCurrentRound,
+  advanceSwissRound,
+  resolveSwissRound,
+} from "../controllers/league.controller.js";
+import {
   createLeague,
   getLeagues,
   getLeagueById,
@@ -20,6 +27,7 @@ import { Permission, UserRole } from "../types/index.js";
 import { authenticatedRateLimiter, mutationRateLimiter } from "../middleware/rateLimiter.js";
 import { primaryReads } from "../middleware/readConsistency.js";
 import { getChatMessages, postChatMessage } from "../controllers/chat.controller.js";
+import { requireDepositRangeProof } from "../middleware/depositRangeProof.js";
 
 const router = Router();
 
@@ -102,6 +110,9 @@ import {
   reconcileLeague,
 } from "../controllers/financial.controller.js";
 
+// Private high-roller leagues require a ZK buy-in range proof with each deposit
+const depositRangeProof = requireDepositRangeProof();
+
 // Financial reads feed payment decisions (and the payment requirement creates the
 // membership), so they are always served by the primary, never a replica.
 
@@ -110,7 +121,7 @@ router.use("/:leagueId/financial", primaryReads, financialRoutes);
 
 // Direct convenience endpoints under /:leagueId
 router.get("/:leagueId/payment-requirement", primaryReads, requireAuth, getPaymentRequirement);
-router.post("/:leagueId/submit-payment", requireAuth, submitPayment);
+router.post("/:leagueId/submit-payment", requireAuth, depositRangeProof, submitPayment);
 router.post("/:leagueId/verify-payment", requireAuth, verifyPayment);
 router.get("/:leagueId/settlement-plan", requireAuth, getSettlementPlan);
 router.post(
@@ -131,6 +142,7 @@ router.post(
   "/:leagueId/submit-payment",
   requireAuth,
   requirePermission(Permission.PAYMENT_MANAGE_OWN),
+  depositRangeProof,
   submitPayment
 );
 router.post(
@@ -155,5 +167,12 @@ router.get(
   authenticatedRateLimiter,
   reconcileLeague
 );
+
+// Swiss-system tournament routes (Issue #341)
+router.post("/:leagueId/swiss/init", requireAuth, initSwissTournament);
+router.get("/:leagueId/swiss/standings", primaryReads, getSwissStandings);
+router.get("/:leagueId/swiss/current-round", primaryReads, getSwissCurrentRound);
+router.post("/:leagueId/swiss/rounds/advance", requireAuth, advanceSwissRound);
+router.post("/:leagueId/swiss/rounds/:round/resolve", requireAuth, resolveSwissRound);
 
 export default router;

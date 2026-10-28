@@ -215,7 +215,7 @@ export const PlayerPickerModal: React.FC<PlayerPickerModalProps> = ({
                           <span className="font-bold text-sm text-slate-100 truncate">
                             {p.displayName || `${p.firstName} ${p.lastName}`}
                           </span>
-                          <span className="text-xs font-mono uppercase text-slate-400 px-1.5 py-0.5 rounded bg-slate-800 shrink-0">
+                          <span className="text-xs font-mono uppercase text-slate-400 shrink-0">
                             {p.team?.shortName || "PL"}
                           </span>
                         </div>

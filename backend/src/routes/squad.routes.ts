@@ -7,6 +7,7 @@ import {
   getUserSquads,
   calculateGameweekScore,
   activateChip,
+  cancelChip,
   getSquadValuation,
 } from "../controllers/squad.controller.js";
 import { requireAuth, requirePermission } from "../middleware/authMiddleware.js";
@@ -56,6 +57,16 @@ router.post(
   mutationRateLimiter,
   idempotency,
   activateChip
+);
+
+router.post(
+  "/:id/chip/:gameweekId/cancel",
+  requireAuth,
+  requirePermission(Permission.SQUAD_UPDATE_OWN),
+  squadRateLimiter,
+  mutationRateLimiter,
+  idempotency,
+  cancelChip
 );
 
 // GET /api/v1/squads/user/:userId (Public: view squads by user ID)

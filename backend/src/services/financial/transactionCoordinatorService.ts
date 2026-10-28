@@ -32,6 +32,7 @@ import { webhookRetryEngine } from "../webhooks/webhookRetryEngine.js";
 import { eventBus as defaultEventBus, EventBus } from "../events/eventBus.js";
 import { userNotificationHub, UserNotificationHub } from "../notifications/userNotificationHub.js";
 import { adminAlertNotifier, AdminAlertSink } from "../notifications/adminAlertNotifier.js";
+import { FeeBumpService } from "./feeBumpService.js";
 
 export { CoordinatedTransactionStatus };
 
@@ -117,6 +118,8 @@ export interface TransactionCoordinatorOptions {
   webhooks?: TransactionWebhookPort;
   alerts?: AdminAlertSink;
   eventBus?: EventBus;
+  feeBumpService?: FeeBumpService;
+  feeBumpThresholdMs?: number;
   /** First retry delay; doubles on every NOT_FOUND poll */
   initialDelayMs?: number;
   maxDelayMs?: number;
@@ -152,6 +155,8 @@ export class TransactionCoordinatorService {
   private readonly webhooks: TransactionWebhookPort;
   private readonly alerts: AdminAlertSink;
   private readonly bus: EventBus;
+  private readonly feeBumpService?: FeeBumpService;
+  private readonly feeBumpThresholdMs: number;
   private readonly initialDelayMs: number;
   private readonly maxDelayMs: number;
   private readonly maxPendingMs: number;
@@ -168,6 +173,8 @@ export class TransactionCoordinatorService {
     this.webhooks = options.webhooks ?? defaultWebhooks;
     this.alerts = options.alerts ?? adminAlertNotifier;
     this.bus = options.eventBus ?? defaultEventBus;
+    this.feeBumpService = options.feeBumpService;
+    this.feeBumpThresholdMs = options.feeBumpThresholdMs ?? envInt("TX_COORDINATOR_FEE_BUMP_THRESHOLD_MS", 30_000);
     this.initialDelayMs = options.initialDelayMs ?? envInt("TX_COORDINATOR_INITIAL_DELAY_MS", 2_000);
     this.maxDelayMs = options.maxDelayMs ?? envInt("TX_COORDINATOR_MAX_DELAY_MS", 60_000);
     this.maxPendingMs = options.maxPendingMs ?? envInt("TX_COORDINATOR_MAX_PENDING_MS", 15 * 60_000);
@@ -318,7 +325,7 @@ export class TransactionCoordinatorService {
     error: string | null
   ): Promise<CoordinatedTransactionStatus> {
     const pendingForMs = now.getTime() - new Date(record.submittedAt).getTime();
-    if (pendingForMs >= this.maxPendingMs) {
+    if (pendingForMs >= this.maxPendingMs && !error) {
       const reason =
         `Transaction not found on the network ${Math.round(pendingForMs / 1000)}s after submission` +
         (error ? `; last error: ${error}` : "");
@@ -327,12 +334,38 @@ export class TransactionCoordinatorService {
 
     const attempts = record.attempts + 1;
     const delay = calculateBackoffDelay(attempts, this.initialDelayMs, this.maxDelayMs);
+
+    // Automated fee-bump check for stuck platform transactions (Issue #363)
+    const meta = (record.metadata as Record<string, any>) || {};
+    if (
+      this.feeBumpService &&
+      pendingForMs >= this.feeBumpThresholdMs &&
+      meta.envelopeXdr &&
+      !meta.feeBumpedAt
+    ) {
+      try {
+        const bumpResult = await this.feeBumpService.submitFeeBump(meta.envelopeXdr, {
+          leagueId: record.leagueId,
+          userId: record.userId,
+          transactionId: record.transactionId,
+        });
+        if (bumpResult.success) {
+          meta.feeBumpedAt = now.toISOString();
+          meta.feeBumpTxHash = bumpResult.feeBumpTxHash;
+          meta.bumpedFeeStroops = bumpResult.bumpedFeeStroops;
+        }
+      } catch (bumpErr) {
+        // Keep tracking on fee bump error
+      }
+    }
+
     await this.db.coordinatedTransaction.updateMany({
       where: { id: record.id, status: CoordinatedTransactionStatus.PENDING },
       data: {
         attempts,
         lastPolledAt: now,
         lastError: error,
+        metadata: meta,
         nextPollAt: new Date(now.getTime() + delay),
       },
     });

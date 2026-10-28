@@ -1,0 +1,3 @@
+ALTER TABLE "league_invitations"
+  ADD COLUMN "max_uses" INTEGER NOT NULL DEFAULT 1,
+  ADD COLUMN "uses_count" INTEGER NOT NULL DEFAULT 0;

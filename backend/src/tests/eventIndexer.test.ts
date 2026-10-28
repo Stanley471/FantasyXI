@@ -1,7 +1,17 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { Keypair, nativeToScVal, xdr } from "@stellar/stellar-sdk";
-import { EscrowEventIndexer, INDEXER_CURSOR_ID } from "../workers/eventIndexer.js";
+import {
+  EscrowEventIndexer,
+  SorobanEventSubscriberDaemon,
+  INDEXER_CURSOR_ID,
+  REDIS_CURSOR_KEY,
+} from "../workers/eventIndexer.js";
+import {
+  decodeSorobanEscrowEvent,
+  DepositQueue,
+  type DepositQueueJobPayload,
+} from "../queues/depositQueue.js";
 import {
   toContractLeagueId,
   leagueIdPrefixFromContractId,
@@ -11,7 +21,7 @@ import { MembershipStatus, PaymentStatus, TransactionStatus } from "../types/ind
 const LEAGUE_ID = "3f2a9c1e-7b4d-4e8a-9c2f-1a2b3c4d5e6f";
 const participant = Keypair.random().publicKey();
 
-function depositEvent(txHash: string, ledger = 500, address = participant) {
+function depositEvent(txHash: string, ledger = 500, address = participant, amountStroops = 100_000_000n) {
   return {
     id: `${ledger}-1`,
     type: "contract",
@@ -27,7 +37,7 @@ function depositEvent(txHash: string, ledger = 500, address = participant) {
     ],
     value: nativeToScVal([
       nativeToScVal(address, { type: "address" }),
-      nativeToScVal(100_000_000n, { type: "i128" }),
+      nativeToScVal(amountStroops, { type: "i128" }),
     ]),
   } as any;
 }
@@ -99,6 +109,7 @@ function createMockDb(memberOverrides: any = {}) {
       id: LEAGUE_ID,
       creatorId: "creator_1",
       entryFee: 10,
+      maxMembers: 16,
       status: "ACTIVE",
     },
     member: {
@@ -113,6 +124,7 @@ function createMockDb(memberOverrides: any = {}) {
     },
     transactions: new Map<string, any>(),
     contractEvents: [] as any[],
+    depositExceptions: new Map<string, any>(),
   };
   const db: any = {
     state,
@@ -131,6 +143,7 @@ function createMockDb(memberOverrides: any = {}) {
       update: async ({ data }: any) => Object.assign(state.league, data),
     },
     leagueMember: {
+      count: async () => 1,
       findFirst: async ({ where }: any) => {
         const [byMember, byWallet] = where.OR;
         const m = state.member;
@@ -157,6 +170,14 @@ function createMockDb(memberOverrides: any = {}) {
       findMany: async ({ where }: any) =>
         state.contractEvents.filter((e) => !where?.eventType || e.eventType === where.eventType),
     },
+    depositException: {
+      upsert: async ({ where, create }: any) => {
+        const existing = state.depositExceptions.get(where.txHash);
+        const exception = existing ?? create;
+        state.depositExceptions.set(where.txHash, exception);
+        return exception;
+      },
+    },
     $transaction: async (ops: any[]) => Promise.all(ops),
   };
   return db;
@@ -174,6 +195,27 @@ function createMockStellar(pages: any[], latestLedger = 1000) {
     },
     getRpcLedgerRange: async () => ({ oldestLedger: 10, latestLedger }),
   } as any;
+}
+
+function createMockRedis() {
+  const kv = new Map<string, string>();
+  return {
+    kv,
+    get: async (key: string) => kv.get(key) ?? null,
+    set: async (key: string, value: string) => {
+      kv.set(key, value);
+      return "OK";
+    },
+    del: async (...keys: string[]) => {
+      let deleted = 0;
+      for (const k of keys) {
+        if (kv.delete(k)) deleted++;
+      }
+      return deleted;
+    },
+    keys: async () => Array.from(kv.keys()),
+    eval: async () => 1,
+  };
 }
 
 describe("Soroban Escrow Event Indexer", () => {
@@ -224,6 +266,16 @@ describe("Soroban Escrow Event Indexer", () => {
 
     assert.equal(await indexer.handleEvent(depositEvent("d".repeat(64), 500, stranger)), false);
     assert.equal(db.state.transactions.size, 0);
+    assert.equal(db.state.depositExceptions.size, 1);
+  });
+
+  it("flags a mismatched amount instead of confirming the member", async () => {
+    const db = createMockDb();
+    const indexer = new EscrowEventIndexer({ db, stellar: createMockStellar([]) });
+
+    assert.equal(await indexer.handleEvent(depositEvent("f".repeat(64), 500, participant, 50_000_000n)), false);
+    assert.equal(db.state.member.paymentStatus, PaymentStatus.PAYMENT_INITIATED);
+    assert.equal(db.state.depositExceptions.get("f".repeat(64)).reason, "AMOUNT_MISMATCH");
   });
 
   it("persists the cursor and resumes from it after a restart", async () => {
@@ -336,5 +388,126 @@ describe("Soroban Escrow Event Indexer", () => {
     await indexer.resetCursor();
     assert.equal(db.state.cursor, null);
   });
-});
 
+  it("decodes base64 XDR Soroban events across deposit, m_claimed, and EmergencyRefund and enqueues into depositQueue with idempotency deduplication (Issue #403)", async () => {
+    const db = createMockDb();
+    const redis = createMockRedis();
+    const queue = new DepositQueue({ redis });
+    const dispatchedJobs: DepositQueueJobPayload[] = [];
+    queue.registerProcessor((job) => {
+      dispatchedJobs.push(job);
+    });
+
+    const contractLeagueId = toContractLeagueId(LEAGUE_ID);
+
+    // Construct event using base64-encoded XDR strings as returned by raw Soroban RPC JSON-RPC
+    const base64DepositEvent = {
+      id: "810-1",
+      type: "contract",
+      ledger: 810,
+      ledgerClosedAt: "2026-09-21T10:00:00Z",
+      inSuccessfulContractCall: true,
+      txHash: "1".repeat(64),
+      topic: [
+        xdr.ScVal.scvSymbol("deposit").toXDR("base64"),
+        nativeToScVal(contractLeagueId, { type: "u64" }).toXDR("base64"),
+      ],
+      value: nativeToScVal([
+        nativeToScVal(participant, { type: "address" }),
+        nativeToScVal(100_000_000n, { type: "i128" }),
+      ]).toXDR("base64"),
+    } as any;
+
+    const decoded = decodeSorobanEscrowEvent(base64DepositEvent);
+    assert.ok(decoded);
+    assert.equal(decoded.category, "DEPOSIT");
+    assert.equal(decoded.participant, participant);
+    assert.equal(decoded.amountUsdc, 10);
+
+    const stellar = createMockStellar([
+      {
+        events: [base64DepositEvent],
+        cursor: "cursor-810",
+        latestLedger: 815,
+      },
+    ]);
+
+    const daemon = new SorobanEventSubscriberDaemon({
+      db,
+      redis,
+      queue,
+      stellar,
+      startLedger: 800,
+    });
+
+    const processedCount = await daemon.pollOnce();
+    assert.equal(processedCount, 1);
+    assert.equal(dispatchedJobs.length, 1);
+    assert.equal(dispatchedJobs[0].category, "DEPOSIT");
+    assert.equal(dispatchedJobs[0].txHash, "1".repeat(64));
+    assert.equal(db.state.member.paymentStatus, PaymentStatus.PAYMENT_CONFIRMED);
+    assert.equal(db.state.member.status, MembershipStatus.ACTIVE);
+
+    // Verify cursor persisted in BOTH Redis and Postgres
+    const redisCursorRaw = await redis.get(REDIS_CURSOR_KEY);
+    assert.ok(redisCursorRaw);
+    assert.deepEqual(JSON.parse(redisCursorRaw), {
+      id: INDEXER_CURSOR_ID,
+      lastLedger: 810,
+      cursor: "cursor-810",
+    });
+    assert.deepEqual(db.state.cursor, {
+      id: INDEXER_CURSOR_ID,
+      lastLedger: 810,
+      cursor: "cursor-810",
+    });
+
+    // Replaying the same event must be deduplicated by depositQueue
+    await daemon.handleEvent(base64DepositEvent);
+    assert.equal(dispatchedJobs.length, 1);
+
+    // Test m_claimed and EmergencyRefund decoding and handling
+    const merkleClaimEvent = {
+      id: "820-1",
+      type: "contract",
+      ledger: 820,
+      ledgerClosedAt: "2026-09-21T11:00:00Z",
+      inSuccessfulContractCall: true,
+      txHash: "2".repeat(64),
+      topic: [
+        xdr.ScVal.scvSymbol("m_claimed").toXDR("base64"),
+        nativeToScVal(contractLeagueId, { type: "u64" }).toXDR("base64"),
+      ],
+      value: nativeToScVal([
+        nativeToScVal(participant, { type: "address" }),
+        nativeToScVal(95_000_000n, { type: "i128" }),
+      ]).toXDR("base64"),
+    } as any;
+
+    assert.equal(await daemon.handleEvent(merkleClaimEvent), true);
+    assert.equal(dispatchedJobs.length, 2);
+    assert.equal(dispatchedJobs[1].category, "CLAIM");
+
+    const emergencyRefundEvent = {
+      id: "830-1",
+      type: "contract",
+      ledger: 830,
+      ledgerClosedAt: "2026-09-21T12:00:00Z",
+      inSuccessfulContractCall: true,
+      txHash: "3".repeat(64),
+      topic: [
+        xdr.ScVal.scvSymbol("EmergencyRefund").toXDR("base64"),
+        nativeToScVal(contractLeagueId, { type: "u64" }).toXDR("base64"),
+      ],
+      value: nativeToScVal([
+        nativeToScVal(participant, { type: "address" }),
+        nativeToScVal(100_000_000n, { type: "i128" }),
+      ]).toXDR("base64"),
+    } as any;
+
+    assert.equal(await daemon.handleEvent(emergencyRefundEvent), true);
+    assert.equal(dispatchedJobs.length, 3);
+    assert.equal(dispatchedJobs[2].category, "REFUND");
+    assert.equal(db.state.member.paymentStatus, PaymentStatus.REFUNDED);
+  });
+});

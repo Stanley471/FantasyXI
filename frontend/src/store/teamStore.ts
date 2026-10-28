@@ -1,7 +1,9 @@
 import { create } from "zustand";
-import { Player, Position } from "@/types";
+import { Player, Position, Squad, SQUAD_RULES } from "@/types";
 import { emitToast } from "@/context/ToastContext";
-import { validateSubstitution } from "@/lib/formation";
+import { validateCompleteSquad, validateSubstitution } from "@/lib/formation";
+import { enqueueSquadMutation, QueuedSquadMutation, SquadMutationPayload } from "@/lib/offlineQueue";
+import { saveSquadSnapshot } from "@/lib/offlineStore";
 
 export interface LocalSquadPlayer {
   id?: number | string;
@@ -18,7 +20,26 @@ export interface SubstitutionFeedback {
   message: string;
 }
 
+/** Body of a squad create/replace request; positionOrder follows the local list order. */
+export function buildSquadPayload(name: string, players: LocalSquadPlayer[]): SquadMutationPayload {
+  return {
+    name: name.trim() || "My Fantasy XI",
+    players: players.map((p, idx) => ({
+      playerId: p.playerId,
+      isStarter: p.isStarter,
+      isCaptain: p.isCaptain,
+      isViceCaptain: p.isViceCaptain,
+      positionOrder: idx + 1,
+    })),
+  };
+}
+
+const isOffline = () => typeof navigator !== "undefined" && navigator.onLine === false;
+
 interface TeamState {
+  /** Signed-in manager whose squad this is; needed to queue offline changes. */
+  ownerId: string | null;
+  setOwnerId: (id: string | null) => void;
   squadId: string | null;
   setSquadId: (id: string | null) => void;
   squadName: string;
@@ -43,6 +64,14 @@ interface TeamState {
   setActiveModalState: (state: { isOpen: boolean; requiredPosition: Position | null; replacingPlayer: Player | null }) => void;
   
   // Actions
+  /** Replaces local state with a squad loaded from the server or the offline snapshot. */
+  hydrateFromSquad: (squad: Squad) => void;
+  /**
+   * Persists the current lineup to the offline queue and snapshot so it
+   * survives reloads and syncs on reconnection (issue #334). Returns null when
+   * the lineup is incomplete or invalid, since the server would reject it.
+   */
+  persistLineupOffline: () => Promise<QueuedSquadMutation | null>;
   handleSwap: (playerAId: number, playerBId: number) => boolean;
   handleSetCaptain: (playerId: number) => void;
   handleSetViceCaptain: (playerId: number) => void;
@@ -50,6 +79,9 @@ interface TeamState {
 }
 
 export const useTeamStore = create<TeamState>((set, get) => ({
+  ownerId: null,
+  setOwnerId: (id) => set({ ownerId: id }),
+
   squadId: null,
   setSquadId: (id) => set({ squadId: id }),
   
@@ -76,6 +108,60 @@ export const useTeamStore = create<TeamState>((set, get) => ({
     replacingPlayer: null,
   },
   setActiveModalState: (modalState) => set({ activeModalState: modalState }),
+
+  hydrateFromSquad: (squad) => {
+    set({ squadId: squad.id, squadName: squad.name });
+    if (squad.players && squad.players.length > 0) {
+      set({
+        players: squad.players
+          .filter((sp) => sp.player)
+          .map((sp) => ({
+            id: sp.id,
+            playerId: sp.playerId,
+            player: sp.player!,
+            isStarter: sp.isStarter,
+            isCaptain: sp.isCaptain,
+            isViceCaptain: sp.isViceCaptain,
+            positionOrder: sp.positionOrder,
+          })),
+      });
+    }
+  },
+
+  persistLineupOffline: async () => {
+    const { ownerId, squadId, squadName, players } = get();
+    if (!ownerId || players.length !== SQUAD_RULES.TOTAL_PLAYERS || !validateCompleteSquad(players).valid) {
+      return null;
+    }
+
+    const payload = buildSquadPayload(squadName, players);
+    const mutation = await enqueueSquadMutation({
+      squadId,
+      userId: ownerId,
+      action: squadId ? "update" : "create",
+      payload,
+    });
+
+    // The snapshot is what a reload shows until the server accepts the change
+    saveSquadSnapshot(ownerId, [
+      {
+        id: squadId ?? "",
+        userId: ownerId,
+        name: payload.name,
+        players: players.map((p, idx) => ({
+          id: typeof p.id === "number" ? p.id : idx + 1,
+          squadId: squadId ?? "",
+          playerId: p.playerId,
+          isStarter: p.isStarter,
+          isCaptain: p.isCaptain,
+          isViceCaptain: p.isViceCaptain,
+          positionOrder: idx + 1,
+          player: p.player,
+        })),
+      } as Squad,
+    ]);
+    return mutation;
+  },
 
   handlePlayerClick: (clickedPlayer, position) => {
     const state = get();
@@ -163,6 +249,7 @@ export const useTeamStore = create<TeamState>((set, get) => ({
         message: successMessage,
       },
     });
+    persistIfOffline();
     return true;
   },
 
@@ -174,6 +261,7 @@ export const useTeamStore = create<TeamState>((set, get) => ({
         isViceCaptain: p.playerId === playerId ? false : p.isViceCaptain,
       }))
     }));
+    persistIfOffline();
   },
 
   handleSetViceCaptain: (playerId) => {
@@ -184,5 +272,15 @@ export const useTeamStore = create<TeamState>((set, get) => ({
         isCaptain: p.playerId === playerId ? false : p.isCaptain,
       }))
     }));
+    persistIfOffline();
   },
 }));
+
+/** Lineup edits made offline are queued immediately (optimistic UI, persisted). */
+function persistIfOffline(): void {
+  if (!isOffline()) return;
+  useTeamStore
+    .getState()
+    .persistLineupOffline()
+    .catch(() => emitToast.error("Couldn't save your lineup change on this device."));
+}

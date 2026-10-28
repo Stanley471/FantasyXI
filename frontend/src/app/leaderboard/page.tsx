@@ -7,6 +7,7 @@ import { buildLeaderboardQuery, formatCount, ordinal, resultRangeText } from "@/
 import { Gameweek, LeaderboardData, LeaderboardMode } from "@/types";
 import { LeaderboardTable } from "@/components/leaderboard/LeaderboardTable";
 import { Pagination } from "@/components/leaderboard/Pagination";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { SearchIcon } from "@/components/ui/Icons";
 
 const PAGE_SIZE = 25;
@@ -264,21 +265,28 @@ export default function LeaderboardPage() {
           </p>
         </div>
 
-        <div
-          className={`overflow-hidden rounded-xl border border-slate-800 bg-slate-900/40 transition-opacity ${
-            isLoading && data ? "opacity-60" : ""
-          }`}
+        <ErrorBoundary
+          name="LeaderboardTable"
+          fallbackTitle="Leaderboard table failed to render"
+          onReset={() => setRetryCount((n) => n + 1)}
+          resetKeys={[requestKey]}
         >
-          {!data && isLoading ? (
-            <p className="p-8 text-center text-sm text-slate-400">Loading the leaderboard…</p>
-          ) : data && data.entries.length > 0 ? (
-            <LeaderboardTable entries={data.entries} caption={caption} pointsLabel={pointsLabel} />
-          ) : data ? (
-            <p className="p-8 text-center text-sm text-slate-400">
-              {search ? `No managers match “${search}”.` : "No managers have been ranked yet."}
-            </p>
-          ) : null}
-        </div>
+          <div
+            className={`overflow-hidden rounded-xl border border-slate-800 bg-slate-900/40 transition-opacity ${
+              isLoading && data ? "opacity-60" : ""
+            }`}
+          >
+            {!data && isLoading ? (
+              <p className="p-8 text-center text-sm text-slate-400">Loading the leaderboard…</p>
+            ) : data && data.entries.length > 0 ? (
+              <LeaderboardTable entries={data.entries} caption={caption} pointsLabel={pointsLabel} />
+            ) : data ? (
+              <p className="p-8 text-center text-sm text-slate-400">
+                {search ? `No managers match “${search}”.` : "No managers have been ranked yet."}
+              </p>
+            ) : null}
+          </div>
+        </ErrorBoundary>
 
         {meta && (
           <Pagination

@@ -2,12 +2,18 @@ import { Request, Response, NextFunction } from "express";
 import {
   squadService,
   SquadForbiddenError,
+  SquadRevisionConflictError,
   ChipUnavailableError,
+  ChipCancellationLockedError,
 } from "../services/squad/squadService.js";
 import {
   SquadValidationError,
   SquadLockedError,
 } from "../services/squad/squadValidator.js";
+import {
+  withSquadLock,
+  SquadLockConflictError,
+} from "../services/lockManager.js";
 import { scoringService } from "../services/scoring/scoringService.js";
 
 /**
@@ -96,12 +102,15 @@ export async function updateSquad(
     }
 
     const { id } = req.params;
-    // Pass authenticated user ID for ownership verification
-    const squad = await squadService.updateSquad(
-      id as string,
-      req.body,
-      req.user.id
-    );
+    const userId = req.user.id;
+    // Pass authenticated user ID for ownership verification under distributed lock
+    const squad = await withSquadLock(id as string, async () => {
+      return await squadService.updateSquad(
+        id as string,
+        req.body,
+        userId
+      );
+    });
 
     res.json({
       success: true,
@@ -109,6 +118,23 @@ export async function updateSquad(
       data: squad,
     });
   } catch (error) {
+    if (error instanceof SquadLockConflictError) {
+      res.status(409).json({
+        success: false,
+        message: error.message,
+      });
+      return;
+    }
+    if (error instanceof SquadRevisionConflictError) {
+      res.status(409).json({
+        success: false,
+        message: error.message,
+        data: {
+          revision: error.currentRevision.toISOString(),
+        },
+      });
+      return;
+    }
     if (error instanceof SquadForbiddenError) {
       res.status(403).json({
         success: false,
@@ -297,6 +323,36 @@ export async function activateChip(
         success: false,
         message: error.message,
       });
+      return;
+    }
+    next(error);
+  }
+}
+
+export async function cancelChip(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user?.id) {
+      res.status(401).json({ success: false, message: "Authentication required to cancel a chip" });
+      return;
+    }
+    const gameweekId = Number(req.params.gameweekId);
+    if (!Number.isInteger(gameweekId) || gameweekId < 1) {
+      res.status(400).json({ success: false, message: "A valid gameweekId is required" });
+      return;
+    }
+    const usage = await squadService.cancelChip(req.params.id as string, gameweekId, req.user.id);
+    res.status(200).json({ success: true, message: "Chip cancelled and squad restored", data: usage });
+  } catch (error) {
+    if (error instanceof ChipCancellationLockedError) {
+      res.status(400).json({ success: false, message: error.message });
+      return;
+    }
+    if (error instanceof SquadForbiddenError) {
+      res.status(403).json({ success: false, message: error.message });
+      return;
+    }
+    if (error instanceof ChipUnavailableError || error instanceof SquadValidationError) {
+      res.status(400).json({ success: false, message: error.message });
       return;
     }
     next(error);

@@ -291,6 +291,7 @@ describe("Financial Audit Log", () => {
         leagueMember: {
           findFirst: async () => member,
           findMany: async () => [],
+          count: async () => 1,
           update: async ({ data }: any) => Object.assign(member, data),
         },
         transaction: { upsert: async () => ({ status: TransactionStatus.CONFIRMED }) },

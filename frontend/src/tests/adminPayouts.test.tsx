@@ -28,6 +28,7 @@ function renderWithProviders(
     isAuthenticated,
     isLoading: false,
     login: () => {},
+    loginWithPasskey: async () => {},
     logout: () => {},
     setAuthToken: async () => {},
     refreshUser: async () => {},

@@ -1,10 +1,22 @@
 import { prisma } from "../config/db.js";
+import {
+  ChipType,
+  LeagueStatus,
+  MembershipStatus,
+  ScoringType,
+} from "../types/index.js";
+import { fplSyncService } from "../services/fpl/fplSyncService.js";
+import { scoringService } from "../services/scoring/scoringService.js";
+import { squadService } from "../services/squad/squadService.js";
+import { leagueService } from "../services/league/leagueService.js";
+import { parseLeagueScoringConfig } from "../models/leagueScoringConfig.js";
 import { LeagueStatus, MembershipStatus, ScoringType } from "../types/index.js";
 import { fplSyncService } from "../services/fpl/fplSyncService.js";
 import { leagueService, LeagueService } from "../services/league/leagueService.js";
 import { eventBus, publishOrThrow } from "../services/events/eventBus.js";
 import { GAMEWEEK_UPDATED_EVENT } from "../services/events/domainEvents.js";
 import { gameweekOracleService } from "../services/financial/gameweekOracleService.js";
+import { updateMatchRatings } from "../services/league/matchRatingService.js";
 // Imported for its side effect: subscribes the scoring, free-hit and league
 // settlement handlers to GAMEWEEK_UPDATED_EVENT (issue #118). This job no
 // longer needs to know which services react to a gameweek update.
@@ -78,6 +90,49 @@ export async function settleGameweek(gameweekId: number): Promise<void> {
 
   await fplSyncService.syncGameweekLiveStats(gameweek.fplId);
 
+  const squads = await prisma.squad.findMany({ select: { id: true } });
+  for (const squad of squads) {
+    await scoringService.calculateAndPersistSquadScore(squad.id, gameweekId);
+  }
+
+  const leagues = await prisma.league.findMany({
+    where: {
+      status: LeagueStatus.ACTIVE,
+      startGameweekId: { lte: gameweekId },
+      endGameweekId: { gte: gameweekId },
+    },
+  });
+  for (const league of leagues) {
+    const scoringConfig = league.scoringConfig
+      ? parseLeagueScoringConfig(league.scoringConfig)
+      : null;
+    if (!scoringConfig) {
+      continue;
+    }
+    const members = await prisma.leagueMember.findMany({
+      where: { leagueId: league.id, status: MembershipStatus.ACTIVE },
+      select: { squadId: true },
+    });
+    await Promise.all(
+      members.map((member) =>
+        scoringService.calculateAndPersistLeagueScore(
+          league.id,
+          member.squadId,
+          gameweekId,
+          scoringConfig
+        )
+      )
+    );
+  }
+
+  const freeHits = await prisma.squadChipUsage.findMany({
+    where: { gameweekId, chipType: ChipType.FREE_HIT, revertedAt: null },
+    select: { squadId: true },
+  });
+  for (const usage of freeHits) {
+    await squadService.revertFreeHit(usage.squadId, gameweekId);
+  }
+
   await publishOrThrow(eventBus, GAMEWEEK_UPDATED_EVENT, {
     gameweekId,
     gameweekFplId: gameweek.fplId,
@@ -90,7 +145,13 @@ export async function settleGameweek(gameweekId: number): Promise<void> {
     },
   });
   for (const league of leagues) {
+    const hasCustomScoring = league.scoringConfig !== null;
     if (league.scoringType === ScoringType.HEAD_TO_HEAD) {
+      await leagueService.settleH2HGameweek(
+        league.id,
+        gameweekId,
+        hasCustomScoring
+      );
       const activeMemberCount = await prisma.leagueMember.count({
         where: { leagueId: league.id, status: MembershipStatus.ACTIVE },
       });
@@ -122,6 +183,8 @@ export async function settleGameweek(gameweekId: number): Promise<void> {
       await leagueService.transitionStatus(league.id, LeagueStatus.COMPLETED);
     }
   }
+
+  await updateMatchRatings(gameweekId);
 
   // Bulk-recalculate every CLASSIC league's standings in one pass across the
   // whole platform (see recalculateClassicStandings for why this replaced a

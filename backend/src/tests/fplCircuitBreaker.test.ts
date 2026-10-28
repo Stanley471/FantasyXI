@@ -49,6 +49,15 @@ class MockRedisClient implements IRedisCacheClient {
 }
 
 describe("FPL Circuit Breaker & Adaptive Backoff (#208)", () => {
+  it("opens when failures exceed half of the rolling 30-second sample", async () => {
+    const cb = new CircuitBreaker({ failureRateThreshold: 0.5, rollingWindowMs: 30_000, minimumSamples: 4 });
+    await assert.rejects(() => cb.execute(async () => { throw new Error("503"); }));
+    await cb.execute(async () => "ok");
+    await assert.rejects(() => cb.execute(async () => { throw new Error("503"); }));
+    await assert.rejects(() => cb.execute(async () => { throw new Error("503"); }));
+    assert.equal(cb.getState(), CircuitState.OPEN);
+  });
+
   describe("State Transitions & Cooldown", () => {
     it("starts in CLOSED state and remains CLOSED on success", async () => {
       const cb = new CircuitBreaker({ failureThreshold: 3, cooldownPeriodMs: 1000 });

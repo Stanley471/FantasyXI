@@ -1,6 +1,12 @@
 import { Request, Response } from "express";
 import crypto from "crypto";
-import { webhookDispatcher, WebhookEndpoint } from "../services/webhooks/webhookDispatcher.js";
+import {
+  webhookDispatcher,
+  WebhookEndpoint,
+  DuplicateWebhookSubscriptionError,
+  findExistingWebhookSubscription,
+  normalizeWebhookUrl,
+} from "../services/webhooks/webhookDispatcher.js";
 import { webhookRetryEngine } from "../services/webhooks/webhookRetryEngine.js";
 
 // In-memory endpoints registry (backed by DB when available)
@@ -8,18 +14,59 @@ const registeredEndpoints: Map<string, WebhookEndpoint> = new Map();
 
 export async function createEndpoint(req: Request, res: Response): Promise<void> {
   try {
-    const { url, events, leagueId } = req.body;
-    const userId = (req as any).user?.id || "user-anon";
+    const { url, events, leagueId } = req.body ?? {};
+    const userId = req.user?.id || "user-anon";
 
-    if (!url || !Array.isArray(events) || events.length === 0) {
+    if (
+      typeof url !== "string" ||
+      !Array.isArray(events) ||
+      events.length === 0 ||
+      !events.every((event: unknown) => typeof event === "string" && event.trim().length > 0)
+    ) {
       res.status(400).json({ error: "url and non-empty events array are required" });
       return;
     }
 
+    let normalizedUrl: string;
     try {
-      new URL(url);
+      normalizedUrl = normalizeWebhookUrl(url);
     } catch {
       res.status(400).json({ error: "Invalid URL provided" });
+      return;
+    }
+
+    const normalizedEvents = [...new Set((events as string[]).map((event) => event.trim()))];
+    let existing: WebhookEndpoint | undefined;
+    try {
+      existing = findExistingWebhookSubscription(
+        Array.from(registeredEndpoints.values()),
+        userId,
+        normalizedUrl,
+        normalizedEvents
+      );
+    } catch (error) {
+      if (error instanceof DuplicateWebhookSubscriptionError) {
+        res.status(409).json({ error: error.message });
+        return;
+      }
+      throw error;
+    }
+
+    if (existing) {
+      existing.url = normalizedUrl;
+      existing.events = [...new Set([...existing.events, ...normalizedEvents])];
+      webhookRetryEngine.registerEndpoint(existing);
+      res.json({
+        success: true,
+        updated: true,
+        endpoint: {
+          id: existing.id,
+          url: existing.url,
+          events: existing.events,
+          leagueId: existing.leagueId,
+          isActive: existing.isActive,
+        },
+      });
       return;
     }
 
@@ -28,7 +75,7 @@ export async function createEndpoint(req: Request, res: Response): Promise<void>
 
     const endpoint: WebhookEndpoint = {
       id: endpointId,
-      url,
+      url: normalizedUrl,
       secret,
       leagueId: leagueId || null,
       userId,
@@ -50,8 +97,10 @@ export async function createEndpoint(req: Request, res: Response): Promise<void>
         isActive: endpoint.isActive,
       },
     });
-  } catch (error: any) {
-    res.status(500).json({ error: error.message || "Failed to create webhook endpoint" });
+  } catch (error) {
+    res.status(500).json({
+      error: error instanceof Error ? error.message : "Failed to create webhook endpoint",
+    });
   }
 }
 

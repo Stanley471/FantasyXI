@@ -5,14 +5,47 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { api, ApiError } from "@/lib/api";
+import { computeDeviceFingerprint } from "@/lib/deviceFingerprint";
 import { describeGoogleAuthError, redirectToGoogleSignIn, safeReturnTo } from "@/lib/googleAuth";
-import { IconFootball, IconGoogle, IconAlertCircle, IconCheck } from "@/components/ui/Icons";
+import {
+  describePasskeyError,
+  usePasskeySupport,
+  type PublicKeyCredentialRequestOptionsJSON,
+} from "@/lib/passkeys";
+import { IconFootball, IconGoogle, IconAlertCircle, IconCheck, IconShield } from "@/components/ui/Icons";
 import { Button } from "@/components/ui/Button";
+
+interface SignedInUser {
+  id: string;
+  email: string;
+  username: string;
+  name?: string | null;
+  createdAt: string;
+}
+
+/**
+ * Login answer: a session, a step-up code for an unrecognized device (issue #331),
+ * or a passkey confirmation for an account protected by a passkey (issue #273).
+ */
+type LoginResponse = {
+  success: boolean;
+  message: string;
+  data:
+    | { token: string; user: SignedInUser }
+    | { challengeRequired: true; challengeId: string; method: "EMAIL_OTP"; expiresAt: string }
+    | { challengeRequired: true; method: "WEBAUTHN"; options: PublicKeyCredentialRequestOptionsJSON; expiresAt: string };
+};
+
+function describeError(err: unknown, fallback: string): string {
+  if (err instanceof ApiError) return err.message || fallback;
+  if (err instanceof Error) return err.message;
+  return "Failed to sign in. Please verify your connection.";
+}
 
 function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { login, isAuthenticated } = useAuth();
+  const { login, loginWithPasskey, isAuthenticated } = useAuth();
 
   const returnTo = safeReturnTo(searchParams.get("returnTo"));
   const urlError = searchParams.get("error");
@@ -22,6 +55,10 @@ function LoginForm() {
   const [showPassword, setShowPassword] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(describeGoogleAuthError(urlError));
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [challengeId, setChallengeId] = useState<string | null>(null);
+  const [code, setCode] = useState("");
+  const [passkeyOptions, setPasskeyOptions] = useState<PublicKeyCredentialRequestOptionsJSON | null>(null);
+  const canUsePasskey = usePasskeySupport();
 
   // If already authenticated, redirect immediately
   useEffect(() => {
@@ -42,37 +79,73 @@ function LoginForm() {
     setIsSubmitting(true);
 
     try {
-      const response = await api.post<{
-        success: boolean;
-        message: string;
-        data: {
-          token: string;
-          user: {
-            id: string;
-            email: string;
-            username: string;
-            name?: string | null;
-            createdAt: string;
-          };
-        };
-      }>("/api/v1/auth/login", {
+      const response = await api.post<LoginResponse>("/api/v1/auth/login", {
         email: email.trim(),
         password,
+        deviceFingerprint: (await computeDeviceFingerprint()) ?? undefined,
       });
 
-      if (response?.data?.token && response?.data?.user) {
-        login(response.data.token, response.data.user);
+      const data = response?.data;
+      if (data && "challengeRequired" in data) {
+        if (data.method === "WEBAUTHN") {
+          setPasskeyOptions(data.options);
+        } else {
+          setChallengeId(data.challengeId);
+          setCode("");
+        }
+      } else if (data?.token && data.user) {
+        login(data.token, data.user);
         router.push(returnTo);
       } else {
         setErrorMsg("Unexpected response from authentication service.");
       }
     } catch (err: unknown) {
-      if (err instanceof ApiError) {
-        setErrorMsg(err.message || "Invalid credentials.");
-      } else if (err instanceof Error) {
-        setErrorMsg(err.message);
-      } else {
-        setErrorMsg("Failed to sign in. Please verify your connection.");
+      setErrorMsg(describeError(err, "Invalid credentials."));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleVerifyCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMsg(null);
+
+    if (!/^\d{6}$/.test(code)) {
+      setErrorMsg("Enter the 6-digit code from the email we sent you.");
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const response = await api.post<{ data: { token: string; user: SignedInUser } }>(
+        "/api/v1/auth/login/verify",
+        { challengeId, code }
+      );
+      login(response.data.token, response.data.user);
+      router.push(returnTo);
+    } catch (err: unknown) {
+      setErrorMsg(describeError(err, "Verification failed."));
+      // An expired or exhausted challenge cannot be retried: start over
+      if (err instanceof ApiError && /sign in again/i.test(err.message)) {
+        setChallengeId(null);
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  /** Usernameless passkey sign-in, or the passkey step-up after a password (`stepUpOptions`). */
+  const handlePasskeySignIn = async (stepUpOptions?: PublicKeyCredentialRequestOptionsJSON) => {
+    setErrorMsg(null);
+    setIsSubmitting(true);
+    try {
+      await loginWithPasskey(stepUpOptions);
+      router.push(returnTo);
+    } catch (err: unknown) {
+      setErrorMsg(describePasskeyError(err, "Passkey sign-in failed."));
+      // The server consumed this single-use challenge: the password step must be repeated
+      if (stepUpOptions && err instanceof ApiError) {
+        setPasskeyOptions(null);
       }
     } finally {
       setIsSubmitting(false);
@@ -111,81 +184,33 @@ function LoginForm() {
           </div>
         )}
 
-        {/* Google OAuth Button */}
-        <button
-          type="button"
-          onClick={handleGoogleLogin}
-          className="w-full flex items-center justify-center gap-3 px-4 py-3 rounded-lg border border-slate-700 bg-slate-800/80 hover:bg-slate-700 text-slate-100 font-medium text-sm transition-all focus:outline-none focus:ring-2 focus:ring-emerald-500/50 shadow-sm group"
-        >
-          <IconGoogle className="w-5 h-5 flex-shrink-0 group-hover:scale-105 transition-transform" />
-          <span>Continue with Google</span>
-        </button>
-
-        {/* Tactical Divider */}
-        <div className="relative my-6">
-          <div className="absolute inset-0 flex items-center">
-            <div className="w-full border-t border-slate-800" />
-          </div>
-          <div className="relative flex justify-center text-xs uppercase">
-            <span className="bg-pitch-surface px-3 text-slate-500 font-bold tracking-wider">
-              Or with email
-            </span>
-          </div>
-        </div>
-
-        {/* Standard Email/Password Form */}
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label
-              htmlFor="email"
-              className="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1.5"
-            >
-              Email Address
-            </label>
-            <input
-              id="email"
-              type="email"
-              required
-              autoComplete="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="manager@fantasyxi.com"
-              className="w-full px-3.5 py-2.5 bg-slate-950/70 border border-slate-700/80 rounded-lg text-slate-100 placeholder-slate-500 text-sm focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
-            />
-          </div>
-
-          <div>
-            <div className="flex items-center justify-between mb-1.5">
+        {challengeId ? (
+          <form onSubmit={handleVerifyCode} className="space-y-4" data-testid="login-challenge">
+            <p className="text-sm text-slate-300 leading-relaxed">
+              We don&apos;t recognize this device. Enter the 6-digit code we just emailed to{" "}
+              <span className="font-semibold text-white">{email.trim()}</span> to finish signing in.
+            </p>
+            <div>
               <label
-                htmlFor="password"
-                className="block text-xs font-semibold uppercase tracking-wider text-slate-300"
+                htmlFor="code"
+                className="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1.5"
               >
-                Password
+                Verification Code
               </label>
-              <span className="text-xs text-slate-500">Min. 8 characters</span>
-            </div>
-            <div className="relative">
               <input
-                id="password"
-                type={showPassword ? "text" : "password"}
+                id="code"
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                pattern="\d{6}"
                 required
-                autoComplete="current-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
-                className="w-full px-3.5 py-2.5 pr-10 bg-slate-950/70 border border-slate-700/80 rounded-lg text-slate-100 placeholder-slate-500 text-sm focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
+                value={code}
+                // Strip before capping, so a pasted "123 456" keeps all six digits
+                onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                placeholder="123456"
+                className="w-full px-3.5 py-2.5 bg-slate-950/70 border border-slate-700/80 rounded-lg text-slate-100 placeholder-slate-500 text-lg tracking-[0.5em] font-mono focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
               />
-              <button
-                type="button"
-                onClick={() => setShowPassword(!showPassword)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-semibold text-slate-400 hover:text-slate-200 transition-colors"
-              >
-                {showPassword ? "Hide" : "Show"}
-              </button>
             </div>
-          </div>
-
-          <div className="pt-2">
             <Button
               type="submit"
               variant="primary"
@@ -193,10 +218,149 @@ function LoginForm() {
               className="w-full justify-center text-sm font-bold tracking-wide uppercase"
               isLoading={isSubmitting}
             >
-              Sign In to Dugout
+              Verify &amp; Sign In
             </Button>
+            <button
+              type="button"
+              onClick={() => {
+                setChallengeId(null);
+                setErrorMsg(null);
+              }}
+              className="w-full text-xs text-slate-400 hover:text-slate-200 transition-colors"
+            >
+              Back to sign in
+            </button>
+          </form>
+        ) : passkeyOptions ? (
+          <div className="space-y-4" data-testid="login-passkey-challenge">
+            <p className="text-sm text-slate-300 leading-relaxed">
+              Your account is protected with a passkey. Confirm it&apos;s you with Face ID, Touch ID, Windows
+              Hello or your security key to finish signing in.
+            </p>
+            <Button
+              type="button"
+              variant="primary"
+              size="lg"
+              className="w-full justify-center text-sm font-bold tracking-wide uppercase"
+              isLoading={isSubmitting}
+              onClick={() => handlePasskeySignIn(passkeyOptions)}
+            >
+              Verify with Passkey
+            </Button>
+            <button
+              type="button"
+              onClick={() => {
+                setPasskeyOptions(null);
+                setErrorMsg(null);
+              }}
+              className="w-full text-xs text-slate-400 hover:text-slate-200 transition-colors"
+            >
+              Back to sign in
+            </button>
           </div>
-        </form>
+        ) : (
+          <>
+            {/* Passkey sign-in (usernameless, issue #273) */}
+            {canUsePasskey && (
+              <button
+                type="button"
+                onClick={() => handlePasskeySignIn()}
+                disabled={isSubmitting}
+                className="w-full flex items-center justify-center gap-3 px-4 py-3 mb-3 rounded-lg border border-slate-700 bg-slate-800/80 hover:bg-slate-700 text-slate-100 font-medium text-sm transition-all focus:outline-none focus:ring-2 focus:ring-emerald-500/50 shadow-sm group disabled:opacity-60"
+              >
+                <IconShield className="w-5 h-5 flex-shrink-0 text-emerald-400 group-hover:scale-105 transition-transform" />
+                <span>Sign in with a passkey</span>
+              </button>
+            )}
+
+            {/* Google OAuth Button */}
+            <button
+              type="button"
+              onClick={handleGoogleLogin}
+              className="w-full flex items-center justify-center gap-3 px-4 py-3 rounded-lg border border-slate-700 bg-slate-800/80 hover:bg-slate-700 text-slate-100 font-medium text-sm transition-all focus:outline-none focus:ring-2 focus:ring-emerald-500/50 shadow-sm group"
+            >
+              <IconGoogle className="w-5 h-5 flex-shrink-0 group-hover:scale-105 transition-transform" />
+              <span>Continue with Google</span>
+            </button>
+
+            {/* Tactical Divider */}
+            <div className="relative my-6">
+              <div className="absolute inset-0 flex items-center">
+                <div className="w-full border-t border-slate-800" />
+              </div>
+              <div className="relative flex justify-center text-xs uppercase">
+                <span className="bg-pitch-surface px-3 text-slate-500 font-bold tracking-wider">
+                  Or with email
+                </span>
+              </div>
+            </div>
+
+            {/* Standard Email/Password Form */}
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div>
+                <label
+                  htmlFor="email"
+                  className="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1.5"
+                >
+                  Email Address
+                </label>
+                <input
+                  id="email"
+                  type="email"
+                  required
+                  autoComplete="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="manager@fantasyxi.com"
+                  className="w-full px-3.5 py-2.5 bg-slate-950/70 border border-slate-700/80 rounded-lg text-slate-100 placeholder-slate-500 text-sm focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
+                />
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label
+                    htmlFor="password"
+                    className="block text-xs font-semibold uppercase tracking-wider text-slate-300"
+                  >
+                    Password
+                  </label>
+                  <span className="text-xs text-slate-500">Min. 8 characters</span>
+                </div>
+                <div className="relative">
+                  <input
+                    id="password"
+                    type={showPassword ? "text" : "password"}
+                    required
+                    autoComplete="current-password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="w-full px-3.5 py-2.5 pr-10 bg-slate-950/70 border border-slate-700/80 rounded-lg text-slate-100 placeholder-slate-500 text-sm focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-semibold text-slate-400 hover:text-slate-200 transition-colors"
+                  >
+                    {showPassword ? "Hide" : "Show"}
+                  </button>
+                </div>
+              </div>
+
+              <div className="pt-2">
+                <Button
+                  type="submit"
+                  variant="primary"
+                  size="lg"
+                  className="w-full justify-center text-sm font-bold tracking-wide uppercase"
+                  isLoading={isSubmitting}
+                >
+                  Sign In to Dugout
+                </Button>
+              </div>
+            </form>
+          </>
+        )}
 
         {/* Footer info */}
         <div className="mt-6 text-center text-xs text-slate-400">

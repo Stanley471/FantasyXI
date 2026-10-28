@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { requireAuth } from "../middleware/authMiddleware.js";
 import {
   createEndpoint,
   listEndpoints,
@@ -11,7 +12,7 @@ import {
 
 const router = Router();
 
-router.post("/endpoints", createEndpoint);
+router.post("/endpoints", requireAuth, createEndpoint);
 router.get("/endpoints", listEndpoints);
 router.post("/endpoints/:id/test", testDispatch);
 router.get("/endpoints/:id/deliveries", listDeliveries);

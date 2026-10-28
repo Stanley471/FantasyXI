@@ -1,6 +1,17 @@
+import { eventFanout } from "./eventFanout.js";
 import { prisma } from "../../config/db.js";
+import { getRedisClient, type IRedisCacheClient } from "../../config/redis.js";
 import { MembershipStatus, Position } from "../../types/index.js";
 import { ScoringService, PlayerScoreDetail } from "../scoring/scoringService.js";
+import { allocateProvisionalBonus } from "../scoring/provisionalBps.js";
+export {
+  LiveProvisionalLeaderboardService,
+  liveProvisionalLeaderboardService,
+  type LiveMatchEvent,
+  type LiveLeaderboardDeltaDiff,
+  type ProvisionalSquadRecord,
+  type ProvisionalLeaderboardRankEntry,
+} from "./liveProvisionalLeaderboardService.js";
 
 /**
  * Live Matchday Service.
@@ -52,6 +63,8 @@ export interface LiveSnapshot {
     redCards: number;
     saves: number;
     bonus: number;
+    bps: number;
+    provisionalBonus: number;
     totalPoints: number;
   }>;
   standings: LiveStandingsEntry[];
@@ -76,10 +89,27 @@ export function rankLiveStandings(
 }
 
 export class LiveService {
+  /** Called only after the corresponding stats transaction commits. */
+  public publishPlayerDelta(gameweekId: number, playerId: number, fixtureId: number, data: Record<string, unknown>): boolean {
+    return eventFanout.publish(`matchday:${gameweekId}`, `${playerId}:${fixtureId}`, { playerId, fixtureId, ...data });
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  constructor(private readonly db: any = prisma) {}
+  constructor(
+    private readonly db: any = prisma,
+    private readonly redis: IRedisCacheClient | null = db === prisma ? getRedisClient() : null
+  ) {}
 
   public async getLeagueSnapshot(leagueId: string): Promise<LiveSnapshot | null> {
+    const cacheKey = `live:bps:snapshot:${leagueId}`;
+    if (this.redis) {
+      try {
+        const cached = await this.redis.get(cacheKey);
+        if (cached) return JSON.parse(cached) as LiveSnapshot;
+      } catch {
+        // Redis is an optimization; compute the snapshot directly when unavailable.
+      }
+    }
     const league = await this.db.league.findUnique({
       where: { id: leagueId },
       include: {
@@ -143,9 +173,22 @@ export class LiveService {
       transferHits.map((h: any) => [h.squadId, h._sum.pointsCost ?? 0])
     );
 
-    const statsMap = new Map<number, { minutes: number; totalPoints: number }>(
-      stats.map((s: any) => [s.playerId, { minutes: s.minutes, totalPoints: s.totalPoints }])
-    );
+    const provisionalBonuses = allocateProvisionalBonus(stats.map((stat: any) => ({
+      playerId: stat.playerId,
+      fixtureId: stat.fixtureId,
+      bps: stat.bps ?? 0,
+      minutes: stat.minutes,
+    })));
+
+    const statsMap = new Map<number, { minutes: number; totalPoints: number }>();
+    for (const stat of stats) {
+      const current = statsMap.get(stat.playerId) ?? { minutes: 0, totalPoints: 0 };
+      statsMap.set(stat.playerId, {
+        minutes: current.minutes + stat.minutes,
+        totalPoints: current.totalPoints + stat.totalPoints - (stat.bonus ?? 0) +
+          (provisionalBonuses.get(`${stat.fixtureId}:${stat.playerId}`) ?? 0),
+      });
+    }
     const completedBySquad = new Map<string, number>();
     for (const score of completedScores) {
       completedBySquad.set(score.squadId, (completedBySquad.get(score.squadId) ?? 0) + score.points);
@@ -185,7 +228,7 @@ export class LiveService {
       };
     });
 
-    return {
+    const snapshot: LiveSnapshot = {
       leagueId: league.id,
       gameweek: gameweek ? { id: gameweek.id, name: gameweek.name } : null,
       fixtures: fixtures.map((f: any) => ({
@@ -202,7 +245,7 @@ export class LiveService {
       events: stats
         .filter(
           (s: any) =>
-            s.goals || s.assists || s.yellowCards || s.redCards || s.saves || s.bonus
+            s.goals || s.assists || s.yellowCards || s.redCards || s.saves || s.bonus || s.bps
         )
         .map((s: any) => ({
           playerId: s.playerId,
@@ -214,11 +257,21 @@ export class LiveService {
           redCards: s.redCards,
           saves: s.saves,
           bonus: s.bonus,
-          totalPoints: s.totalPoints,
+          bps: s.bps ?? 0,
+          provisionalBonus: provisionalBonuses.get(`${s.fixtureId}:${s.playerId}`) ?? 0,
+          totalPoints: s.totalPoints - (s.bonus ?? 0) + (provisionalBonuses.get(`${s.fixtureId}:${s.playerId}`) ?? 0),
         })),
       standings: rankLiveStandings(entries),
       generatedAt: new Date().toISOString(),
     };
+    if (this.redis) {
+      try {
+        await this.redis.set(cacheKey, JSON.stringify(snapshot), "PX", 900);
+      } catch {
+        // A cache write failure must not interrupt live updates.
+      }
+    }
+    return snapshot;
   }
 }
 

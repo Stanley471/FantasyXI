@@ -630,6 +630,7 @@ export function LeagueInteractivePanel({
       {liveSquadEntry && (
         <LiveSquadModal
           entry={liveSquadEntry}
+          events={snapshot?.events}
           onClose={() => setLiveSquadUserId(null)}
         />
       )}

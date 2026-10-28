@@ -8,9 +8,10 @@ dotenv.config();
  */
 export interface IRedisCacheClient {
   get(key: string): Promise<string | null>;
-  set(key: string, value: string, mode?: any, duration?: any): Promise<unknown>;
+  set(key: string, value: string, ...args: any[]): Promise<unknown>;
   del(...keys: string[]): Promise<number>;
   keys(pattern: string): Promise<string[]>;
+  eval?(...args: any[]): Promise<unknown>;
   status?: string;
   quit?(): Promise<unknown>;
   disconnect?(): void;

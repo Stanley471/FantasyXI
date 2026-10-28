@@ -123,6 +123,8 @@ describe("Chips Engine — Activation & Deadline Locking", () => {
         { playerId: 2, isCaptain: false, isViceCaptain: true, isStarter: false, positionOrder: 12, purchasePrice: 4.0 },
       ],
       budgetRemaining: 1.5,
+      freeTransfers: 2,
+      freeTransfersGameweekId: 5,
     };
     const gameweek5 = () => ({
       id: 5,
@@ -136,10 +138,12 @@ describe("Chips Engine — Activation & Deadline Locking", () => {
       squad: {
         findUnique: async ({ where }: any) =>
           where.id === "squad_1"
-            ? { id: "squad_1", userId: "user_1", budgetRemaining: state.budgetRemaining, players: state.squadPlayers }
+            ? { id: "squad_1", userId: "user_1", budgetRemaining: state.budgetRemaining, freeTransfers: state.freeTransfers, freeTransfersGameweekId: state.freeTransfersGameweekId, players: state.squadPlayers }
             : null,
         update: async ({ data }: any) => {
           state.budgetRemaining = Number(data.budgetRemaining);
+          if (data.freeTransfers !== undefined) state.freeTransfers = data.freeTransfers;
+          if (data.freeTransfersGameweekId !== undefined) state.freeTransfersGameweekId = data.freeTransfersGameweekId;
         },
       },
       gameweek: {
@@ -164,8 +168,21 @@ describe("Chips Engine — Activation & Deadline Locking", () => {
           state.usages.push(usage);
           return usage;
         },
+        upsert: async ({ where, create, update }: any) => {
+          const key = where.squadId_gameweekId;
+          const existing = state.usages.find((u) => u.squadId === key.squadId && u.gameweekId === key.gameweekId);
+          if (existing) {
+            Object.assign(existing, update);
+            return existing;
+          }
+          const usage = { id: state.usages.length + 1, revertedAt: null, cancelledAt: null, ...create };
+          state.usages.push(usage);
+          return usage;
+        },
         update: async ({ where, data }: any) => {
-          Object.assign(state.usages.find((u) => u.id === where.id), data);
+          const usage = state.usages.find((u) => u.id === where.id);
+          Object.assign(usage, data);
+          return usage;
         },
       },
       squadPlayer: {
@@ -175,6 +192,9 @@ describe("Chips Engine — Activation & Deadline Locking", () => {
         createMany: async ({ data }: any) => {
           state.squadPlayers = data.map(({ squadId: _s, ...p }: any) => p);
         },
+      },
+      squadChipCancellation: {
+        create: async ({ data }: any) => data,
       },
       // Row locks are no-ops here; clock_timestamp() reads the real clock
       $queryRaw: async () => [{ now: new Date() }],
@@ -254,5 +274,24 @@ describe("Chips Engine — Activation & Deadline Locking", () => {
 
     // Idempotent: a second revert is a no-op
     assert.equal(await service.revertFreeHit("squad_1", 5), false);
+  });
+
+  it("cancels a Wildcard before deadline and restores squad budget and transfers", async () => {
+    const db = createMockDb();
+    const service = new SquadService(db);
+    const originalPlayers = structuredClone(db.state.squadPlayers);
+    await service.activateChip("squad_1", ChipType.WILDCARD, 5, "user_1");
+    db.state.squadPlayers = [{ playerId: 99, isCaptain: true, isViceCaptain: false, isStarter: true, positionOrder: 1, purchasePrice: 9 }];
+    db.state.budgetRemaining = 0.1;
+    db.state.freeTransfers = 0;
+
+    const cancelled = await service.cancelChip("squad_1", 5, "user_1");
+    assert.equal(cancelled.cancelledAt instanceof Date, true);
+    assert.deepEqual(
+      db.state.squadPlayers.map((player: any) => ({ ...player, purchasePrice: Number(player.purchasePrice) })),
+      originalPlayers
+    );
+    assert.equal(db.state.budgetRemaining, 1.5);
+    assert.equal(db.state.freeTransfers, 2);
   });
 });

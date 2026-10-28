@@ -177,6 +177,20 @@ describe("Drag-and-Drop Squad Management & Substitutions", () => {
     });
   });
 
+  it("supports a touch-first tap starter then tap substitute swap", () => {
+    const starter = squad.find((player) => player.playerId === 2)!;
+    const substitute = squad.find((player) => player.playerId === 13)!;
+
+    useTeamStore.getState().handlePlayerClick(starter.player);
+    assert.strictEqual(useTeamStore.getState().selectedPlayerId, starter.player.id);
+
+    useTeamStore.getState().handlePlayerClick(substitute.player);
+    const updatedPlayers = useTeamStore.getState().players;
+    assert.strictEqual(updatedPlayers.find((player) => player.playerId === 2)?.isStarter, false);
+    assert.strictEqual(updatedPlayers.find((player) => player.playerId === 13)?.isStarter, true);
+    assert.strictEqual(useTeamStore.getState().selectedPlayerId, null);
+  });
+
   describe("Tactical Formation Constraints during Substitutions", () => {
     it("should allow valid tactical switch: 4-4-2 -> 3-5-2 (subbing DEF for MID)", () => {
       const starterDef = squad.find((p) => p.playerId === 5)!; // DEF
