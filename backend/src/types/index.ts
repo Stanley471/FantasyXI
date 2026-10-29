@@ -408,6 +408,8 @@ export interface PaymentVerificationResult {
   destinationAddress?: string;
   confirmedAt?: Date;
   error?: string;
+  /** Horizon has no transaction with this hash (used by the anti-scanning guard). */
+  notFound?: boolean;
 }
 
 export interface SettlementWinner {

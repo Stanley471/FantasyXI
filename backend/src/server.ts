@@ -34,6 +34,10 @@ import { financialService } from "./services/financial/financialService.js";
 import { jwtKeyRotationService } from "./services/auth/jwtKeyRotationService.js";
 import { fplClient } from "./services/fpl/fplClient.js";
 import { partitionRotationWorker } from "./workers/partitionRotationWorker.js";
+import {
+  createSorobanEventIngestionService,
+  type SorobanEventIngestionService,
+} from "./services/financial/sorobanEventIngestionService.js";
 
 dotenv.config();
 
@@ -176,11 +180,17 @@ function startTransactionCoordinator(): void {
 }
 
 let liveSocketServer: ReturnType<typeof attachLiveSocketServer> | null = null;
+let sorobanEventIngestion: SorobanEventIngestionService | null = null;
 let chatAdapter: Awaited<ReturnType<typeof initRedisChat>> = null;
 
 async function startServer(): Promise<void> {
   if (process.env.DATABASE_URL && process.env.PARTITION_ROTATION_ENABLED !== "false") {
     partitionRotationWorker.start();
+  }
+  // Soroban contract event ingestion (set SOROBAN_INGEST_ENABLED=false to disable)
+  if (process.env.DATABASE_URL && process.env.SOROBAN_INGEST_ENABLED !== "false") {
+    sorobanEventIngestion = await createSorobanEventIngestionService();
+    sorobanEventIngestion?.start();
   }
   await eventFanout.start();
   chatAdapter = await initRedisChat();
@@ -246,6 +256,7 @@ startServer().catch((error) => {
 
 process.on("SIGTERM", () => {
   partitionRotationWorker.stop();
+  sorobanEventIngestion?.stop();
   // Persist buffered financial audit entries before exiting
   stopJobQueue()
     .finally(() => transactionCoordinator.stop())

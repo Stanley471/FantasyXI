@@ -192,6 +192,13 @@ export async function verifyPayment(
       stellarTxHash
     );
 
+    // Lets the wallet rate limiter lock out wallets that scan for hashes.
+    if (verification.notFound) {
+      res.locals.depositVerificationOutcome = "not_found";
+    } else if (verification.success) {
+      res.locals.depositVerificationOutcome = "found";
+    }
+
     if (!verification.success) {
       res.status(422).json({
         success: false,

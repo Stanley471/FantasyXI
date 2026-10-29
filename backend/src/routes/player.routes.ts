@@ -1,5 +1,11 @@
 import { Router } from "express";
-import { getPlayers, getPlayerById, getPlayerOwnershipStats, batchPlayerStats } from "../controllers/player.controller.js";
+import {
+  getPlayers,
+  getPlayerById,
+  getPlayerOwnershipStats,
+  batchPlayerStats,
+  getPlayerAnalytics,
+} from "../controllers/player.controller.js";
 import { requireAuth } from "../middleware/authMiddleware.js";
 import { authenticatedRateLimiter } from "../middleware/rateLimiter.js";
 
@@ -13,6 +19,9 @@ router.get("/ownership-stats", getPlayerOwnershipStats);
 
 // POST /api/v1/players/batch-stats (authenticated, rate limited)
 router.post("/batch-stats", requireAuth, authenticatedRateLimiter, batchPlayerStats);
+
+// GET /api/v1/players/:id/analytics (xP and fixture difficulty)
+router.get("/:id/analytics", getPlayerAnalytics);
 
 // GET /api/v1/players/:id
 router.get("/:id", getPlayerById);

@@ -4,12 +4,6 @@ import express from "express";
 import type { Redis } from "ioredis";
 import { getRateLimitTier } from "../config/rateLimit.js";
 import { UserRole } from "../types/index.js";
-import {
-  authRateLimiter,
-  apiRateLimiter,
-  createSlidingWindowRateLimiter,
-  MemorySlidingWindowStore,
-  RedisSlidingWindowStore,
 import { Server } from "node:http";
 import {
   authRateLimiter,
@@ -18,6 +12,9 @@ import {
   squadRateLimiter,
   apiRateLimiter,
   authenticatedRateLimiter,
+  createSlidingWindowRateLimiter,
+  MemorySlidingWindowStore,
+  RedisSlidingWindowStore,
 } from "../middleware/rateLimiter.js";
 
 async function makeRequest(server: Server, path: string, headers: Record<string, string> = {}) {

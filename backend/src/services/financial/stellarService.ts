@@ -587,6 +587,7 @@ export class StellarService {
           txHash,
           error: "Transaction not found on Stellar network or ledger not yet closed.",
           retryable: true,
+          notFound: true,
         };
       }
 

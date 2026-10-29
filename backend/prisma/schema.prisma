@@ -104,6 +104,11 @@ enum TransactionStatus {
 enum SorobanSubmissionStatus {
   PENDING_VERIFICATION
   SUBMITTED
+  SUCCESS
+  FAILED
+  DROPPED
+}
+
 /// Lifecycle of a payout isolated in the dead-letter queue.
 /// PENDING: awaiting automatic (recoverable only) or manual retry.
 /// RETRYING: claimed by a retry attempt; guards against concurrent double payouts.
@@ -182,6 +187,9 @@ model User {
   webAuthnCredentials  WebAuthnCredential[]
   accountSignals       AccountSignal[]
   refreshTokens        RefreshToken[]
+  collusionFlagsAsA    LeagueCollusionFlag[] @relation("FlagAccountA")
+  collusionFlagsAsB    LeagueCollusionFlag[] @relation("FlagAccountB")
+  suspensionAppeals    SuspensionAppeal[]
 
   @@map("users")
 }
@@ -380,6 +388,8 @@ model Squad {
   memberships    LeagueMember[]
   chipUsages     SquadChipUsage[]
   chipCancellations SquadChipCancellation[]
+  collusionFlagsAsA LeagueCollusionFlag[] @relation("FlagSquadA")
+  collusionFlagsAsB LeagueCollusionFlag[] @relation("FlagSquadB")
 
   @@map("squads")
 }
@@ -440,7 +450,15 @@ model League {
   transactions  Transaction[]
   fixtures      LeagueFixture[]
   gameweekScores LeagueGameweekScore[]
+  invitations   LeagueInvitation[]
+  chatMessages  LeagueChatMessage[]
+  seasons       LeagueSeason[]
+  depositExceptions DepositException[]
+  collusionFlags LeagueCollusionFlag[]
 
+  @@index([status, isPrivate])
+  @@index([entryFee])
+  @@index([maxMembers])
   @@map("leagues")
 }
 
@@ -461,15 +479,6 @@ model LeagueGameweekScore {
   @@unique([leagueId, squadId, gameweekId])
   @@index([leagueId, gameweekId])
   @@map("league_gameweek_scores")
-  invitations   LeagueInvitation[]
-  chatMessages  LeagueChatMessage[]
-  seasons       LeagueSeason[]
-  depositExceptions DepositException[]
-
-  @@index([status, isPrivate])
-  @@index([entryFee])
-  @@index([maxMembers])
-  @@map("leagues")
 }
 
 /// A ladder of leagues for a single season. Groups leagues into competitive tiers
@@ -750,6 +759,13 @@ model LeagueFixture {
   /// the next round's pairings (slot i plays slot i+1, in pairs) without
   /// depending on row fetch order. Null outside the playoffs.
   playoffSlot  Int?    @map("playoff_slot")
+  /// True for a knockout cup fixture (TournamentBracketService). Cup fixtures
+  /// reuse playoffRound/playoffSlot and never count towards the H2H table.
+  isCup          Boolean @default(false) @map("is_cup")
+  /// Knockout winner, including when decided by a tie-break or a bye.
+  winnerMemberId String? @map("winner_member_id")
+  /// How a knockout match was decided: score, goals_scored, goals_conceded, coin_toss or bye.
+  tiebreakReason String? @map("tiebreak_reason")
 
   // Relations
   league     League        @relation(fields: [leagueId], references: [id], onDelete: Cascade)
@@ -757,7 +773,8 @@ model LeagueFixture {
   homeMember LeagueMember  @relation("HomeLeagueFixtures", fields: [homeMemberId], references: [id], onDelete: Cascade)
   awayMember LeagueMember? @relation("AwayLeagueFixtures", fields: [awayMemberId], references: [id], onDelete: Cascade)
 
-  @@unique([leagueId, gameweekId, homeMemberId])
+  @@unique([leagueId, gameweekId, homeMemberId, isCup])
+  @@index([leagueId, isCup, playoffRound])
   @@map("league_fixtures")
 }
 
@@ -890,6 +907,31 @@ model ContractEvent {
   @@index([txHash, createdAt])
   @@index([ledgerSeq])
   @@map("contract_events")
+}
+
+/// Decoded Soroban escrow contract events, ingested continuously from RPC getEvents.
+/// The ID is the RPC event ID (ledger, tx, operation and event index), so replays are no-ops.
+model SorobanContractEvent {
+  id                       String   @id
+  contractId               String   @map("contract_id")
+  eventName                String   @map("event_name")
+  /// LeagueDeposit, Settlement, Refund, FeeWithdrawal, Affiliate, Governance or Other
+  category                 String
+  /// Contract league ID (decimal string) for league-scoped events
+  leagueId                 String?  @map("league_id")
+  ledgerSeq                Int      @map("ledger_seq")
+  ledgerClosedAt           DateTime @map("ledger_closed_at")
+  txHash                   String   @map("tx_hash")
+  inSuccessfulContractCall Boolean  @default(true) @map("in_successful_contract_call")
+  topics                   Json
+  payload                  Json
+  createdAt                DateTime @default(now()) @map("created_at")
+
+  @@index([ledgerSeq])
+  @@index([category, ledgerSeq])
+  @@index([leagueId, ledgerSeq])
+  @@index([txHash])
+  @@map("soroban_contract_events")
 }
 
 /// Tamper-evident snapshot of a database-to-chain financial reconciliation.

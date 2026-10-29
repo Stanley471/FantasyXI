@@ -21,7 +21,11 @@ import {
 } from "../controllers/financial.controller.js";
 import { requireAuth, requirePermission, requireRole } from "../middleware/authMiddleware.js";
 import { Permission, UserRole } from "../types/index.js";
-import { financialRateLimiter, mutationRateLimiter } from "../middleware/rateLimiter.js";
+import {
+  financialRateLimiter,
+  mutationRateLimiter,
+  walletVerificationRateLimiter,
+} from "../middleware/rateLimiter.js";
 import { idempotency } from "../middleware/idempotency.js";
 import { requireDepositRangeProof } from "../middleware/depositRangeProof.js";
 import { getMyDepositExceptions, getDepositRefundChallenge, submitDepositRefundClaim } from "../controllers/depositRefund.controller.js";
@@ -43,14 +47,14 @@ router.post(
   requirePermission(Permission.PAYMENT_MANAGE_OWN),
   simulateDeposit
 );
-router.post("/submit", depositRangeProof, submitPayment);
-router.post("/verify", verifyPayment);
+router.post("/submit", walletVerificationRateLimiter, depositRangeProof, submitPayment);
+router.post("/verify", walletVerificationRateLimiter, verifyPayment);
 router.get("/settlement-plan", getSettlementPlan);
 router.post("/settle", requireRole(UserRole.ADMIN), executeSettlement);
 router.get("/affiliate-dashboard", getAffiliateDashboard);
 router.get("/requirement", requirePermission(Permission.PAYMENT_MANAGE_OWN), getPaymentRequirement);
-router.post("/submit", mutationRateLimiter, requirePermission(Permission.PAYMENT_MANAGE_OWN), depositRangeProof, submitPayment);
-router.post("/verify", mutationRateLimiter, requirePermission(Permission.PAYMENT_MANAGE_OWN), verifyPayment);
+router.post("/submit", mutationRateLimiter, walletVerificationRateLimiter, requirePermission(Permission.PAYMENT_MANAGE_OWN), depositRangeProof, submitPayment);
+router.post("/verify", mutationRateLimiter, walletVerificationRateLimiter, requirePermission(Permission.PAYMENT_MANAGE_OWN), verifyPayment);
 router.get("/settlement-plan", requirePermission(Permission.SETTLEMENT_READ), getSettlementPlan);
 router.get("/affiliate-dashboard", requirePermission(Permission.AFFILIATE_READ_OWN), getAffiliateDashboard);
 // Self-service recovery: checks the escrow contract directly for the caller's own

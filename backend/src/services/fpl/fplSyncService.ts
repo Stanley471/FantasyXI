@@ -619,31 +619,6 @@ export class FplSyncService {
         continue;
       }
 
-      const stats = normalizePlayerStats(rawElement);
-      const payload = {
-        minutes: stats.minutes,
-        goals: stats.goals,
-        assists: stats.assists,
-        cleanSheet: stats.cleanSheet,
-        yellowCards: stats.yellowCards,
-        redCards: stats.redCards,
-        saves: stats.saves,
-        goalsConceded: stats.goalsConceded,
-        ownGoals: stats.ownGoals,
-        penaltiesSaved: stats.penaltiesSaved,
-        penaltiesMissed: stats.penaltiesMissed,
-        bonus: stats.bonus,
-        totalPoints: stats.totalPoints,
-      };
-
-      const incomingHash = generateHash(payload);
-      const existingHash = existingStatsHashes.get(localPlayerId);
-
-      if (incomingHash !== existingHash) {
-        statsOps.push(
-          prisma.playerGameweekStats.upsert({
-            where: {
-              playerId_gameweekId: {
       const statsArray = normalizePlayerStats(rawElement);
 
       for (const stats of statsArray) {
@@ -658,6 +633,10 @@ export class FplSyncService {
           yellowCards: stats.yellowCards,
           redCards: stats.redCards,
           saves: stats.saves,
+          goalsConceded: stats.goalsConceded,
+          ownGoals: stats.ownGoals,
+          penaltiesSaved: stats.penaltiesSaved,
+          penaltiesMissed: stats.penaltiesMissed,
           bps: stats.bps,
           bonus: stats.bonus,
           totalPoints: stats.totalPoints,

@@ -518,8 +518,6 @@ export class LeagueService {
         throw new LeagueValidationError(error instanceof Error ? error.message : "Invalid custom prize splits");
       }
     }
-      }
-    }
 
     const maxMembers = input.maxMembers ?? 20;
     const minMembers = input.minMembers ?? 2;
@@ -1068,46 +1066,31 @@ export class LeagueService {
     const scoringConfig = league.scoringConfig
       ? parseLeagueScoringConfig(league.scoringConfig)
       : null;
-    const gameweekScores = scoringConfig
-      ? await prisma.leagueGameweekScore.findMany({
-          where: {
-            leagueId,
-            squadId: { in: squadIds },
-            gameweekId: {
-              gte: league.startGameweekId,
-              lte: league.endGameweekId,
-            },
-          },
-          include: {
-            gameweek: { select: { id: true, name: true } },
-          },
-        })
-      : await prisma.squadGameweekScore.findMany({
-          where: {
-            squadId: { in: squadIds },
-            gameweekId: {
-              gte: league.startGameweekId,
-              lte: league.endGameweekId,
-            },
-          },
-          include: {
-            gameweek: { select: { id: true, name: true } },
-          },
-        });
     // Only completed league weeks are shown in the time machine. The default
-    // response keeps the existing full-window standings behavior.
-    const gameweekScores = await this.db.squadGameweekScore.findMany({
-      where: {
-        squadId: { in: squadIds },
-        gameweekId: {
-          gte: league.startGameweekId,
-          lte: gameweekId ?? league.endGameweekId,
-        },
+    // response keeps the existing full-window standings behavior. Leagues with
+    // custom scoring read their isolated per-league scores.
+    const scoreWindow = {
+      squadId: { in: squadIds },
+      gameweekId: {
+        gte: league.startGameweekId,
+        lte: gameweekId ?? league.endGameweekId,
       },
-      include: {
-        gameweek: { select: { id: true, name: true } },
-      },
-    });
+    };
+    const scoreInclude = { gameweek: { select: { id: true, name: true } } };
+    const gameweekScores: Array<{
+      squadId: string;
+      gameweekId: number;
+      points: number;
+      gameweek: { id: number; name: string };
+    }> = scoringConfig
+      ? await this.db.leagueGameweekScore.findMany({
+          where: { leagueId, ...scoreWindow },
+          include: scoreInclude,
+        })
+      : await this.db.squadGameweekScore.findMany({
+          where: scoreWindow,
+          include: scoreInclude,
+        });
 
     // Group scores by squadId
     const scoresBySquad = new Map<
@@ -1560,8 +1543,9 @@ export class LeagueService {
     gameweekId: number,
     useLeagueScoring = false
   ) {
+    // Cup fixtures are settled by TournamentBracketService and stay out of the table.
     const fixtures = await this.db.leagueFixture.findMany({
-      where: { leagueId, gameweekId, isFinished: false },
+      where: { leagueId, gameweekId, isFinished: false, isCup: false },
     });
     if (fixtures.length === 0) {
       return { settled: 0 };
@@ -1802,7 +1786,7 @@ export class LeagueService {
 
     await this.db.$transaction(async (tx: any) => {
       await tx.leagueFixture.deleteMany({
-        where: { leagueId, gameweekId, isFinished: false },
+        where: { leagueId, gameweekId, isFinished: false, isCup: false },
       });
       await tx.leagueFixture.createMany({
         data: pairings.map((p, slot) => ({
@@ -1877,7 +1861,7 @@ export class LeagueService {
 
     await this.db.$transaction(async (tx: any) => {
       await tx.leagueFixture.deleteMany({
-        where: { leagueId, gameweekId, isFinished: false },
+        where: { leagueId, gameweekId, isFinished: false, isCup: false },
       });
       await tx.leagueFixture.createMany({
         data: pairings.map((p, slot) => ({

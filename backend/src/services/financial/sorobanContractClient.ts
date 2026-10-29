@@ -121,7 +121,7 @@ export class SorobanContractClient {
   private usdcContractId: string;
   private pollIntervalMs: number;
   private maxPollAttempts: number;
-  private replayQueue: SorobanTransactionReplayQueue;
+  private replayQueue?: SorobanTransactionReplayQueue;
   private signer: StellarTransactionSigner;
   private feeBumpFeeSource?: string;
   private feeOracle: SorobanFeeOracle;
@@ -159,16 +159,19 @@ export class SorobanContractClient {
       "";
     this.pollIntervalMs = options?.pollIntervalMs ?? 1000;
     this.maxPollAttempts = options?.maxPollAttempts ?? 5;
+    this.maxPollAttempts = options?.maxPollAttempts ?? 30;
+    // Durable replay is opt-in: callers pass a queue or a store to enable it.
     this.replayQueue =
       options?.replayQueue ??
-      new SorobanTransactionReplayQueue({
-        server: this.server,
-        store: options?.replayStore,
-        networkPassphrase: this.networkPassphrase,
-        pollIntervalMs: this.pollIntervalMs,
-        maxPollAttempts: this.maxPollAttempts,
-      });
-    this.maxPollAttempts = options?.maxPollAttempts ?? 30;
+      (options?.replayStore
+        ? new SorobanTransactionReplayQueue({
+            server: this.server,
+            store: options.replayStore,
+            networkPassphrase: this.networkPassphrase,
+            pollIntervalMs: this.pollIntervalMs,
+            maxPollAttempts: this.maxPollAttempts,
+          })
+        : undefined);
     this.signer = options?.signer || SorobanContractClient.configuredSigner || new LocalSecretTransactionSigner();
     this.feeBumpFeeSource = options?.feeBumpFeeSource || process.env.STELLAR_FEE_BUMP_SOURCE;
     this.feeOracle = options?.feeOracle || new SorobanFeeOracle(this.server);
@@ -229,8 +232,11 @@ export class SorobanContractClient {
   /**
    * Submits a signed transaction and polls until it is final.
    */
-  private async sendAndPoll(tx: Transaction): Promise<InvocationResult> {
-    const result = await this.replayQueue.submit(tx);
+  private async sendViaReplayQueue(
+    queue: SorobanTransactionReplayQueue,
+    tx: Transaction
+  ): Promise<InvocationResult> {
+    const result = await queue.submit(tx);
     return {
       success: result.success,
       txHash: result.txHash,
@@ -244,7 +250,13 @@ export class SorobanContractClient {
       pendingVerification: result.pendingVerification,
       dropped: result.dropped,
     };
+  }
+
   private async sendAndPoll(tx: StellarTransaction, beforeSubmit?: (hash: string, envelope: string) => Promise<void>): Promise<InvocationResult> {
+    if (this.replayQueue && !this.feeBumpFeeSource && tx instanceof Transaction) {
+      await beforeSubmit?.(Buffer.from(tx.hash()).toString("hex"), tx.toXDR());
+      return this.sendViaReplayQueue(this.replayQueue, tx);
+    }
     let submitted: StellarTransaction = tx;
     if (this.feeBumpFeeSource && tx instanceof Transaction) {
       const feeBump = TransactionBuilder.buildFeeBumpTransaction(
@@ -968,6 +980,8 @@ export class SorobanContractClient {
       throw new Error("Soroban returned no token balance value");
     }
     return BigInt((result.returnValue as bigint) ?? 0);
+  }
+
   /**
    * Settle a league with a Merkle root commitment for scaling to large participant counts.
    */

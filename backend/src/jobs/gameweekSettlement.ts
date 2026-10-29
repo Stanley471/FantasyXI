@@ -1,18 +1,10 @@
 import { prisma } from "../config/db.js";
-import {
-  ChipType,
-  LeagueStatus,
-  MembershipStatus,
-  ScoringType,
-} from "../types/index.js";
-import { fplSyncService } from "../services/fpl/fplSyncService.js";
-import { scoringService } from "../services/scoring/scoringService.js";
-import { squadService } from "../services/squad/squadService.js";
-import { leagueService } from "../services/league/leagueService.js";
-import { parseLeagueScoringConfig } from "../models/leagueScoringConfig.js";
 import { LeagueStatus, MembershipStatus, ScoringType } from "../types/index.js";
 import { fplSyncService } from "../services/fpl/fplSyncService.js";
+import { scoringService } from "../services/scoring/scoringService.js";
+import { parseLeagueScoringConfig } from "../models/leagueScoringConfig.js";
 import { leagueService, LeagueService } from "../services/league/leagueService.js";
+import { tournamentBracketService } from "../services/league/tournamentService.js";
 import { eventBus, publishOrThrow } from "../services/events/eventBus.js";
 import { GAMEWEEK_UPDATED_EVENT } from "../services/events/domainEvents.js";
 import { gameweekOracleService } from "../services/financial/gameweekOracleService.js";
@@ -90,11 +82,6 @@ export async function settleGameweek(gameweekId: number): Promise<void> {
 
   await fplSyncService.syncGameweekLiveStats(gameweek.fplId);
 
-  const squads = await prisma.squad.findMany({ select: { id: true } });
-  for (const squad of squads) {
-    await scoringService.calculateAndPersistSquadScore(squad.id, gameweekId);
-  }
-
   const leagues = await prisma.league.findMany({
     where: {
       status: LeagueStatus.ACTIVE,
@@ -102,19 +89,20 @@ export async function settleGameweek(gameweekId: number): Promise<void> {
       endGameweekId: { gte: gameweekId },
     },
   });
+
+  // Leagues with custom scoring rules keep their own per-league scores,
+  // isolated from the global squad scores the event subscribers compute.
   for (const league of leagues) {
     const scoringConfig = league.scoringConfig
       ? parseLeagueScoringConfig(league.scoringConfig)
       : null;
-    if (!scoringConfig) {
-      continue;
-    }
+    if (!scoringConfig) continue;
     const members = await prisma.leagueMember.findMany({
       where: { leagueId: league.id, status: MembershipStatus.ACTIVE },
       select: { squadId: true },
     });
     await Promise.all(
-      members.map((member) =>
+      members.map((member: { squadId: string }) =>
         scoringService.calculateAndPersistLeagueScore(
           league.id,
           member.squadId,
@@ -125,33 +113,13 @@ export async function settleGameweek(gameweekId: number): Promise<void> {
     );
   }
 
-  const freeHits = await prisma.squadChipUsage.findMany({
-    where: { gameweekId, chipType: ChipType.FREE_HIT, revertedAt: null },
-    select: { squadId: true },
-  });
-  for (const usage of freeHits) {
-    await squadService.revertFreeHit(usage.squadId, gameweekId);
-  }
-
   await publishOrThrow(eventBus, GAMEWEEK_UPDATED_EVENT, {
     gameweekId,
     gameweekFplId: gameweek.fplId,
   });
-  const leagues = await prisma.league.findMany({
-    where: {
-      status: LeagueStatus.ACTIVE,
-      startGameweekId: { lte: gameweekId },
-      endGameweekId: { gte: gameweekId },
-    },
-  });
+
   for (const league of leagues) {
-    const hasCustomScoring = league.scoringConfig !== null;
     if (league.scoringType === ScoringType.HEAD_TO_HEAD) {
-      await leagueService.settleH2HGameweek(
-        league.id,
-        gameweekId,
-        hasCustomScoring
-      );
       const activeMemberCount = await prisma.leagueMember.count({
         where: { leagueId: league.id, status: MembershipStatus.ACTIVE },
       });
@@ -169,7 +137,11 @@ export async function settleGameweek(gameweekId: number): Promise<void> {
         }
       }
 
-      await leagueService.settleH2HGameweek(league.id, gameweekId);
+      await leagueService.settleH2HGameweek(
+        league.id,
+        gameweekId,
+        league.scoringConfig !== null
+      );
 
       if (playoffAction.type === "advance") {
         try {
@@ -179,6 +151,12 @@ export async function settleGameweek(gameweekId: number): Promise<void> {
         }
       }
     }
+    // Knockout cup rounds: settle, apply FPL tie-breaks and advance winners.
+    await tournamentBracketService.settleKnockoutGameweek(
+      league.id,
+      gameweekId,
+      league.scoringConfig !== null
+    );
     if (league.endGameweekId === gameweekId) {
       await leagueService.transitionStatus(league.id, LeagueStatus.COMPLETED);
     }

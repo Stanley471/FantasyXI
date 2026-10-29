@@ -1,6 +1,10 @@
 import { Request, Response, NextFunction } from "express";
 import { prisma } from "../config/db.js";
 import { Position } from "../types/index.js";
+import {
+  playerAnalyticsEngine,
+  PlayerNotFoundError,
+} from "../services/analytics/playerAnalyticsEngine.js";
 
 /**
  * Player Controller.
@@ -320,3 +324,36 @@ export async function getPlayerOwnershipStats(
   }
 }
 
+
+/**
+ * GET /api/v1/players/:id/analytics?horizon=5
+ * Expected points (xP) and fixture difficulty (FDR 1-5) for upcoming gameweeks.
+ */
+export async function getPlayerAnalytics(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const id = parseInt(req.params.id as string, 10);
+    if (isNaN(id)) {
+      res.status(400).json({ success: false, message: "Invalid player ID" });
+      return;
+    }
+    const horizonParam = req.query.horizon;
+    const horizon = horizonParam === undefined ? 5 : parseInt(String(horizonParam), 10);
+    if (isNaN(horizon) || horizon < 1 || horizon > 10) {
+      res.status(400).json({ success: false, message: "horizon must be between 1 and 10" });
+      return;
+    }
+
+    const analytics = await playerAnalyticsEngine.getPlayerAnalytics(id, horizon);
+    res.status(200).json({ success: true, data: analytics });
+  } catch (error) {
+    if (error instanceof PlayerNotFoundError) {
+      res.status(404).json({ success: false, message: error.message });
+      return;
+    }
+    next(error);
+  }
+}
