@@ -11,6 +11,8 @@ import { runProofOfReserveJob } from "../jobs/proofOfReserve.js";
 import { applyRetroactiveBpsAdjustments } from "../jobs/retroactiveBpsAdjustments.js";
 import { jwtKeyRotationService } from "../services/auth/jwtKeyRotationService.js";
 import { auditLeaguesForCollusion } from "../jobs/leagueIntegrityAudit.js";
+import { financialMerkleService } from "../services/audit/financialMerkleService.js";
+import { privacyService } from "../services/privacy/privacyService.js";
 import {
   executeFplSyncTask,
   FPL_SYNC_DLQ_NAME,
@@ -51,6 +53,10 @@ export interface QueueMetrics {
 // delegated to the `fpl-sync` queue (with retry + DLQ) instead of running
 // inline inside the poller.
 export const JOB_DEFINITIONS: JobDefinition[] = [
+  { name: "financial-merkle-publish", cron: "0 * * * *", handler: () => financialMerkleService.publishClosedHours() },
+  { name: "financial-merkle-verify", cron: "* * * * *", handler: () => financialMerkleService.verify().then(rows => ({ verified: rows.length })) },
+  { name: "privacy-requests", cron: "* * * * *", handler: () => privacyService.runNext() },
+  { name: "privacy-expiry", cron: "*/15 * * * *", handler: () => privacyService.cleanup() },
   { name: "settlement-recovery", cron: "* * * * *", handler: () => financialService.recoverPendingSettlements() },
   { name: "matchday-poll", cron: "* * * * *", handler: () => enqueuePendingSyncs() },
   { name: "deadline-lock", cron: "* * * * *", handler: () => lockDueGameweeks() },

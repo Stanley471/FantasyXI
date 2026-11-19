@@ -8,6 +8,7 @@ import {
   RegisterInput,
   LoginInput,
   LoginChallengeInput,
+  LoginChallenge,
   LoginResult,
   PasskeyLoginChallenge,
   SafeUser,
@@ -32,6 +33,7 @@ import { webAuthnService as defaultWebAuthnService, WebAuthnService } from "./we
 
 /** Request-derived context used for anomalous-login detection (issues #117, #331). */
 export interface AuthRequestContext {
+  asn?: string | null;
   ip: string;
   userAgent?: string | null;
   /** IP-derived location from trusted edge headers, when configured */
@@ -369,6 +371,7 @@ export class AuthService {
         userAgent: context.userAgent,
         deviceFingerprint: typeof input.deviceFingerprint === "string" ? input.deviceFingerprint : null,
         location: context.location,
+        asn: context.asn,
       });
       if (assessment.decision === "BLOCK") {
         throw new AuthLoginBlockedError();
@@ -385,8 +388,8 @@ export class AuthService {
     }
 
     const session = await sessionRegistryService.createSession(user.id, {
-      ip: "127.0.0.1",
-      userAgent: null,
+      ip: context?.ip ?? "127.0.0.1",
+      userAgent: context?.userAgent ?? null,
     });
     return this.issueAuthResult(user, session.id);
   }
@@ -405,6 +408,7 @@ export class AuthService {
       throw new AuthNotFoundError("User not found");
     }
     this.signals.record(user.id, context);
+    await this.security.acceptVerifiedLogin({ ...context, userId:user.id,email:user.email,username:user.username });
     return this.issueAuthResult(user);
   }
 
@@ -458,7 +462,9 @@ export class AuthService {
    * 4. If neither matches -> creates new user with passwordHash = null.
    * 5. Always issues FantasyXI JWT access token.
    */
-  public async handleGoogleAuth(input: GoogleIdentityInput): Promise<AuthResult> {
+  public handleGoogleAuth(input: GoogleIdentityInput): Promise<AuthResult>;
+  public handleGoogleAuth(input: GoogleIdentityInput, context: AuthRequestContext): Promise<AuthResult | LoginChallenge>;
+  public async handleGoogleAuth(input: GoogleIdentityInput, context?: AuthRequestContext): Promise<AuthResult | LoginChallenge> {
     if (!input.googleId) {
       throw new AuthValidationError("Google ID is required");
     }
@@ -475,6 +481,7 @@ export class AuthService {
     });
 
     if (user) {
+      if (context) return this.finishGoogleLogin(user, context);
       return { user: toSafeUser(user), token: signAccessToken({ userId: user.id, email: user.email, username: user.username, role: user.role ?? UserRole.USER }) };
     }
 
@@ -541,6 +548,7 @@ export class AuthService {
       }
     }
 
+    if (context) return this.finishGoogleLogin(user, context);
     const session = await sessionRegistryService.createSession(user.id, {
       ip: "127.0.0.1",
       userAgent: null,
@@ -558,6 +566,17 @@ export class AuthService {
       user: safeUser,
       token,
     };
+  }
+
+  private async finishGoogleLogin(user: any, context: AuthRequestContext): Promise<AuthResult | LoginChallenge> {
+    const assessment = await this.security.assessLogin({ ...context, userId:user.id, email:user.email, username:user.username });
+    if (assessment.decision === "BLOCK") throw new AuthLoginBlockedError();
+    if (assessment.decision === "CHALLENGE") return {
+      challengeRequired:true, method:"EMAIL_OTP", challengeId:assessment.challengeId, expiresAt:assessment.expiresAt.toISOString(),
+    };
+    this.signals.record(user.id, context);
+    const session = await sessionRegistryService.createSession(user.id, context);
+    return this.issueAuthResult(user,session.id);
   }
 
   /**

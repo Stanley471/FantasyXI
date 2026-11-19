@@ -22,14 +22,22 @@ import {
   previewLeagueInvitation,
   acceptLeagueInvitation,
 } from "../controllers/league.controller.js";
-import { requireAuth, requirePermission, optionalAuth, requireRole } from "../middleware/authMiddleware.js";
+import { requireAuth, requirePermission, optionalAuth, requireCurrentRole } from "../middleware/authMiddleware.js";
 import { Permission, UserRole } from "../types/index.js";
-import { authenticatedRateLimiter, mutationRateLimiter } from "../middleware/rateLimiter.js";
+import { authenticatedRateLimiter, mutationRateLimiter, authorizationRateLimiter } from "../middleware/rateLimiter.js";
 import { primaryReads } from "../middleware/readConsistency.js";
 import { getChatMessages, postChatMessage } from "../controllers/chat.controller.js";
 import { requireDepositRangeProof } from "../middleware/depositRangeProof.js";
 
+import { prisma } from "../config/db.js";
+import type { RequestHandler } from "express";
+const requireLeagueOwner: RequestHandler = async (req,res,next) => {
+  const league = await prisma.league.findUnique({ where: { id: req.params.leagueId as string }, select: { creatorId: true } });
+  if (!league || league.creatorId !== req.user?.id) { res.status(403).json({ success:false, message:"Access denied." }); return; }
+  next();
+};
 const router = Router();
+router.use(authorizationRateLimiter);
 
 // POST /api/v1/leagues (Protected: creator identity derived from token)
 router.post("/", requireAuth, authenticatedRateLimiter, mutationRateLimiter, requirePermission(Permission.LEAGUE_CREATE), createLeague);
@@ -93,8 +101,8 @@ router.delete(
 // League chat (Protected: creator and members only). History is read from the
 // primary so a message is never missing right after it was posted.
 // Real-time delivery: WebSocket at /api/v1/leagues/:leagueId/chat/ws (see realtime/chatSocketServer.ts)
-router.get("/:leagueId/chat/messages", primaryReads, requireAuth, getChatMessages);
-router.post("/:leagueId/chat/messages", requireAuth, postChatMessage);
+router.get("/:leagueId/chat/messages", primaryReads, requireAuth, requirePermission(Permission.LEAGUE_JOIN), getChatMessages);
+router.post("/:leagueId/chat/messages", requireAuth, requirePermission(Permission.LEAGUE_JOIN), postChatMessage);
 
 // ============================================================
 // Financial & Stellar Escrow Routes
@@ -120,17 +128,12 @@ const depositRangeProof = requireDepositRangeProof();
 router.use("/:leagueId/financial", primaryReads, financialRoutes);
 
 // Direct convenience endpoints under /:leagueId
-router.get("/:leagueId/payment-requirement", primaryReads, requireAuth, getPaymentRequirement);
-router.post("/:leagueId/submit-payment", requireAuth, depositRangeProof, submitPayment);
-router.post("/:leagueId/verify-payment", requireAuth, verifyPayment);
-router.get("/:leagueId/settlement-plan", requireAuth, getSettlementPlan);
 router.post(
   "/:leagueId/settle",
   requireAuth,
-  requireRole(UserRole.ADMIN),
+  requireCurrentRole(UserRole.ADMIN),
   executeSettlement
 );
-router.get("/:leagueId/settlement-plan", primaryReads, requireAuth, getSettlementPlan);
 router.get(
   "/:leagueId/payment-requirement",
   primaryReads,
@@ -169,10 +172,10 @@ router.get(
 );
 
 // Swiss-system tournament routes (Issue #341)
-router.post("/:leagueId/swiss/init", requireAuth, initSwissTournament);
+router.post("/:leagueId/swiss/init", requireAuth, requirePermission(Permission.LEAGUE_MANAGE_OWN), requireLeagueOwner, initSwissTournament);
 router.get("/:leagueId/swiss/standings", primaryReads, getSwissStandings);
 router.get("/:leagueId/swiss/current-round", primaryReads, getSwissCurrentRound);
-router.post("/:leagueId/swiss/rounds/advance", requireAuth, advanceSwissRound);
-router.post("/:leagueId/swiss/rounds/:round/resolve", requireAuth, resolveSwissRound);
+router.post("/:leagueId/swiss/rounds/advance", requireAuth, requirePermission(Permission.LEAGUE_MANAGE_OWN), requireLeagueOwner, advanceSwissRound);
+router.post("/:leagueId/swiss/rounds/:round/resolve", requireAuth, requirePermission(Permission.LEAGUE_MANAGE_OWN), requireLeagueOwner, resolveSwissRound);
 
 export default router;

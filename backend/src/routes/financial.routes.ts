@@ -19,7 +19,7 @@ import {
   rejectDisputeHandler,
   executeMerkleSettlementHandler,
 } from "../controllers/financial.controller.js";
-import { requireAuth, requirePermission, requireRole } from "../middleware/authMiddleware.js";
+import { requireAuth, requirePermission, requireCurrentRole } from "../middleware/authMiddleware.js";
 import { Permission, UserRole } from "../types/index.js";
 import {
   financialRateLimiter,
@@ -40,18 +40,13 @@ router.use(financialRateLimiter);
 // Mutations honour the Idempotency-Key header (GET requests pass through)
 router.use(idempotency);
 
-router.get("/requirement", getPaymentRequirement);
 router.post(
   "/simulate-deposit",
   mutationRateLimiter,
   requirePermission(Permission.PAYMENT_MANAGE_OWN),
   simulateDeposit
 );
-router.post("/submit", walletVerificationRateLimiter, depositRangeProof, submitPayment);
-router.post("/verify", walletVerificationRateLimiter, verifyPayment);
-router.get("/settlement-plan", getSettlementPlan);
-router.post("/settle", requireRole(UserRole.ADMIN), executeSettlement);
-router.get("/affiliate-dashboard", getAffiliateDashboard);
+router.post("/settle", requireCurrentRole(UserRole.ADMIN), executeSettlement);
 router.get("/requirement", requirePermission(Permission.PAYMENT_MANAGE_OWN), getPaymentRequirement);
 router.post("/submit", mutationRateLimiter, walletVerificationRateLimiter, requirePermission(Permission.PAYMENT_MANAGE_OWN), depositRangeProof, submitPayment);
 router.post("/verify", mutationRateLimiter, walletVerificationRateLimiter, requirePermission(Permission.PAYMENT_MANAGE_OWN), verifyPayment);
@@ -69,17 +64,17 @@ router.post("/refund-claim", mutationRateLimiter, requirePermission(Permission.P
 router.get("/reconcile", requirePermission(Permission.FINANCIAL_RECONCILE), reconcileLeague);
 
 // Soroban contract storage rent & archival recovery (Issue #337)
-router.get("/storage-rent/status", requireRole(UserRole.ADMIN), getStorageRentStatus);
-router.post("/storage-rent/recover", mutationRateLimiter, requireRole(UserRole.ADMIN), triggerStorageRentRecovery);
+router.get("/storage-rent/status", requireCurrentRole(UserRole.ADMIN), getStorageRentStatus);
+router.post("/storage-rent/recover", mutationRateLimiter, requireCurrentRole(UserRole.ADMIN), triggerStorageRentRecovery);
 // Merkle tree settlement
-router.post("/merkle-settle", requireRole(UserRole.ADMIN), executeMerkleSettlementHandler);
+router.post("/merkle-settle", requireCurrentRole(UserRole.ADMIN), executeMerkleSettlementHandler);
 
 // Payment dispute workflows & automated escrow freezes
-router.post("/disputes", mutationRateLimiter, fileDisputeHandler);
-router.get("/disputes", getLeagueDisputesHandler);
-router.post("/disputes/:disputeId/evidence", mutationRateLimiter, addEvidenceHandler);
-router.post("/disputes/:disputeId/resolve-payout", requireRole(UserRole.ADMIN), resolveDisputePayoutHandler);
-router.post("/disputes/:disputeId/resolve-refund", requireRole(UserRole.ADMIN), resolveDisputeRefundHandler);
-router.post("/disputes/:disputeId/reject", requireRole(UserRole.ADMIN), rejectDisputeHandler);
+router.post("/disputes", mutationRateLimiter, requirePermission(Permission.PAYMENT_MANAGE_OWN), fileDisputeHandler);
+router.get("/disputes", requirePermission(Permission.PAYMENT_MANAGE_OWN), getLeagueDisputesHandler);
+router.post("/disputes/:disputeId/evidence", mutationRateLimiter, requirePermission(Permission.PAYMENT_MANAGE_OWN), addEvidenceHandler);
+router.post("/disputes/:disputeId/resolve-payout", requireCurrentRole(UserRole.ADMIN), resolveDisputePayoutHandler);
+router.post("/disputes/:disputeId/resolve-refund", requireCurrentRole(UserRole.ADMIN), resolveDisputeRefundHandler);
+router.post("/disputes/:disputeId/reject", requireCurrentRole(UserRole.ADMIN), rejectDisputeHandler);
 
 export default router;

@@ -1,4 +1,5 @@
 import { Router } from "express";
+import rateLimit from "express-rate-limit";
 import {
   register,
   login,
@@ -27,12 +28,19 @@ import {
 } from "../controllers/auth.controller.js";
 import { requireAuth, requirePermission } from "../middleware/authMiddleware.js";
 import { Permission } from "../types/index.js";
+import { readOwnSecurityActivity } from "../services/security/loginActivityStore.js";
 import {
   authRateLimiter,
+  authorizationRateLimiter,
   authenticatedRateLimiter,
 } from "../middleware/rateLimiter.js";
 
 const router = Router();
+router.use(authorizationRateLimiter);
+const securityActivityRateLimiter = rateLimit({windowMs:60_000,max:60,standardHeaders:true,legacyHeaders:false});
+router.get("/security-activity", securityActivityRateLimiter, requireAuth, authenticatedRateLimiter, requirePermission(Permission.PROFILE_READ), async (req, res) => {
+  res.json({ success: true, data: await readOwnSecurityActivity(req.user!.id) });
+});
 
 // POST /api/v1/auth/register
 router.post("/register", authRateLimiter, register);
@@ -61,25 +69,25 @@ router.get(
 router.get("/google", authRateLimiter, initiateGoogleAuth);
 
 // GET /api/v1/auth/google/callback (Handles Google OAuth callback for sign-in and linking)
-router.get("/google/callback", handleGoogleCallback);
+router.get("/google/callback", authRateLimiter, handleGoogleCallback);
 
 // POST /api/v1/auth/google/link (Protected: returns a short-lived URL that starts linking)
-router.post("/google/link", requireAuth, createGoogleLinkTicket);
+router.post("/google/link", requireAuth, requirePermission(Permission.PROFILE_UPDATE_OWN), createGoogleLinkTicket);
 
 // GET /api/v1/auth/google/link/start?ticket=... (Redirects the signed-in user to Google)
 router.get("/google/link/start", authRateLimiter, startGoogleLink);
 
 // DELETE /api/v1/auth/google/link (Protected: unlink Google, requires a password to remain)
-router.delete("/google/link", requireAuth, unlinkGoogleAccount);
+router.delete("/google/link", requireAuth, requirePermission(Permission.PROFILE_UPDATE_OWN), unlinkGoogleAccount);
 
 // POST /api/v1/auth/password (Protected: add a password to a Google account, or change it)
-router.post("/password", authRateLimiter, requireAuth, setPassword);
+router.post("/password", authRateLimiter, requireAuth, requirePermission(Permission.PROFILE_UPDATE_OWN), setPassword);
 
 // Active session management & device fingerprinting (Issue #342)
-router.get("/sessions", requireAuth, authenticatedRateLimiter, listActiveSessions);
-router.delete("/sessions/:sessionId", requireAuth, authenticatedRateLimiter, revokeSession);
-router.post("/sessions/revoke-others", requireAuth, authenticatedRateLimiter, revokeOtherSessions);
-router.get("/sessions/events", requireAuth, streamSessionEvents);
+router.get("/sessions", requireAuth, authenticatedRateLimiter, requirePermission(Permission.PROFILE_UPDATE_OWN), listActiveSessions);
+router.delete("/sessions/:sessionId", requireAuth, authenticatedRateLimiter, requirePermission(Permission.PROFILE_UPDATE_OWN), revokeSession);
+router.post("/sessions/revoke-others", requireAuth, authenticatedRateLimiter, requirePermission(Permission.PROFILE_UPDATE_OWN), revokeOtherSessions);
+router.get("/sessions/events", requireAuth, requirePermission(Permission.PROFILE_UPDATE_OWN), streamSessionEvents);
 // ============================================================
 // WebAuthn / Passkeys (issue #273)
 // ============================================================

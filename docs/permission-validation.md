@@ -1,0 +1,11 @@
+# Permission validation and privilege canaries (#452)
+
+The server compiles the existing declarative role policy into BigInt masks. Unknown roles/permissions and empty requirements fail closed. Existing elevated REST checks continue to resolve the current database role; client claims cannot grant SERVICE privileges. Ownership checks in the existing domain services remain necessary in addition to role grants.
+
+GraphQL authenticates requests, resolves the current account role on the primary, and checks both root queries and sensitive nested wallet/squad/league fields. Direct private-league lookup requires membership, ownership or security-review permission. Public player and public league metadata remain available to authenticated callers. Field denials carry FORBIDDEN/403 and the same bounded security telemetry used for REST denials. Tokens, bodies and query strings are excluded from telemetry.
+
+Two decoy surfaces under both API aliases (`admin/maintenance-shell` and `admin/canary/:token`) never perform administrative actions. Probing them writes a 15-minute Redis lockout keyed by the hashed client IP and triggers the existing critical admin notifier. All instances consult Redis before routing. Configure REDIS_URL and the existing ADMIN_ALERT_EMAILS or ADMIN_ALERT_SLACK_WEBHOOK_URL. A missing store returns 503 at the canary; an unavailable configured store fails closed on security checks. Notification failures do not remove the lockout. Only use this behind the configured trusted reverse proxy, which must strip forwarded client-IP headers; a shared NAT IP can affect multiple clients during the short lockout.
+
+The sub-millisecond target measures the compiled in-process permission evaluation, not database role refresh or network latency. The benchmark reports measured average over 100,000 checks. The existing anomaly log is a bounded process-local buffer plus operational logs; connect deployment logs to durable security telemetry if long-term retention is needed.
+
+Tests cover unknown/forged roles, grants beyond 32 bits, multi-instance lockouts, unavailable storage, root and nested IDOR, and private league access. No live canary probes, blacklisting or administrator notifications are performed during tests.

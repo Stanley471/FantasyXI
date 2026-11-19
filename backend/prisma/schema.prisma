@@ -156,6 +156,10 @@ enum FinancialAuditAction {
 /// A registered user on the platform.
 /// Laravel equivalent: the `users` table you'd create with `php artisan make:auth`.
 model User {
+  loginSecurityActivity LoginSecurityActivity[]
+  loginTrustedLocations LoginTrustedLocation[]
+  privacyJobs PrivacyJob[]
+  privacyErasedAccount PrivacyErasedAccount?
   id           String   @id @default(uuid())
   email        String   @unique
   passwordHash String?  @map("password_hash")
@@ -1428,4 +1432,78 @@ model SuspensionAppeal {
   @@index([flagId])
   @@index([accountId, status])
   @@map("suspension_appeals")
+}
+
+model FinancialMerkleEntry {
+  sequence BigInt @id
+  auditId String @unique @map("audit_id")
+  transactionId String? @map("transaction_id")
+  payloadText String @map("payload_text")
+  previousHash String @map("previous_hash") @db.Char(64)
+  hash String @unique @db.Char(64)
+  capturedAt DateTime @default(dbgenerated("clock_timestamp()")) @map("captured_at") @db.Timestamptz(6)
+  @@index([transactionId,sequence], map:"financial_merkle_transaction")
+  @@map("financial_merkle_entries")
+}
+
+model FinancialMerkleRoot {
+  hour DateTime @id @db.Timestamptz(6)
+  firstSequence BigInt @map("first_sequence")
+  lastSequence BigInt @map("last_sequence")
+  entryCount Int @map("entry_count")
+  root String @db.Char(64)
+  receipt String
+  publishedAt DateTime @default(dbgenerated("clock_timestamp()")) @map("published_at") @db.Timestamptz(6)
+  @@map("financial_merkle_roots")
+}
+
+model LoginSecurityActivity {
+  id String @id @db.Uuid
+  userId String @map("user_id")
+  ip String
+  browser String
+  device String
+  latitude Float?
+  longitude Float?
+  asn String?
+  outcome String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+  @@index([userId,createdAt(sort:Desc)],map:"login_security_activity_owner_time")
+  @@map("login_security_activity")
+}
+
+model LoginTrustedLocation {
+  userId String @map("user_id")
+  latitude Float
+  longitude Float
+  verifiedAt DateTime @map("verified_at") @db.Timestamptz(6)
+  user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+  @@id([userId,latitude,longitude])
+  @@map("login_trusted_locations")
+}
+
+model PrivacyJob {
+  id String @id @db.Uuid
+  userId String @map("user_id")
+  kind String
+  status String @default("PENDING")
+  publicKey String? @map("public_key")
+  objectKey String? @map("object_key")
+  attempts Int @default(0)
+  errorCode String? @map("error_code")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+  expiresAt DateTime @default(dbgenerated("now() + interval '24 hours'")) @map("expires_at") @db.Timestamptz(6)
+  user User @relation(fields:[userId],references:[id])
+  @@index([userId,createdAt(sort:Desc)],map:"privacy_jobs_owner")
+  @@index([status,updatedAt],map:"privacy_jobs_pending")
+  @@map("privacy_jobs")
+}
+
+model PrivacyErasedAccount {
+  userId String @id @map("user_id")
+  erasedAt DateTime @default(now()) @map("erased_at") @db.Timestamptz(6)
+  user User @relation(fields:[userId],references:[id])
+  @@map("privacy_erased_accounts")
 }

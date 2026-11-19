@@ -7,7 +7,7 @@ import {
   AuthNotFoundError,
   AuthLoginBlockedError,
 } from "../services/auth/authService.js";
-import { locateFromHeaders } from "../services/security/geoVelocity.js";
+import { trustedLoginSignals } from "../services/security/trustedLoginSignals.js";
 import { ReferralService } from "../services/auth/referralService.js";
 import { jwtKeyRotationService } from "../services/auth/jwtKeyRotationService.js";
 import { webAuthnService, PasskeyError } from "../services/auth/webAuthnService.js";
@@ -40,9 +40,8 @@ export async function logout(req: Request, res: Response, next: NextFunction): P
 /** Client metadata that drives login security (issues #117, #331) and Sybil signals (#274). */
 function requestContext(req: Request) {
   return {
-    ip: req.ip ?? req.socket.remoteAddress ?? "unknown",
+    ...trustedLoginSignals(req),
     userAgent: req.headers["user-agent"] ?? null,
-    location: locateFromHeaders(req.headers),
   };
 }
 
@@ -557,7 +556,19 @@ export async function handleGoogleCallback(
     }
 
     // Authenticate or link user
-    const result = await authService.handleGoogleAuth(verifiedGoogleUser);
+    const result = await authService.handleGoogleAuth(verifiedGoogleUser, requestContext(req));
+
+    if ("challengeRequired" in result) {
+      if (wantsJson) {
+        res.status(202).json({success:true,message:"Secondary verification required",data:result});
+      } else {
+        // Carry challenge metadata only; no access or refresh token is issued.
+        const callback = new URL("/auth/callback",frontendUrl());
+        callback.hash = new URLSearchParams({challengeId:result.challengeId!,method:result.method,expiresAt:result.expiresAt}).toString();
+        res.redirect(callback.toString());
+      }
+      return;
+    }
 
     // If client requested JSON (e.g. testing / API clients)
     if (wantsJson) {

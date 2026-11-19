@@ -1,4 +1,5 @@
 import { UserRole } from "@prisma/client";
+import { compilePolicy } from "../services/security/permissionPolicy.js";
 
 /**
  * Role-Based Access Control (RBAC) policy.
@@ -119,8 +120,9 @@ export const ROLE_PERMISSIONS: Readonly<Record<Role, ReadonlySet<Permission>>> =
   ]),
 };
 
+export const permissionPolicy = compilePolicy(Object.values(Permission), ROLE_PERMISSIONS);
 export function hasPermission(role: Role, permission: Permission): boolean {
-  return ROLE_PERMISSIONS[role]?.has(permission) ?? false;
+  return permissionPolicy.allows(role, [permission]);
 }
 
 /**

@@ -374,6 +374,16 @@ const createRateLimitHandler = (message: string) => (_req: Request, res: Respons
   });
 };
 
+/** Bounds database-backed authorization probes before JWT/session/role checks. */
+export const authorizationRateLimiter: RateLimitRequestHandler = rateLimit({
+  windowMs: 60_000,
+  max: configuredLimit("AUTHORIZATION_RATE_LIMIT_MAX", 120),
+  standardHeaders: true,
+  legacyHeaders: false,
+  validate: { trustProxy: false },
+  handler: createRateLimitHandler("Too many authorization requests from this IP. Please retry shortly."),
+});
+
 /** Protects authentication and registration endpoints from brute force. */
 export const authRateLimiter: RateLimitRequestHandler = rateLimit({
   windowMs: 15 * 60 * 1000,

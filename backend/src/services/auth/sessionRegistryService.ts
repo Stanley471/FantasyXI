@@ -156,6 +156,11 @@ export class SessionRegistryService {
     // Sort newest first
     return result.reverse().sort((a, b) => b.lastActiveAt.getTime() - a.lastActiveAt.getTime());
   }
+  public async eraseUserSessions(userId: string): Promise<void> {
+    await this.revokeAllUserSessions(userId,undefined,"Account erased");
+    for (const id of this.userSessionsIndex.get(userId) ?? []) this.sessions.delete(id);
+    this.userSessionsIndex.delete(userId);
+  }
 
   /**
    * Checks whether a session ID is currently valid (not revoked and not expired).

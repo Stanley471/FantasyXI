@@ -6,7 +6,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import app from "./app.js";
 import { startJobQueue, stopJobQueue, getQueueHealth } from "./queues/jobQueue.js";
-import { apiRateLimiter } from "./middleware/rateLimiter.js";
+import { apiRateLimiter, authorizationRateLimiter } from "./middleware/rateLimiter.js";
 import { optionalAuth } from "./middleware/authMiddleware.js";
 import { errorHandler } from "./middleware/error.middleware.js";
 import { requireAuth, requirePermission } from "./middleware/authMiddleware.js";
@@ -16,7 +16,7 @@ import { expressMiddleware } from "@as-integrations/express5";
 import DataLoader from "dataloader";
 import { prisma, getReadReplicaStatus, getSlowQueryCount } from "./config/db.js";
 import { closeRedisClient, getRedisClient } from "./config/redis.js";
-import { preferReplicaReads } from "./middleware/readConsistency.js";
+import { preferReplicaReads, primaryReads } from "./middleware/readConsistency.js";
 import { financialAuditLog } from "./services/audit/financialAuditLog.js";
 import { resolvers } from "./graphql/resolvers.js";
 import { typeDefs } from "./graphql/schema.js";
@@ -211,11 +211,16 @@ async function startServer(): Promise<void> {
   await apolloServer.start();
   app.use(
     "/graphql",
-    // The schema is query-only, so GraphQL reads may be served by a replica
-    preferReplicaReads,
+    authorizationRateLimiter,
+    requireAuth,
+    // Owner and current-role authorization must not use a lagging replica.
+    primaryReads,
     express.json(),
     expressMiddleware(apolloServer, {
-      context: async () => ({
+      context: async ({ req }) => ({
+        principal: req.user && req.user.role !== "SERVICE"
+          ? await prisma.user.findUnique({ where: { id: req.user.id }, select: { id: true, role: true } })
+          : null,
         loaders: {
           users: new DataLoader(async (ids) => {
             const records = await prisma.user.findMany({

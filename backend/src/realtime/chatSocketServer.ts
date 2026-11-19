@@ -3,6 +3,7 @@ import type { IncomingMessage, Server } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket, RawData } from "ws";
 import { verifyAccessToken } from "../config/jwt.js";
+import { accountErased } from "../services/privacy/accountStatus.js";
 import {
   chatService as defaultChatService,
   ChatService,
@@ -143,6 +144,7 @@ export function attachChatSocketServer(server: Server, options: ChatSocketServer
         const payload = verifyAccessToken(token);
         if (!payload.userId) throw new Error("missing userId");
         candidate = payload.userId;
+        if (await accountErased(candidate)) throw new Error("Account erased");
       } catch {
         fail(CloseCode.UNAUTHORIZED, "unauthorized");
         return;
@@ -160,13 +162,19 @@ export function attachChatSocketServer(server: Server, options: ChatSocketServer
       if (socket.readyState !== WebSocket.OPEN) return;
       clearTimeout(authTimer);
       userId = candidate;
-      unsubscribe = service.hub.subscribe(leagueId, (message) => send(socket, { type: "message", message }));
+      unsubscribe = service.hub.subscribe(leagueId, (message) => {
+        void Promise.resolve(accountErased(candidate)).then(erased => {
+          if (erased) fail(CloseCode.UNAUTHORIZED,"unauthorized");
+          else send(socket,{ type:"message",message });
+        }).catch(() => fail(1011,"security_check_failed"));
+      });
       send(socket, { type: "ready", leagueId, userId });
     };
 
     const postMessage = async (frame: ClientFrame) => {
       const clientId = readClientId(frame.clientId);
       try {
+        if (await accountErased(userId!)) { fail(CloseCode.UNAUTHORIZED,"unauthorized"); return; }
         const message = await service.postMessage(leagueId, userId!, frame.body);
         send(socket, { type: "ack", clientId, message });
       } catch (error) {
