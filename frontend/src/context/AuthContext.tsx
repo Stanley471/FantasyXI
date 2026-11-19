@@ -7,7 +7,8 @@ import {
 
 import React, { createContext, useContext, useState, useEffect } from "react";
 import { User, AuthResponse, ApiSuccessResponse } from "@/types";
-import { api } from "@/lib/api";
+import { api, API_BASE_URL } from "@/lib/api";
+import { getRealtimeBus } from "@/lib/realtime/realtimeBus";
 import { authenticateWithPasskey, type PublicKeyCredentialRequestOptionsJSON } from "@/lib/passkeys";
 import {
   clearOfflineData,
@@ -95,10 +96,39 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         type: "LOGOUT",
         timestamp: Date.now(),
       });
+      // Fan the logout through the realtime bus as well (issue #459): the
+      // SharedWorker closes every socket and tells every other tab to sign
+      // out now. The session-sync broadcast above stays as the fallback.
+      try {
+        getRealtimeBus(API_BASE_URL, () => localStorage.getItem("token")).notifyLogout();
+      } catch {
+        // session-sync broadcast already covers the other tabs
+      }
     }
     setToken(null);
     setUser(null);
   };
+
+  // Realtime bus (SharedWorker) auth fan-out: a logout in any tab arrives
+  // here via the worker and signs this tab out instantly, no reload.
+  // The storage/BroadcastChannel listener above stays as the fallback.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const bus = getRealtimeBus(API_BASE_URL, () => localStorage.getItem("token"));
+    bus.connect();
+    const unsubscribe = bus.onAuthLogout(() => {
+      if (typeof window !== "undefined") {
+        localStorage.removeItem("token");
+        clearOfflineData();
+      }
+      setToken(null);
+      setUser(null);
+    });
+    return () => {
+      unsubscribe();
+      bus.disconnect();
+    };
+  }, []);
 
   // Cross-tab & multi-device remote invalidation listener
   useCrossTabSessionSync({

@@ -20,6 +20,7 @@ import { useOnlineStatus } from "@/lib/useOnlineStatus";
 import { Squad, Player, Position, SQUAD_RULES, ChipType, SquadChipUsage } from "@/types";
 import { Pitch } from "@/components/pitch/Pitch";
 import { Bench } from "@/components/pitch/Bench";
+import { FormationBuilder } from "@/components/pitch/FormationBuilder";
 import { BudgetBar } from "@/components/team/BudgetBar";
 import { CountdownTimer } from "@/components/team/CountdownTimer";
 import { PlayerPickerModal } from "@/components/team/PlayerPickerModal";
@@ -36,8 +37,8 @@ import { PositionBadge } from "@/components/ui/Badge";
 import { useToast } from "@/context/ToastContext";
 import {
   DndContext,
-  MouseSensor,
-  TouchSensor,
+  PointerSensor,
+  rectIntersection,
   useSensor,
   useSensors,
   DragEndEvent,
@@ -286,16 +287,13 @@ export default function TeamPage() {
   const selectedPlayer = players.find((p) => p.playerId === selectedPlayerId);
 
   // DND Handlers
+  // PointerSensor (#462) unifies mouse and touch through pointer events so
+  // one drag gesture works on desktop cursors and touch devices alike.
+  // An 8px activation distance keeps taps/clicks from starting a drag.
   const sensors = useSensors(
-    useSensor(MouseSensor, {
+    useSensor(PointerSensor, {
       activationConstraint: {
-        distance: 10,
-      },
-    }),
-    useSensor(TouchSensor, {
-      activationConstraint: {
-        delay: 350,
-        tolerance: 8,
+        distance: 8,
       },
     })
   );
@@ -318,10 +316,16 @@ export default function TeamPage() {
       const overIdNum = Number(over.id);
 
       if (!isNaN(activeIdNum) && !isNaN(overIdNum)) {
+        // A rejected swap leaves rejectedSwap in the store, so the dragged
+        // card snaps back with the contextual warning (#462).
         handleSwap(activeIdNum, overIdNum);
       }
       setSelectedPlayerId(null);
     }
+  };
+
+  const handleDragCancel = () => {
+    setActiveDragPlayer(null);
   };
 
   // Auto-pick balanced squad logic
@@ -656,7 +660,7 @@ export default function TeamPage() {
 
   if (isLoading) {
     return (
-      <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
+      <DndContext sensors={sensors} collisionDetection={rectIntersection} onDragStart={handleDragStart} onDragEnd={handleDragEnd} onDragCancel={handleDragCancel}>
         <div className="space-y-6 pb-12">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white border border-slate-200/80 p-6 sm:p-7 rounded-3xl shadow-sm">
             <div>
@@ -697,7 +701,7 @@ export default function TeamPage() {
   }
 
   return (
-    <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
+    <DndContext sensors={sensors} collisionDetection={rectIntersection} onDragStart={handleDragStart} onDragEnd={handleDragEnd} onDragCancel={handleDragCancel}>
       <div className="space-y-6 pb-12">
         {/* Top Header & Squad Name */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white border border-slate-200/80 p-6 sm:p-7 rounded-3xl shadow-sm">
@@ -973,6 +977,10 @@ export default function TeamPage() {
         )}
 
         {/* Main Pitch View */}
+        <ErrorBoundary name="TeamBuilderFormation" fallbackTitle="Formation builder failed to render">
+          <FormationBuilder />
+        </ErrorBoundary>
+
         <ErrorBoundary name="TeamBuilderPitch" fallbackTitle="Pitch tactical view failed to render">
           <Pitch />
         </ErrorBoundary>

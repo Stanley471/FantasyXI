@@ -55,6 +55,18 @@ interface TeamState {
 
   substitutionFeedback: SubstitutionFeedback | null;
   setSubstitutionFeedback: (feedback: SubstitutionFeedback | null) => void;
+
+  /**
+   * Last substitution rejected by the formation rules (#462): the dragged
+   * card snaps back with this reason shown, instead of silently staying put.
+   * Set by handleSwap on failure, cleared by a successful swap or a new drag.
+   */
+  rejectedSwap: { sourcePlayerId: number; targetPlayerId: number; reason: string } | null;
+  setRejectedSwap: (rejected: { sourcePlayerId: number; targetPlayerId: number; reason: string } | null) => void;
+
+  /** Player card holding keyboard focus, for the Space/arrows/Enter flow (#462). */
+  keyboardFocusedPlayerId: number | null;
+  setKeyboardFocusedPlayerId: (id: number | null) => void;
   
   activeModalState: {
     isOpen: boolean;
@@ -97,10 +109,17 @@ export const useTeamStore = create<TeamState>((set, get) => ({
   setSelectedPlayerId: (id) => set({ selectedPlayerId: id }),
 
   activeDragPlayer: null,
-  setActiveDragPlayer: (player) => set({ activeDragPlayer: player }),
+  setActiveDragPlayer: (player) =>
+    set({ activeDragPlayer: player, ...(player ? { rejectedSwap: null } : {}) }),
 
   substitutionFeedback: null,
   setSubstitutionFeedback: (feedback) => set({ substitutionFeedback: feedback }),
+
+  rejectedSwap: null,
+  setRejectedSwap: (rejected) => set({ rejectedSwap: rejected }),
+
+  keyboardFocusedPlayerId: null,
+  setKeyboardFocusedPlayerId: (id) => set({ keyboardFocusedPlayerId: id }),
   
   activeModalState: {
     isOpen: false,
@@ -203,6 +222,12 @@ export const useTeamStore = create<TeamState>((set, get) => ({
           type: "error",
           message,
         },
+        // The dragged card snaps back with this reason (#462).
+        rejectedSwap: {
+          sourcePlayerId: playerAId,
+          targetPlayerId: playerBId,
+          reason: message,
+        },
       });
       return false;
     }
@@ -244,6 +269,7 @@ export const useTeamStore = create<TeamState>((set, get) => ({
     const successMessage = `Successfully substituted ${a.player.displayName || a.player.lastName} with ${b.player.displayName || b.player.lastName}.`;
     set({
       players: clone,
+      rejectedSwap: null,
       substitutionFeedback: {
         type: "success",
         message: successMessage,
