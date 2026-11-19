@@ -358,6 +358,11 @@ function LoginForm() {
                   Sign In to Dugout
                 </Button>
               </div>
+              <div className="text-center">
+                <Link href="/recover-passkey" className="text-xs font-bold text-[#37003c] hover:underline">
+                  Lost access to your passkey?
+                </Link>
+              </div>
             </form>
           </>
         )}

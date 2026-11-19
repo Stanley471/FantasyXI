@@ -12,6 +12,10 @@ import { ReferralService } from "../services/auth/referralService.js";
 import { jwtKeyRotationService } from "../services/auth/jwtKeyRotationService.js";
 import { webAuthnService, PasskeyError } from "../services/auth/webAuthnService.js";
 import { refreshTokenService, RefreshTokenUnauthorizedError } from "../services/auth/refreshTokenService.js";
+import {
+  passkeyRecoveryService,
+  PasskeyRecoveryError,
+} from "../services/auth/passkeyRecoveryService.js";
 
 /** POST /api/v1/auth/refresh body: { refreshToken } */
 export async function refresh(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -264,6 +268,44 @@ export async function deletePasskey(
     res.json({ success: true, message: "Passkey removed" });
   } catch (error) {
     handlePasskeyError(error, res, next);
+  }
+}
+
+function handleRecoveryError(error: unknown, res: Response, next: NextFunction): void {
+  if (error instanceof PasskeyRecoveryError) {
+    res.status(error.statusCode).json({ success: false, message: error.message });
+    return;
+  }
+  next(error);
+}
+
+export async function configurePasskeyRecovery(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const data = await passkeyRecoveryService.configure(req.user!.id, req.body?.publicKey);
+    res.status(201).json({ success: true, message: "Recovery key configured", data });
+  } catch (error) {
+    handleRecoveryError(error, res, next);
+  }
+}
+
+export async function beginPasskeyRecovery(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const data = await passkeyRecoveryService.begin(req.body?.email);
+    res.json({ success: true, message: "If recovery is configured, the proof may now be submitted.", data });
+  } catch (error) {
+    handleRecoveryError(error, res, next);
+  }
+}
+
+export async function completePasskeyRecovery(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const data = await passkeyRecoveryService.complete(req.body ?? {}, {
+      ip: req.ip ?? req.socket.remoteAddress ?? "unknown",
+      userAgent: req.headers["user-agent"] ?? null,
+    });
+    res.json({ success: true, message: "Account recovered and prior sessions revoked", data });
+  } catch (error) {
+    handleRecoveryError(error, res, next);
   }
 }
 

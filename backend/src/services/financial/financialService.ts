@@ -826,6 +826,9 @@ export class FinancialService {
         prizeAmount: winner.prizeAmount,
       })),
     });
+    const heldWinnerUserIds = sortedMembers
+      .filter((member: any) => member.payoutHoldAt && winners.some((winner) => winner.userId === member.userId))
+      .map((member: any) => member.userId);
 
     return {
       leagueId: league.id,
@@ -837,10 +840,14 @@ export class FinancialService {
       platformFee: distribution.platformFee,
       netPrizePool: distribution.prizePool,
       winners,
+      ...(heldWinnerUserIds.length > 0 ? { heldWinnerUserIds } : {}),
       ...(league.payoutPreset && league.payoutPreset !== "standard" && distribution.prizePool > 0 && winners.length > 0
         ? { distributionBps: PrizeService.encodeSorobanPayoutAmounts(winners.map((winner) => winner.prizeAmount), distribution.prizePool) }
         : {}),
-      canSettle: true,
+      canSettle: heldWinnerUserIds.length === 0,
+      ...(heldWinnerUserIds.length > 0
+        ? { unsettledReason: "Settlement is on administrative hold while winner fraud signals are reviewed." }
+        : {}),
       proofHash,
     };
   }

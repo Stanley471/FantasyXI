@@ -42,6 +42,7 @@ async function request<T>(
   options: RequestInit = {}
 ): Promise<T> {
   const url = `${API_BASE_URL}${endpoint}`;
+  const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
 
   // Get auth token if it exists
   const token =
@@ -56,10 +57,20 @@ async function request<T>(
     (headers as Record<string, string>)["Authorization"] = `Bearer ${token}`;
   }
 
-  const response = await fetch(url, {
-    ...options,
-    headers,
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, { ...options, headers });
+  } catch (error) {
+    const endedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+    void import("@/lib/telemetry").then(({ trackApiLatency }) =>
+      trackApiLatency(options.method ?? "GET", endpoint, endedAt - startedAt, 0)
+    );
+    throw error;
+  }
+  const endedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+  void import("@/lib/telemetry").then(({ trackApiLatency }) =>
+    trackApiLatency(options.method ?? "GET", endpoint, endedAt - startedAt, response.status)
+  );
 
   // Handle no-content responses (204)
   if (response.status === 204) {

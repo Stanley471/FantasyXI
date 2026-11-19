@@ -1,4 +1,4 @@
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { Request, RequestHandler, Response } from "express";
 import { Redis } from "ioredis";
 import rateLimit, { RateLimitRequestHandler } from "express-rate-limit";
@@ -236,51 +236,154 @@ function getRedisStore(): SlidingWindowStore | undefined {
   return new RedisSlidingWindowStore(redisClient);
 }
 
-function hashKey(value: string): string {
-  return createHash("sha256").update(value).digest("hex");
+function encodeBucketIdentity(value: string): string {
+  return Buffer.from(value, "utf8").toString("base64url");
+}
+
+function constantTimeSecretEqual(left: string, right: string): boolean {
+  const leftBytes = Buffer.from(left);
+  const rightBytes = Buffer.from(right);
+  const paddedLength = Math.max(leftBytes.length, rightBytes.length, 1);
+  const paddedLeft = Buffer.alloc(paddedLength);
+  const paddedRight = Buffer.alloc(paddedLength);
+  leftBytes.copy(paddedLeft);
+  rightBytes.copy(paddedRight);
+  return leftBytes.length === rightBytes.length && timingSafeEqual(paddedLeft, paddedRight);
 }
 
 function hasVerifiedWebhookSecret(req: Request): boolean {
   const configuredSecret = process.env.WEBHOOK_RATE_LIMIT_SECRET;
   const suppliedSecret = req.header("x-webhook-secret");
   if (!configuredSecret || !suppliedSecret) return false;
-  const expected = Buffer.from(configuredSecret);
-  const actual = Buffer.from(suppliedSecret);
-  return expected.length === actual.length && timingSafeEqual(expected, actual);
+  return constantTimeSecretEqual(configuredSecret, suppliedSecret);
+}
+
+function verifiedApiKey(req: Request): string | null {
+  const supplied = req.header("x-api-key")?.trim();
+  if (!supplied) return null;
+  const configured = (process.env.RATE_LIMIT_API_KEYS || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  for (let index = 0; index < configured.length; index++) {
+    if (constantTimeSecretEqual(supplied, configured[index])) return `key-${index + 1}`;
+  }
+  return null;
+}
+
+export interface AdaptivePenaltyStore {
+  getLevel(key: string): Promise<0 | 1 | 2>;
+  recordScannerResponse(key: string, statusCode: number, windowMs: number): Promise<void>;
+}
+
+export class MemoryAdaptivePenaltyStore implements AdaptivePenaltyStore {
+  private readonly entries = new Map<string, { failures: number; expiresAt: number }>();
+
+  constructor(private readonly now: () => number = Date.now) {}
+
+  public async getLevel(key: string): Promise<0 | 1 | 2> {
+    const entry = this.entries.get(key);
+    if (!entry || entry.expiresAt <= this.now()) {
+      this.entries.delete(key);
+      return 0;
+    }
+    return entry.failures >= 6 ? 2 : entry.failures >= 3 ? 1 : 0;
+  }
+
+  public async recordScannerResponse(key: string, statusCode: number, windowMs: number): Promise<void> {
+    if (![401, 403, 404].includes(statusCode)) return;
+    const now = this.now();
+    const current = this.entries.get(key);
+    this.entries.set(key, {
+      failures: current && current.expiresAt > now ? current.failures + 1 : 1,
+      expiresAt: now + windowMs,
+    });
+  }
+}
+
+export class RedisAdaptivePenaltyStore implements AdaptivePenaltyStore {
+  constructor(private readonly redis: Redis) {}
+
+  public async getLevel(key: string): Promise<0 | 1 | 2> {
+    const failures = Number(await this.redis.get(key)) || 0;
+    return failures >= 6 ? 2 : failures >= 3 ? 1 : 0;
+  }
+
+  public async recordScannerResponse(key: string, statusCode: number, windowMs: number): Promise<void> {
+    if (![401, 403, 404].includes(statusCode)) return;
+    const pipeline = this.redis.multi();
+    pipeline.incr(key);
+    pipeline.pexpire(key, windowMs);
+    await pipeline.exec();
+  }
+}
+
+const fallbackAdaptiveStore = new MemoryAdaptivePenaltyStore();
+let redisAdaptiveStore: RedisAdaptivePenaltyStore | undefined;
+
+function getRedisAdaptiveStore(): AdaptivePenaltyStore | undefined {
+  if (!getRedisStore() || !redisClient) return undefined;
+  redisAdaptiveStore ??= new RedisAdaptivePenaltyStore(redisClient);
+  return redisAdaptiveStore;
+}
+
+function requestIdentity(req: Request): {
+  authenticated: boolean;
+  apiKey: string | null;
+  identity: string;
+  ip: string;
+} {
+  const authenticated = Boolean(req.user?.id);
+  const apiKey = verifiedApiKey(req);
+  const ip = req.ip || req.socket.remoteAddress || "unknown";
+  const identity = apiKey
+    ? `api-key:${apiKey}`
+    : authenticated
+      ? `user:${req.user!.id}`
+      : `ip:${ip}`;
+  return { authenticated, apiKey, identity, ip };
 }
 
 function getBuckets(
   req: Request,
-  group: RateLimitRouteGroup
-): { buckets: RateLimitBucket[]; windowMs: number } {
-  const authenticated = Boolean(req.user?.id);
-  const tier = getRateLimitTier(req.path, authenticated, hasVerifiedWebhookSecret(req));
-  const tierConfig = group.tiers[tier];
-  const ip = req.ip || req.socket.remoteAddress || "unknown";
-  const identity =
+  group: RateLimitRouteGroup,
+  penaltyLevel: 0 | 1 | 2
+): { buckets: RateLimitBucket[]; windowMs: number; penaltyKey: string } {
+  const { authenticated, apiKey, identity, ip } = requestIdentity(req);
+  const tier = getRateLimitTier(req.path, authenticated, hasVerifiedWebhookSecret(req), Boolean(apiKey));
+  const tierConfig = group.tiers[tier] ?? group.tiers.authenticated;
+  const penaltyMultiplier = penaltyLevel === 2 ? 0.25 : penaltyLevel === 1 ? 0.5 : 1;
+  const adjustedLimit = (limit: number) => Math.max(1, Math.floor(limit * penaltyMultiplier));
+  const bucketIdentity =
     tier === "webhook"
       ? `webhook:${ip}`
-      : authenticated
-        ? `user:${req.user!.id}`
-        : `ip:${ip}`;
+      : identity;
+  const bucketKey = apiKey ?? encodeBucketIdentity(bucketIdentity);
   const buckets = [
     {
-      key: `fantasyxi:rate:{${group.name}}:${tier}:${hashKey(identity)}`,
-      limit: tierConfig.limit,
+      key: `fantasyxi:rate:{${group.name}}:${tier}:${bucketKey}`,
+      limit: adjustedLimit(tierConfig.limit),
     },
   ];
 
-  if (authenticated) {
+  if (authenticated || apiKey) {
     buckets.push({
-      key: `fantasyxi:rate:{${group.name}}:ip:${hashKey(ip)}`,
-      limit: tierConfig.ipLimit ?? tierConfig.limit,
+      key: `fantasyxi:rate:{${group.name}}:ip:${encodeBucketIdentity(ip)}`,
+      limit: adjustedLimit(tierConfig.ipLimit ?? tierConfig.limit),
     });
   }
 
-  return { buckets, windowMs: tierConfig.windowMs };
+  return {
+    buckets,
+    windowMs: tierConfig.windowMs,
+    penaltyKey: `fantasyxi:rate:adaptive:${apiKey ?? encodeBucketIdentity(identity)}`,
+  };
 }
 
 function setRateLimitHeaders(res: Response, result: SlidingWindowResult): void {
+  res.setHeader("RateLimit-Limit", result.limit);
+  res.setHeader("RateLimit-Remaining", result.remaining);
+  res.setHeader("RateLimit-Reset", Math.max(1, Math.ceil(result.resetAfterMs / 1000)));
   res.setHeader("X-RateLimit-Limit", result.limit);
   res.setHeader("X-RateLimit-Remaining", result.remaining);
   res.setHeader(
@@ -294,6 +397,7 @@ function setRateLimitHeaders(res: Response, result: SlidingWindowResult): void {
 
 export interface SlidingWindowRateLimiterOptions {
   store?: SlidingWindowStore;
+  adaptiveStore?: AdaptivePenaltyStore;
   routeGroups?: RateLimitRouteGroup[];
 }
 
@@ -317,7 +421,21 @@ export function createSlidingWindowRateLimiter(
             (prefix) => req.path === prefix || req.path.startsWith(`${prefix}/`)
           )
       ) ?? routeGroups[routeGroups.length - 1];
-    const { buckets, windowMs } = getBuckets(req, group ?? getRateLimitRouteGroup(req.path));
+    let adaptiveStore = options.adaptiveStore ?? getRedisAdaptiveStore() ?? fallbackAdaptiveStore;
+    const { identity, apiKey } = requestIdentity(req);
+    const provisionalPenaltyKey = `fantasyxi:rate:adaptive:${apiKey ?? encodeBucketIdentity(identity)}`;
+    let penaltyLevel: 0 | 1 | 2 = 0;
+    try {
+      penaltyLevel = await adaptiveStore.getLevel(provisionalPenaltyKey);
+    } catch {
+      adaptiveStore = fallbackAdaptiveStore;
+      penaltyLevel = await adaptiveStore.getLevel(provisionalPenaltyKey);
+    }
+    const { buckets, windowMs, penaltyKey } = getBuckets(
+      req,
+      group ?? getRateLimitRouteGroup(req.path),
+      penaltyLevel
+    );
 
     let result: SlidingWindowResult;
     try {
@@ -338,6 +456,7 @@ export function createSlidingWindowRateLimiter(
     }
 
     setRateLimitHeaders(res, result);
+    if (penaltyLevel > 0) res.setHeader("RateLimit-Policy", `adaptive; level=${penaltyLevel}`);
     if (!result.allowed) {
       res.status(429).json({
         success: false,
@@ -345,6 +464,11 @@ export function createSlidingWindowRateLimiter(
       });
       return;
     }
+    res.once("finish", () => {
+      adaptiveStore
+        .recordScannerResponse(penaltyKey, res.statusCode, 15 * 60_000)
+        .catch((error) => console.error("[rate-limit] Failed to update adaptive penalty", error));
+    });
     next();
   };
 }
@@ -526,7 +650,7 @@ export class RedisWalletScanGuardStore implements WalletScanGuardStore {
   constructor(private readonly redis: Redis) {}
 
   private keys(wallet: string): [string, string] {
-    const id = hashKey(wallet);
+    const id = encodeBucketIdentity(wallet);
     return [`fantasyxi:scan:{${id}}:misses`, `fantasyxi:scan:{${id}}:lock`];
   }
 
@@ -661,17 +785,17 @@ export function createWalletRateLimiter(options: WalletRateLimiterOptions = {}):
       }
 
       const buckets: RateLimitBucket[] = [
-        { key: `fantasyxi:rate:{deposit-verify}:ip:${hashKey(ip)}`, limit: ipLimit },
+        { key: `fantasyxi:rate:{deposit-verify}:ip:${encodeBucketIdentity(ip)}`, limit: ipLimit },
       ];
       if (wallet) {
         buckets.push({
-          key: `fantasyxi:rate:{deposit-verify}:wallet:${hashKey(wallet)}`,
+          key: `fantasyxi:rate:{deposit-verify}:wallet:${encodeBucketIdentity(wallet)}`,
           limit: walletLimit,
         });
       }
       if (req.user?.id) {
         buckets.push({
-          key: `fantasyxi:rate:{deposit-verify}:user:${hashKey(req.user.id)}`,
+          key: `fantasyxi:rate:{deposit-verify}:user:${encodeBucketIdentity(req.user.id)}`,
           limit: userLimit,
         });
       }
