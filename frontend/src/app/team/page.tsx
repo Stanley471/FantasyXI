@@ -47,6 +47,7 @@ import {
 
 import { useTeamStore, LocalSquadPlayer, buildSquadPayload } from "@/store/teamStore";
 import { PlayerCard } from "@/components/pitch/PlayerCard";
+import { SquadShareExporter } from "@/components/team/SquadShareExporter";
 
 export default function TeamPage() {
   const router = useRouter();
@@ -756,6 +757,14 @@ export default function TeamPage() {
               </div>
             )}
           </div>
+        </div>
+
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white border border-slate-200/80 px-5 py-4 rounded-2xl shadow-sm">
+          <div>
+            <h2 className="text-sm font-black uppercase text-slate-900">Share squad</h2>
+            <p className="text-[11px] text-slate-500">Export your active formation as a high-resolution graphic</p>
+          </div>
+          <SquadShareExporter players={players} squadName={squadName} managerHandle={user?.username ?? "manager"} />
         </div>
 
         {/* Offline Queue Status Banner */}
