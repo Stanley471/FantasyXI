@@ -64,6 +64,7 @@
     "jsonwebtoken": "^9.0.3",
     "pg-boss": "^10.4.2",
     "pino": "^10.3.1",
+    "prom-client": "^15.1.0",
     "ws": "^8.22.0"
   },
   "devDependencies": {
