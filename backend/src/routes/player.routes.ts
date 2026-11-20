@@ -5,6 +5,7 @@ import {
   getPlayerOwnershipStats,
   batchPlayerStats,
   getPlayerAnalytics,
+  getMarketTrends,
 } from "../controllers/player.controller.js";
 import { requireAuth } from "../middleware/authMiddleware.js";
 import { authenticatedRateLimiter } from "../middleware/rateLimiter.js";
@@ -16,6 +17,9 @@ router.get("/", getPlayers);
 
 // GET /api/v1/players/ownership-stats
 router.get("/ownership-stats", getPlayerOwnershipStats);
+
+// GET /api/v1/players/market-trends
+router.get("/market-trends", getMarketTrends);
 
 // POST /api/v1/players/batch-stats (authenticated, rate limited)
 router.post("/batch-stats", requireAuth, authenticatedRateLimiter, batchPlayerStats);
