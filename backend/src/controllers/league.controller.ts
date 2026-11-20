@@ -9,6 +9,7 @@ import {
   INVITATION_DEFAULT_TTL_HOURS,
 } from "../services/league/leagueService.js";
 import { liveService } from "../services/live/liveService.js";
+import { enqueueLeagueInviteEmail } from "../queues/jobQueue.js";
 
 /**
  * League Controller.
@@ -380,6 +381,51 @@ export async function createLeagueInvitation(
       success: true,
       message: "Invitation created. The link can be used up to its configured limit and cannot be retrieved again.",
       data: invitation,
+    });
+  } catch (error) {
+    if (sendLeagueError(error, res)) return;
+    next(error);
+  }
+}
+
+/**
+ * POST /api/v1/leagues/:id/invite (creator only)
+ * Body: { email: string }
+ * Creates a single-use invitation and queues a branded email with the join
+ * link; the request returns as soon as the email is queued, not sent.
+ */
+export async function inviteLeagueMemberByEmail(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user?.id) {
+      res.status(401).json({ success: false, message: "Authentication required" });
+      return;
+    }
+
+    const { invitation, email, league } = await leagueService.createInvitationEmail(
+      req.params.id as string,
+      req.user.id,
+      req.body?.email
+    );
+
+    const baseUrl = (process.env.FRONTEND_URL || "http://localhost:3000").replace(/\/$/, "");
+    const inviteUrl = `${baseUrl}/leagues/invitations/${invitation.token}`;
+
+    await enqueueLeagueInviteEmail({
+      to: email,
+      leagueName: league.name,
+      entryFee: league.entryFee,
+      inviteUrl,
+      inviterName: req.user.username,
+    });
+
+    res.status(202).json({
+      success: true,
+      message: "Invitation email queued for delivery",
+      data: { invitationId: invitation.id, expiresAt: invitation.expiresAt },
     });
   } catch (error) {
     if (sendLeagueError(error, res)) return;

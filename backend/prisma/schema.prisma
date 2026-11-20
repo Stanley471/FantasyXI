@@ -309,6 +309,7 @@ model Gameweek {
   leagueFixtures  LeagueFixture[]
   matchRatingHistory MatchRatingHistory[]
 
+  @@index([deadline])
   @@map("gameweeks")
 }
 
