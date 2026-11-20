@@ -9,6 +9,17 @@ import {
   INVITATION_DEFAULT_TTL_HOURS,
 } from "../services/league/leagueService.js";
 import { liveService } from "../services/live/liveService.js";
+import type { PrivacyViewer } from "../services/privacy/displayName.js";
+
+/**
+ * Viewer identity for name masking (issue #511): id + role, so the owner
+ * themselves and platform admins see real usernames in public views while
+ * everyone else sees the "Manager #XXXX" alias for anonymous managers.
+ * Undefined for signed-out viewers.
+ */
+function viewerOf(req: Request): PrivacyViewer | undefined {
+  return req.user ? { id: req.user.id, role: req.user.role } : undefined;
+}
 
 /**
  * League Controller.
@@ -90,7 +101,7 @@ export async function getLeagues(
 ): Promise<void> {
   try {
     const filters = LeagueService.parseSearchFilters(req.query as Record<string, unknown>);
-    const result = await leagueService.getLeagues(filters, req.user?.id);
+    const result = await leagueService.getLeagues(filters, viewerOf(req));
 
     res.json({
       success: true,
@@ -115,7 +126,7 @@ export async function getLeagueById(
 ): Promise<void> {
   try {
     const { id } = req.params;
-    const league = await leagueService.getLeagueById(id as string, req.user?.id);
+    const league = await leagueService.getLeagueById(id as string, viewerOf(req));
 
     res.json({
       success: true,
@@ -202,7 +213,7 @@ export async function getLeagueMembers(
     const limit = Number.isFinite(requestedLimit)
       ? Math.min(100, Math.max(1, requestedLimit))
       : 50;
-    const membersPage = await leagueService.getLeagueMembers(id as string, page, limit);
+    const membersPage = await leagueService.getLeagueMembers(id as string, page, limit, viewerOf(req));
 
     res.json({
       success: true,
@@ -240,7 +251,8 @@ export async function getLeagueStandings(
     }
     const standingsData = await leagueService.getLeagueStandings(
       id as string,
-      rawGameweekId === undefined ? undefined : Number(rawGameweekId)
+      rawGameweekId === undefined ? undefined : Number(rawGameweekId),
+      viewerOf(req)
     );
 
     res.json({
@@ -270,7 +282,7 @@ export async function getH2HStandings(
 ): Promise<void> {
   try {
     const { id } = req.params;
-    const standings = await leagueService.getH2HStandings(id as string);
+    const standings = await leagueService.getH2HStandings(id as string, viewerOf(req));
 
     res.json({
       success: true,
@@ -503,7 +515,7 @@ export async function streamLeagueLive(
   const leagueId = req.params.id as string;
 
   try {
-    const first = await liveService.getLeagueSnapshot(leagueId);
+    const first = await liveService.getLeagueSnapshot(leagueId, viewerOf(req));
     if (!first) {
       res.status(404).json({
         success: false,
@@ -528,7 +540,7 @@ export async function streamLeagueLive(
     const intervalMs = Math.min(Math.max(requestedIntervalMs, 250), 1_500);
     const timer = setInterval(async () => {
       try {
-        const snapshot = await liveService.getLeagueSnapshot(leagueId);
+        const snapshot = await liveService.getLeagueSnapshot(leagueId, viewerOf(req));
         if (snapshot) send("snapshot", snapshot);
       } catch (error) {
         send("feed-error", { message: (error as Error).message });

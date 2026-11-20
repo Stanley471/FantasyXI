@@ -2,6 +2,7 @@ import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import apiV1Router from "./routes/index.js";
+import { docsRouter, isDocsEnabled } from "./routes/docs.routes.js";
 import { apiRateLimiter } from "./middleware/rateLimiter.js";
 import { errorHandler } from "./middleware/error.middleware.js";
 import { getJwks } from "./controllers/auth.controller.js";
@@ -207,6 +208,13 @@ app.post("/api/v1/admin/tenants", async (req: Request, res: Response) => {
 
 // Public JWK Set for access-token verification (issue #332)
 app.get("/.well-known/jwks.json", getJwks);
+
+// Interactive OpenAPI documentation (issue #510): Swagger UI at /api/docs
+// and the raw spec at /api/docs/docs.json — development only, never in
+// production. The router also 404s per-request when NODE_ENV is production.
+if (isDocsEnabled()) {
+  app.use("/api/docs", docsRouter);
+}
 
 // API v1 Routes
 app.use("/api/v1", apiV1Router);

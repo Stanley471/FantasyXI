@@ -4,6 +4,8 @@ import {
   login,
   verifyLoginChallenge,
   getMe,
+  updatePrivacySettings,
+  updatePrivacySettingsForUser,
   initiateGoogleAuth,
   handleGoogleCallback,
   createGoogleLinkTicket,
@@ -25,11 +27,12 @@ import {
   refresh,
   logout,
 } from "../controllers/auth.controller.js";
-import { requireAuth, requirePermission } from "../middleware/authMiddleware.js";
-import { Permission } from "../types/index.js";
+import { requireAuth, requirePermission, requireRole } from "../middleware/authMiddleware.js";
+import { Permission, UserRole } from "../types/index.js";
 import {
   authRateLimiter,
   authenticatedRateLimiter,
+  mutationRateLimiter,
 } from "../middleware/rateLimiter.js";
 
 const router = Router();
@@ -47,6 +50,26 @@ router.post("/login/verify", authRateLimiter, verifyLoginChallenge);
 
 // GET /api/v1/auth/me (Protected)
 router.get("/me", requireAuth, authenticatedRateLimiter, requirePermission(Permission.PROFILE_READ), getMe);
+
+// PATCH /api/v1/auth/me/privacy (Protected: flip your own leaderboard anonymization toggle, issue #511)
+router.patch(
+  "/me/privacy",
+  requireAuth,
+  authenticatedRateLimiter,
+  mutationRateLimiter,
+  requirePermission(Permission.PROFILE_UPDATE_OWN),
+  updatePrivacySettings
+);
+
+// PATCH /api/v1/auth/users/:userId/privacy (ADMIN only: flip another manager's toggle, issue #511)
+router.patch(
+  "/users/:userId/privacy",
+  requireAuth,
+  authenticatedRateLimiter,
+  mutationRateLimiter,
+  requireRole(UserRole.ADMIN),
+  updatePrivacySettingsForUser
+);
 
 // GET /api/v1/auth/referral-code (Protected)
 router.get(

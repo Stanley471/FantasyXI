@@ -23,7 +23,9 @@ export async function getLeaderboard(
     const query = LeaderboardService.parseQuery(req.query as Record<string, unknown>);
     const { entries, total, page, pageSize, totalPages, ...rest } = await leaderboardService.getLeaderboard(
       query,
-      req.user?.id
+      // Signed-in viewers see their own real name (and admins see every real
+      // name); signed-out viewers only ever see the public alias form.
+      req.user ? { id: req.user.id, role: req.user.role } : undefined
     );
 
     res.json({

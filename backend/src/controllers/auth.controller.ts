@@ -4,6 +4,7 @@ import {
   AuthValidationError,
   AuthConflictError,
   AuthUnauthorizedError,
+  AuthForbiddenError,
   AuthNotFoundError,
   AuthLoginBlockedError,
 } from "../services/auth/authService.js";
@@ -264,6 +265,86 @@ export async function deletePasskey(
     res.json({ success: true, message: "Passkey removed" });
   } catch (error) {
     handlePasskeyError(error, res, next);
+  }
+}
+
+/**
+ * PATCH /api/v1/auth/me/privacy — flips the caller's own leaderboard
+ * anonymization toggle (issue #511). The request body carries only the
+ * boolean flag; the target account always comes from the token, so a caller
+ * can never flip another manager's flag through this route.
+ */
+export async function updatePrivacySettings(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user || !req.user.id) {
+      res.status(401).json({ success: false, message: "Unauthorized" });
+      return;
+    }
+
+    const user = await authService.updatePrivacySettings(
+      { id: req.user.id, role: req.user.role },
+      req.user.id,
+      req.body?.isAnonymous
+    );
+    res.json({ success: true, data: user });
+  } catch (error) {
+    if (error instanceof AuthValidationError) {
+      res.status(400).json({ success: false, message: error.message });
+      return;
+    }
+    if (error instanceof AuthForbiddenError) {
+      res.status(403).json({ success: false, message: error.message });
+      return;
+    }
+    if (error instanceof AuthNotFoundError) {
+      res.status(404).json({ success: false, message: error.message });
+      return;
+    }
+    next(error);
+  }
+}
+
+/**
+ * PATCH /api/v1/auth/users/:userId/privacy — platform-admin route to flip
+ * another manager's anonymization toggle (issue #511). Route-level
+ * requireRole(ADMIN) gates it; the service re-checks the actor so the
+ * rule holds even if the route guard changes.
+ */
+export async function updatePrivacySettingsForUser(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user || !req.user.id) {
+      res.status(401).json({ success: false, message: "Unauthorized" });
+      return;
+    }
+
+    const user = await authService.updatePrivacySettings(
+      { id: req.user.id, role: req.user.role },
+      String(req.params.userId),
+      req.body?.isAnonymous
+    );
+    res.json({ success: true, data: user });
+  } catch (error) {
+    if (error instanceof AuthValidationError) {
+      res.status(400).json({ success: false, message: error.message });
+      return;
+    }
+    if (error instanceof AuthForbiddenError) {
+      res.status(403).json({ success: false, message: error.message });
+      return;
+    }
+    if (error instanceof AuthNotFoundError) {
+      res.status(404).json({ success: false, message: error.message });
+      return;
+    }
+    next(error);
   }
 }
 

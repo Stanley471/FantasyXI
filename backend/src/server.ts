@@ -32,6 +32,7 @@ import {
 } from "./services/financial/transactionCoordinatorService.js";
 import { financialService } from "./services/financial/financialService.js";
 import { jwtKeyRotationService } from "./services/auth/jwtKeyRotationService.js";
+import { verifyAccessToken } from "./config/jwt.js";
 import { fplClient } from "./services/fpl/fplClient.js";
 import { partitionRotationWorker } from "./workers/partitionRotationWorker.js";
 import {
@@ -215,9 +216,30 @@ async function startServer(): Promise<void> {
     preferReplicaReads,
     express.json(),
     expressMiddleware(apolloServer, {
-      context: async () => ({
-        loaders: {
-          users: new DataLoader(async (ids) => {
+      context: async ({ req }) => {
+        // Optional viewer identity for name masking (issue #511): a valid
+        // Bearer token lets the owner themselves and platform admins see
+        // real names; missing or invalid tokens read as anonymous, exactly
+        // like optionalAuth on the REST routes.
+        let viewer: { id: string; role?: string | null } | undefined;
+        const header = req.headers.authorization;
+        if (header) {
+          const parts = header.trim().split(/\s+/);
+          if (parts.length === 2 && parts[0].toLowerCase() === "bearer") {
+            try {
+              const payload = verifyAccessToken(parts[1]);
+              if (payload.userId) {
+                viewer = { id: payload.userId, role: payload.role ?? null };
+              }
+            } catch {
+              // Ignore invalid tokens for optional authentication.
+            }
+          }
+        }
+        return {
+          viewer,
+          loaders: {
+            users: new DataLoader(async (ids) => {
             const records = await prisma.user.findMany({
               where: { id: { in: [...ids].map(String) } },
               include: { wallet: true, squads: true, createdLeagues: true },
@@ -233,8 +255,9 @@ async function startServer(): Promise<void> {
             const byId = new Map(records.map((record) => [record.id, record]));
             return ids.map((id) => byId.get(Number(id)) ?? null);
           }),
-        },
-      }),
+          },
+        };
+      },
     }),
   );
 
