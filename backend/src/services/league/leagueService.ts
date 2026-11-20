@@ -23,6 +23,7 @@ import {
   resolveLeagueScoringConfig,
 } from "../../models/leagueScoringConfig.js";
 import type { LeagueScoringConfig } from "../../models/leagueScoringConfig.js";
+import { sanitizePlainText } from "../../lib/sanitizeText.js";
 
 function scoringConfigToJson(config: LeagueScoringConfig): Prisma.InputJsonObject {
   const positionWeights = (
@@ -591,7 +592,7 @@ export class LeagueService {
       const league = await tx.league.create({
         data: {
           name: input.name.trim(),
-          description: input.description?.trim() || null,
+          description: input.description ? sanitizePlainText(input.description.trim()) || null : null,
           creatorId: userId,
           inviteCode,
           entryFee: input.entryFee,
