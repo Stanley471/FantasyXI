@@ -19,6 +19,10 @@ import {
 import { PrizeService } from "./prizeService.js";
 import { ScoringService } from "../scoring/scoringService.js";
 import {
+  userNotificationHub,
+  type UserNotificationHub,
+} from "../notifications/userNotificationHub.js";
+import {
   parseLeagueScoringConfig,
   resolveLeagueScoringConfig,
 } from "../../models/leagueScoringConfig.js";
@@ -72,6 +76,14 @@ export interface H2HAnomalyReport {
 }
 
 export const MAX_LEAGUE_MEMBERS = 100_000;
+
+/**
+ * Real-time event published to every joined manager when the dead-league
+ * worker cancels their league for missing minMembers at the deadline
+ * (issue #509). Payload carries the full entry fee owed back, with no fee
+ * deducted.
+ */
+export const LEAGUE_CANCELLED_EVENT = "league.cancelled";
 
 /** Maximum lengths (after trimming) accepted when creating a league. */
 export const LEAGUE_NAME_MAX_LENGTH = 50;
@@ -132,7 +144,7 @@ export interface LeagueSearchResult<T> {
 
 export class LeagueService {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  constructor(private readonly db: any = prisma) { }
+  constructor(private readonly db: any = prisma, private readonly hub: UserNotificationHub = userNotificationHub) { }
 
   /**
    * Generates a unique, URL-safe 6-character alphanumeric invite code.
@@ -1275,7 +1287,7 @@ export class LeagueService {
    * Transitions a league through its lifecycle state machine.
    */
   public async transitionStatus(leagueId: string, targetStatus: LeagueStatus) {
-    const league = await prisma.league.findUnique({
+    const league = await this.db.league.findUnique({
       where: { id: leagueId },
       include: { startGameweek: true, endGameweek: true },
     });
@@ -1318,7 +1330,7 @@ export class LeagueService {
       }
     }
 
-    return prisma.$transaction(async (tx) => {
+    return this.db.$transaction(async (tx: any) => {
       const updated = await tx.league.update({
         where: { id: leagueId },
         data: { status: targetStatus },
@@ -1353,8 +1365,8 @@ export class LeagueService {
         });
 
         const pairings = LeagueService.generateRoundRobinSchedule(
-          members.map((m) => m.id),
-          gameweeks.map((g) => g.id)
+          members.map((m: { id: string }) => m.id),
+          gameweeks.map((g: { id: number }) => g.id)
         );
         await tx.leagueFixture.createMany({
           data: pairings.map((p) => ({ leagueId, ...p })),
@@ -1882,6 +1894,8 @@ export class LeagueService {
   /**
    * True when a league missed its minimum member threshold and its start
    * gameweek has kicked off (falls back to the deadline when no kickoff is known).
+   * Kept for callers that gate on kickoff; the dead-league worker (issue #509)
+   * cancels at the deadline instead, via isUnderfilledAtDeadline below.
    */
   public static isUnderfilledAfterKickoff(
     league: { currentMembers: number; minMembers: number },
@@ -1896,40 +1910,89 @@ export class LeagueService {
   }
 
   /**
+   * True when a league missed its minimum member threshold and its start
+   * gameweek deadline has been reached. This is the trigger for the automated
+   * dead-league worker (issue #509): cancellation happens at the deadline,
+   * without waiting for the first kickoff that follows it.
+   */
+  public static isUnderfilledAtDeadline(
+    league: { currentMembers: number; minMembers: number },
+    startGameweek: { deadline: Date },
+    now: Date = new Date()
+  ): boolean {
+    return (
+      league.currentMembers < league.minMembers &&
+      now.getTime() >= startGameweek.deadline.getTime()
+    );
+  }
+
+  /**
    * Cancels every UPCOMING league that did not reach minMembers by its start
-   * gameweek kickoff. Returns the IDs of the cancelled leagues.
+   * gameweek deadline, and notifies every joined manager that the league was
+   * cancelled and their full entry fee will be refunded with no fee deducted.
+   * Returns the IDs of the cancelled leagues.
+   *
+   * Idempotent: only UPCOMING leagues are selected and transitionStatus
+   * refuses transitions out of the terminal CANCELLED state, so a league
+   * reaching its deadline twice is cancelled once, notified once, and its
+   * paid members are queued for refund (REFUND_PENDING) exactly once.
    */
   public async cancelUnderfilledLeagues(now: Date = new Date()): Promise<string[]> {
     const leagues = await this.db.league.findMany({
       where: { status: LeagueStatus.UPCOMING },
       include: {
-        startGameweek: {
-          include: {
-            fixtures: {
-              where: { kickoffTime: { not: null } },
-              orderBy: { kickoffTime: "asc" },
-              take: 1,
-            },
-          },
+        startGameweek: true,
+        members: {
+          select: { userId: true, hasPaid: true, paymentStatus: true },
         },
       },
     });
 
     const cancelled: string[] = [];
     for (const league of leagues) {
-      const firstKickoff = league.startGameweek.fixtures[0]?.kickoffTime ?? null;
       if (
-        LeagueService.isUnderfilledAfterKickoff(
+        LeagueService.isUnderfilledAtDeadline(
           league,
-          { deadline: league.startGameweek.deadline, firstKickoff },
+          { deadline: league.startGameweek.deadline },
           now
         )
       ) {
         await this.transitionStatus(league.id, LeagueStatus.CANCELLED);
+        this.notifyLeagueCancelled(league, league.members ?? []);
         cancelled.push(league.id);
       }
     }
     return cancelled;
+  }
+
+  /**
+   * Tells every joined manager their league was cancelled for missing
+   * minMembers at the deadline. Paid managers are told the exact full entry
+   * fee queued for refund; unpaid managers are told no fee was taken.
+   * Delivery is best-effort via the notification hub and never throws.
+   */
+  private notifyLeagueCancelled(
+    league: { id: string; name: string; minMembers: number; currentMembers: number; entryFee: unknown },
+    members: Array<{ userId: string; hasPaid?: boolean; paymentStatus?: PaymentStatus }>
+  ): void {
+    for (const member of members) {
+      const paid =
+        member.hasPaid === true ||
+        member.paymentStatus === PaymentStatus.PAYMENT_CONFIRMED ||
+        member.paymentStatus === PaymentStatus.REFUND_PENDING;
+      const refundAmount = paid ? league.entryFee : 0;
+      this.hub.publish(member.userId, LEAGUE_CANCELLED_EVENT, {
+        leagueId: league.id,
+        leagueName: league.name,
+        minMembers: league.minMembers,
+        currentMembers: league.currentMembers,
+        entryFee: league.entryFee,
+        refundAmount,
+        reason: paid
+          ? `League ${league.name} was cancelled: only ${league.currentMembers} of the required ${league.minMembers} managers joined before the deadline. Your full entry fee of ${league.entryFee} will be refunded with no fee deducted.`
+          : `League ${league.name} was cancelled: only ${league.currentMembers} of the required ${league.minMembers} managers joined before the deadline. No entry fee was taken from you.`,
+      });
+    }
   }
 
   /**
