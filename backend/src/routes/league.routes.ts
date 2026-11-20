@@ -21,10 +21,12 @@ import {
   revokeLeagueInvitation,
   previewLeagueInvitation,
   acceptLeagueInvitation,
+  inviteLeagueMemberByEmail,
 } from "../controllers/league.controller.js";
 import { requireAuth, requirePermission, optionalAuth, requireRole } from "../middleware/authMiddleware.js";
 import { Permission, UserRole } from "../types/index.js";
 import { authenticatedRateLimiter, mutationRateLimiter } from "../middleware/rateLimiter.js";
+import { leagueInviteRateLimiter } from "../middleware/leagueInviteRateLimiter.js";
 import { primaryReads } from "../middleware/readConsistency.js";
 import { getChatMessages, postChatMessage } from "../controllers/chat.controller.js";
 import { requireDepositRangeProof } from "../middleware/depositRangeProof.js";
@@ -88,6 +90,15 @@ router.delete(
   requireAuth,
   requirePermission(Permission.LEAGUE_MANAGE_OWN),
   revokeLeagueInvitation
+);
+
+// POST /api/v1/leagues/:id/invite (Protected: creator only) — email invite (issue #495)
+router.post(
+  "/:id/invite",
+  requireAuth,
+  requirePermission(Permission.LEAGUE_MANAGE_OWN),
+  leagueInviteRateLimiter,
+  inviteLeagueMemberByEmail
 );
 
 // League chat (Protected: creator and members only). History is read from the

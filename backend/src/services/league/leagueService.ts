@@ -113,6 +113,9 @@ export class LeagueInvitationError extends Error {
 export const INVITATION_DEFAULT_TTL_HOURS = 72;
 export const INVITATION_MAX_TTL_HOURS = 24 * 30;
 
+/** Permissive RFC-5322-ish email check; the mail provider rejects anything it can't deliver. */
+const LEAGUE_INVITE_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 export const LEAGUE_SEARCH_MAX_PAGE_SIZE = 50;
 const LEAGUE_SEARCH_DEFAULT_PAGE_SIZE = 20;
 const LEAGUE_SORT_FIELDS: Record<LeagueSortField, string> = {
@@ -855,6 +858,26 @@ export class LeagueService {
       usesCount: invitation.usesCount,
       createdAt: invitation.createdAt,
     };
+  }
+
+  /**
+   * Creates a single-use invitation addressed to a specific email, for the
+   * email-invite flow. Returns the invitation plus the league fields the
+   * email template needs. Creator only.
+   */
+  public async createInvitationEmail(leagueId: string, requesterUserId: string, email: string) {
+    const normalizedEmail = typeof email === "string" ? email.trim() : "";
+    if (!LEAGUE_INVITE_EMAIL_PATTERN.test(normalizedEmail)) {
+      throw new LeagueValidationError("A valid recipient email address is required");
+    }
+
+    const invitation = await this.createInvitation(leagueId, requesterUserId);
+    const league = await this.db.league.findUnique({
+      where: { id: leagueId },
+      select: { name: true, entryFee: true },
+    });
+
+    return { invitation, email: normalizedEmail, league: league as { name: string; entryFee: number } };
   }
 
   /**
