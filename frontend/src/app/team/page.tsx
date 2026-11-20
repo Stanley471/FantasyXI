@@ -17,11 +17,17 @@ import {
 } from "@/lib/offlineQueue";
 import { registerServiceWorker } from "@/lib/pushNotifications";
 import { useOnlineStatus } from "@/lib/useOnlineStatus";
-import { Squad, Player, Position, SQUAD_RULES, ChipType, SquadChipUsage } from "@/types";
+import { Squad, Player, Position, SQUAD_RULES, ChipType, SquadChipUsage, Fixture, Gameweek, PlayerGameweekStats } from "@/types";
 import { Pitch } from "@/components/pitch/Pitch";
 import { Bench } from "@/components/pitch/Bench";
 import { BudgetBar } from "@/components/team/BudgetBar";
 import { CountdownTimer } from "@/components/team/CountdownTimer";
+import { PlayerFormSparkline } from "@/components/team/PlayerFormSparkline";
+import {
+  opponentByGameweekId,
+  toFormTrendPoints,
+  type FormTrendPoint,
+} from "@/lib/sparkline";
 import { PlayerPickerModal } from "@/components/team/PlayerPickerModal";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { validateCompleteSquad, detectFormation } from "@/lib/formation";
@@ -284,6 +290,53 @@ export default function TeamPage() {
 
   // Selected player object
   const selectedPlayer = players.find((p) => p.playerId === selectedPlayerId);
+
+  // Form trend for the Player Details modal: last-5-gameweeks points plus the
+  // opponent faced each gameweek, from the player detail and fixtures APIs.
+  // Each fetch degrades independently so a fixtures failure still shows points.
+  // No state is set synchronously here: `formPlayerId` records which player
+  // the shown trend belongs to (async callbacks only), and loading is derived
+  // from whether it matches the selected player, so switching players shows
+  // the skeleton instead of the previous player's trend.
+  const [playerFormTrend, setPlayerFormTrend] = useState<FormTrendPoint[]>([]);
+  const [formPlayerId, setFormPlayerId] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!selectedPlayer) return;
+    let cancelled = false;
+    const playerId = selectedPlayer.playerId;
+    const teamId = selectedPlayer.player.teamId;
+    const playerRequest = api
+      .get<{
+        success: boolean;
+        data: Player & {
+          gameweekStats?: Array<PlayerGameweekStats & { gameweek?: Gameweek }>;
+        };
+      }>(`/api/v1/players/${playerId}`)
+      .catch(() => null);
+    const fixturesRequest = api
+      .get<{ success: boolean; data: Fixture[] }>(
+        `/api/v1/fixtures?teamId=${teamId}`
+      )
+      .catch(() => null);
+    Promise.all([playerRequest, fixturesRequest]).then(
+      ([playerRes, fixtureRes]) => {
+        if (cancelled) return;
+        const stats = playerRes?.data?.gameweekStats ?? [];
+        const fixtures = Array.isArray(fixtureRes?.data) ? fixtureRes.data : [];
+        setPlayerFormTrend(
+          toFormTrendPoints(stats, opponentByGameweekId(fixtures, teamId))
+        );
+        setFormPlayerId(playerId);
+      }
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedPlayer]);
+
+  const isPlayerFormLoading =
+    selectedPlayer !== undefined && formPlayerId !== selectedPlayer.playerId;
 
   // DND Handlers
   const sensors = useSensors(
@@ -915,6 +968,9 @@ export default function TeamPage() {
                     {selectedPlayer.player.team?.shortName || "PL"} &bull; £{(selectedPlayer.player.price / 10).toFixed(1)}m &bull; {selectedPlayer.player.totalPoints} pts
                   </div>
                 </div>
+              </div>
+              <div className="px-5 pt-4">
+                <PlayerFormSparkline points={playerFormTrend} loading={isPlayerFormLoading} />
               </div>
               <div className="p-5 grid gap-2.5">
                 {selectedPlayer.isStarter && (
