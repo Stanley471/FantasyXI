@@ -47,6 +47,7 @@ export interface ValidatedSquadResult {
 }
 
 export const MIN_SQUAD_NAME_LENGTH = 3;
+export const MAX_SQUAD_NAME_LENGTH = 30;
 
 export class SquadValidator {
   /**
@@ -63,6 +64,11 @@ export class SquadValidator {
     if (sanitized.length < MIN_SQUAD_NAME_LENGTH) {
       throw new SquadValidationError(
         `Squad name must be at least ${MIN_SQUAD_NAME_LENGTH} characters`
+      );
+    }
+    if (sanitized.length > MAX_SQUAD_NAME_LENGTH) {
+      throw new SquadValidationError(
+        `Squad name must not exceed ${MAX_SQUAD_NAME_LENGTH} characters`
       );
     }
     return sanitized;

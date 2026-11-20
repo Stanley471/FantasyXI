@@ -522,6 +522,9 @@ export interface AuthResponse {
 // Squad composition constants (mirrors backend)
 // ============================================================
 
+/** Mirrors MAX_SQUAD_NAME_LENGTH in backend/src/services/squad/squadValidator.ts */
+export const SQUAD_NAME_MAX_LENGTH = 30;
+
 export const SQUAD_RULES = {
   TOTAL_PLAYERS: 15,
   STARTERS: 11,
