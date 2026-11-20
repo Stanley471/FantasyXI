@@ -2071,13 +2071,17 @@ export class LeagueService {
       ...redacted,
       // The creator's username is public on the league page; an anonymous
       // creator shows as "Manager #XXXX" to everyone but themselves/admins.
-      creator: {
-        ...redacted.creator,
-        username: displayUsername(
-          { id: redacted.creator.id, username: redacted.creator.username, isAnonymous: redacted.creator.isAnonymous },
-          viewer
-        ),
-      },
+      // The creator include is optional; stay defensive so a row without
+      // it can never crash the league page.
+      creator: redacted.creator
+        ? {
+            ...redacted.creator,
+            username: displayUsername(
+              { id: redacted.creator.id, username: redacted.creator.username, isAnonymous: redacted.creator.isAnonymous },
+              viewer
+            ),
+          }
+        : redacted.creator,
       prizeDistribution,
     };
   }
@@ -2328,13 +2332,17 @@ export class LeagueService {
         const redacted = LeagueService.redactForViewer(league, viewerId);
         return {
           ...redacted,
-          creator: {
-            ...redacted.creator,
-            username: displayUsername(
-              { id: redacted.creator.id, username: redacted.creator.username, isAnonymous: redacted.creator.isAnonymous },
-              viewer
-            ),
-          },
+          // The creator include is optional; stay defensive so a row without
+          // it can never crash league search.
+          creator: redacted.creator
+            ? {
+                ...redacted.creator,
+                username: displayUsername(
+                  { id: redacted.creator.id, username: redacted.creator.username, isAnonymous: redacted.creator.isAnonymous },
+                  viewer
+                ),
+              }
+            : redacted.creator,
         };
       }),
       total,
