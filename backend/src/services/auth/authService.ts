@@ -29,6 +29,7 @@ import {
   AccountSignalRecorder,
 } from "../security/accountSignals.js";
 import { webAuthnService as defaultWebAuthnService, WebAuthnService } from "./webAuthnService.js";
+import { managerAliasForUserId } from "../privacy/displayName.js";
 
 /** Request-derived context used for anomalous-login detection (issues #117, #331). */
 export interface AuthRequestContext {
@@ -85,6 +86,14 @@ export class AuthNotFoundError extends Error {
   }
 }
 
+/** The caller may not change another manager's account settings. */
+export class AuthForbiddenError extends Error {
+  constructor(message: string = "You do not have permission to perform this action") {
+    super(message);
+    this.name = "AuthForbiddenError";
+  }
+}
+
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const BCRYPT_SALT_ROUNDS = 10;
 const MIN_PASSWORD_LENGTH = 8;
@@ -95,6 +104,7 @@ export function toSafeUser(user: {
   username: string;
   name?: string | null;
   role?: UserRole | string | null;
+  isAnonymous?: boolean | null;
   passwordHash?: string | null;
   googleId?: string | null;
   createdAt: Date;
@@ -106,6 +116,8 @@ export function toSafeUser(user: {
     username: user.username,
     name: user.name ?? null,
     role: (user.role as UserRole | undefined) ?? UserRole.USER,
+    isAnonymous: Boolean(user.isAnonymous),
+    anonymousAlias: managerAliasForUserId(user.id),
     // Which sign-in methods the account can use; never exposes the secrets themselves
     authProviders: {
       password: Boolean(user.passwordHash),
@@ -684,6 +696,35 @@ export class AuthService {
     const updated = await this.db.user.update({
       where: { id: userId },
       data: { passwordHash },
+    });
+    return toSafeUser(updated);
+  }
+
+  /**
+   * Flips the leaderboard anonymization toggle (issue #511).
+   *
+   * Only the account owner themselves or a platform admin may change the
+   * flag; any other caller gets a 403, so one manager can never unmask or
+   * mask another manager. The flag takes effect on the next standings read.
+   */
+  public async updatePrivacySettings(
+    actor: { id: string; role?: UserRole | string | null },
+    targetUserId: string,
+    isAnonymous: unknown
+  ): Promise<SafeUser> {
+    if (typeof isAnonymous !== "boolean") {
+      throw new AuthValidationError("isAnonymous must be a boolean");
+    }
+    if (actor.id !== targetUserId && actor.role !== UserRole.ADMIN) {
+      throw new AuthForbiddenError("Only the account owner or a platform admin can change privacy settings");
+    }
+    const user = await this.db.user.findUnique({ where: { id: targetUserId } });
+    if (!user) {
+      throw new AuthNotFoundError("User not found");
+    }
+    const updated = await this.db.user.update({
+      where: { id: targetUserId },
+      data: { isAnonymous },
     });
     return toSafeUser(updated);
   }

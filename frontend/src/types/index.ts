@@ -69,6 +69,10 @@ export interface User {
   username: string;
   name?: string | null;
   role?: "USER" | "MODERATOR" | "ADMIN";
+  /** True when the manager hides behind a "Manager #XXXX" alias in public standings (issue #511). */
+  isAnonymous?: boolean;
+  /** Deterministic public alias shown when isAnonymous is true. */
+  anonymousAlias?: string;
   /** Sign-in methods linked to the account; the same user whichever one is used */
   authProviders?: {
     password: boolean;

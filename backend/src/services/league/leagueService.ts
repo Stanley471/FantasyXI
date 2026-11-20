@@ -23,6 +23,11 @@ import {
   type UserNotificationHub,
 } from "../notifications/userNotificationHub.js";
 import {
+  displayUsername,
+  normalizeViewer,
+  type PrivacyViewer,
+} from "../privacy/displayName.js";
+import {
   parseLeagueScoringConfig,
   resolveLeagueScoringConfig,
 } from "../../models/leagueScoringConfig.js";
@@ -1026,7 +1031,11 @@ export class LeagueService {
    * 2. Highest Single Gameweek Score in that window (descending)
    * 3. Earliest joined timestamp (ascending)
    */
-  public async getLeagueStandings(leagueId: string, gameweekId?: number): Promise<{
+  public async getLeagueStandings(
+    leagueId: string,
+    gameweekId?: number,
+    viewerOrId?: string | PrivacyViewer
+  ): Promise<{
     league: {
       id: string;
       name: string;
@@ -1040,6 +1049,9 @@ export class LeagueService {
     completedGameweeks: Array<{ id: number; name: string }>;
     prizeDistribution: ReturnType<typeof PrizeService.calculatePrizeDistribution>;
   }> {
+    // Anonymous managers show as "Manager #XXXX" to everyone except
+    // themselves and platform admins (issue #511).
+    const viewer = normalizeViewer(viewerOrId);
     const league = await this.db.league.findUnique({
       where: { id: leagueId },
       include: {
@@ -1047,7 +1059,7 @@ export class LeagueService {
         endGameweek: true,
         members: {
           include: {
-            user: { select: { id: true, username: true } },
+            user: { select: { id: true, username: true, isAnonymous: true } },
             squad: { select: { id: true, name: true } },
           },
         },
@@ -1136,7 +1148,7 @@ export class LeagueService {
       const entries = league.members.map((member: {
         userId: string;
         squadId: string;
-        user: { username: string };
+        user: { username: string; isAnonymous?: boolean | null };
         squad: { name: string };
         status: MembershipStatus;
         joinedAt: Date;
@@ -1146,7 +1158,10 @@ export class LeagueService {
         );
         return {
           userId: member.userId,
-          username: member.user.username,
+          username: displayUsername(
+            { id: member.userId, username: member.user.username, isAnonymous: member.user.isAnonymous },
+            viewer
+          ),
           squadId: member.squadId,
           squadName: member.squad.name,
           membershipStatus: member.status,
@@ -1657,14 +1672,15 @@ export class LeagueService {
   /**
    * Returns the official H2H table for a head-to-head league.
    */
-  public async getH2HStandings(leagueId: string): Promise<H2HStandingsEntry[]> {
+  public async getH2HStandings(leagueId: string, viewerOrId?: string | PrivacyViewer): Promise<H2HStandingsEntry[]> {
+    const viewer = normalizeViewer(viewerOrId);
     const league = await this.db.league.findUnique({
       where: { id: leagueId },
       include: {
         members: {
           where: { status: MembershipStatus.ACTIVE },
           include: {
-            user: { select: { username: true } },
+            user: { select: { username: true, isAnonymous: true } },
             squad: { select: { name: true } },
           },
         },
@@ -1682,7 +1698,10 @@ export class LeagueService {
       league.members.map((m: any) => ({
         memberId: m.id,
         userId: m.userId,
-        username: m.user.username,
+        username: displayUsername(
+          { id: m.userId, username: m.user.username, isAnonymous: m.user.isAnonymous },
+          viewer
+        ),
         squadName: m.squad.name,
         matchesWon: m.matchesWon,
         matchesDrawn: m.matchesDrawn,
@@ -2027,11 +2046,12 @@ export class LeagueService {
    * Retrieves a single league with members, gameweeks, and creator info.
    * The invite code of a private league is only revealed to its creator.
    */
-  public async getLeagueById(leagueId: string, viewerId?: string) {
+  public async getLeagueById(leagueId: string, viewerOrId?: string | PrivacyViewer) {
+    const viewer = normalizeViewer(viewerOrId);
     const league = await this.db.league.findUnique({
       where: { id: leagueId },
       include: {
-        creator: { select: { id: true, username: true } },
+        creator: { select: { id: true, username: true, isAnonymous: true } },
         startGameweek: true,
         endGameweek: true,
       },
@@ -2046,14 +2066,25 @@ export class LeagueService {
       Number(league.entryFee)
     );
 
+    const redacted = LeagueService.redactForViewer(league, viewer?.id);
     return {
-      ...LeagueService.redactForViewer(league, viewerId),
+      ...redacted,
+      // The creator's username is public on the league page; an anonymous
+      // creator shows as "Manager #XXXX" to everyone but themselves/admins.
+      creator: {
+        ...redacted.creator,
+        username: displayUsername(
+          { id: redacted.creator.id, username: redacted.creator.username, isAnonymous: redacted.creator.isAnonymous },
+          viewer
+        ),
+      },
       prizeDistribution,
     };
   }
 
   /** Retrieves one page without loading the full membership relation. */
-  public async getLeagueMembers(leagueId: string, page: number, limit: number) {
+  public async getLeagueMembers(leagueId: string, page: number, limit: number, viewerOrId?: string | PrivacyViewer) {
+    const viewer = normalizeViewer(viewerOrId);
     const league = await this.db.league.findUnique({
       where: { id: leagueId },
       select: { id: true },
@@ -2068,7 +2099,7 @@ export class LeagueService {
       this.db.leagueMember.findMany({
         where: { leagueId },
         include: {
-          user: { select: { id: true, username: true } },
+          user: { select: { id: true, username: true, isAnonymous: true } },
           squad: { select: { id: true, name: true } },
         },
         orderBy: [{ joinedAt: "asc" }, { id: "asc" }],
@@ -2079,7 +2110,22 @@ export class LeagueService {
     ]);
 
     return {
-      members,
+      members: members.map((member: any) =>
+        // The include always carries the user; stay defensive so a partial
+        // row can never crash the member list.
+        member.user
+          ? {
+              ...member,
+              user: {
+                ...member.user,
+                username: displayUsername(
+                  { id: member.user.id, username: member.user.username, isAnonymous: member.user.isAnonymous },
+                  viewer
+                ),
+              },
+            }
+          : member
+      ),
       total,
       page,
       limit,
@@ -2251,8 +2297,10 @@ export class LeagueService {
    */
   public async getLeagues(
     filters: LeagueSearchFilters = {},
-    viewerId?: string
+    viewerOrId?: string | PrivacyViewer
   ): Promise<LeagueSearchResult<any>> {
+    const viewer = normalizeViewer(viewerOrId);
+    const viewerId = viewer?.id;
     const page = filters.page ?? 1;
     const pageSize = Math.min(filters.pageSize ?? LEAGUE_SEARCH_DEFAULT_PAGE_SIZE, LEAGUE_SEARCH_MAX_PAGE_SIZE);
     const sortField = LEAGUE_SORT_FIELDS[filters.sortBy ?? "newest"];
@@ -2263,7 +2311,7 @@ export class LeagueService {
       this.db.league.findMany({
         where,
         include: {
-          creator: { select: { id: true, username: true } },
+          creator: { select: { id: true, username: true, isAnonymous: true } },
           startGameweek: { select: { id: true, name: true, deadline: true } },
           endGameweek: { select: { id: true, name: true } },
         },
@@ -2276,7 +2324,19 @@ export class LeagueService {
     ]);
 
     return {
-      items: items.map((league: any) => LeagueService.redactForViewer(league, viewerId)),
+      items: items.map((league: any) => {
+        const redacted = LeagueService.redactForViewer(league, viewerId);
+        return {
+          ...redacted,
+          creator: {
+            ...redacted.creator,
+            username: displayUsername(
+              { id: redacted.creator.id, username: redacted.creator.username, isAnonymous: redacted.creator.isAnonymous },
+              viewer
+            ),
+          },
+        };
+      }),
       total,
       page,
       pageSize,

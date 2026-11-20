@@ -164,6 +164,9 @@ model User {
   googleId     String?  @unique @map("google_id")
   countryCode  String?  @map("country_code")
   role         UserRole @default(USER)
+  // Hides the manager's username behind a deterministic "Manager #XXXX"
+  // alias in public standings when true (issue #511).
+  isAnonymous  Boolean  @default(false) @map("is_anonymous")
   referrerId   String?  @map("referrer_id")
   referralCode String?  @unique @map("referral_code")
   createdAt    DateTime @default(now()) @map("created_at")

@@ -8,6 +8,7 @@ import { api } from "@/lib/api";
 import { Squad, League, GameweekHistoryEntry } from "@/types";
 import { Button } from "@/components/ui/Button";
 import { SignInMethods } from "@/components/auth/SignInMethods";
+import { PrivacySettings } from "@/components/profile/PrivacySettings";
 import { ActiveSessionsManager } from "@/components/profile/ActiveSessionsManager";
 import {
   IconUser,
@@ -228,6 +229,9 @@ export default function ProfilePage() {
 
       {/* Email/password and Google sign-in management */}
       <SignInMethods />
+
+      {/* Leaderboard anonymization toggle (Issue #511) */}
+      <PrivacySettings />
 
       {/* Active multi-device sessions & remote invalidation (Issue #342) */}
       <ActiveSessionsManager />
