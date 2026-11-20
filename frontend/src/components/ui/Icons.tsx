@@ -199,6 +199,25 @@ export const CloseIcon: React.FC<IconProps> = ({ size = 20, className = "", ...p
   </svg>
 );
 
+export const MenuIcon: React.FC<IconProps> = ({ size = 20, className = "", ...props }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+    {...props}
+  >
+    <path d="M4 6h16" />
+    <path d="M4 12h16" />
+    <path d="M4 18h16" />
+  </svg>
+);
+
 export const ChevronRightIcon: React.FC<IconProps> = ({ size = 20, className = "", ...props }) => (
   <svg
     width={size}
@@ -604,6 +623,7 @@ export {
   TrendingUpIcon as IconTrendingUp,
   BellIcon as IconBell,
   FootballIcon as IconSun,
+  MenuIcon as IconMenu,
 };
 
 
