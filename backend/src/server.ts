@@ -38,6 +38,8 @@ import {
   createSorobanEventIngestionService,
   type SorobanEventIngestionService,
 } from "./services/financial/sorobanEventIngestionService.js";
+import { metricsMiddleware } from "./middleware/metricsMiddleware.js";
+import { exportMetrics, exportMetricsJson } from "./controllers/metrics.controller.js";
 
 dotenv.config();
 
@@ -53,6 +55,9 @@ app.set("trust proxy", 1);
 // ============================================================
 // Middleware
 // ============================================================
+
+// Metrics collection middleware (must be early to capture all requests)
+app.use(metricsMiddleware);
 
 app.use(
   cors({
@@ -160,6 +165,28 @@ app.get(
       data: { degraded: fplClient.isDegraded(), ...fplClient.getTelemetry() },
       timestamp: new Date().toISOString(),
     });
+  }
+);
+
+// ============================================================
+// Metrics Endpoint (Prometheus)
+// ============================================================
+
+// Protected by service key authentication via requireAuth
+app.get(
+  "/metrics",
+  requireAuth,
+  async (req: Request, res: Response, next: NextFunction) => {
+    await exportMetrics(req, res, next);
+  }
+);
+
+// Metrics debug endpoint (JSON format)
+app.get(
+  "/metrics/json",
+  requireAuth,
+  async (req: Request, res: Response, next: NextFunction) => {
+    await exportMetricsJson(req, res, next);
   }
 );
 
