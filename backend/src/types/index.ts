@@ -345,6 +345,8 @@ export interface LeagueStandingsEntry {
     points: number;
   }>;
   joinedAt: Date;
+  /** Which official rule (if any) broke a tie on totalPoints with another squad. */
+  tieBreak?: "transfers" | "goalsScored" | "goalsConceded" | null;
 }
 
 export interface H2HStandingsEntry {
