@@ -11,6 +11,7 @@ import { runProofOfReserveJob } from "../jobs/proofOfReserve.js";
 import { applyRetroactiveBpsAdjustments } from "../jobs/retroactiveBpsAdjustments.js";
 import { jwtKeyRotationService } from "../services/auth/jwtKeyRotationService.js";
 import { auditLeaguesForCollusion } from "../jobs/leagueIntegrityAudit.js";
+import { sendGameweekDeadlineReminders } from "../jobs/deadlineReminders.js";
 import {
   executeFplSyncTask,
   FPL_SYNC_DLQ_NAME,
@@ -72,6 +73,8 @@ export const JOB_DEFINITIONS: JobDefinition[] = [
   { name: "jwt-key-rotation", cron: "*/15 * * * *", handler: () => jwtKeyRotationService.rotate() },
   // League integrity and collusion detection (issue #328)
   { name: "league-collusion-audit", cron: "0 */6 * * *", handler: () => auditLeaguesForCollusion() },
+  // Send deadline reminder emails 6 hours before gameweek deadline
+  { name: "deadline-reminders", cron: "* * * * *", handler: () => sendGameweekDeadlineReminders() },
 ];
 
 const QUEUE_OPTIONS = {

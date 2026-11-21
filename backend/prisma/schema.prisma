@@ -166,6 +166,8 @@ model User {
   role         UserRole @default(USER)
   referrerId   String?  @map("referrer_id")
   referralCode String?  @unique @map("referral_code")
+  /// User opted-in to receive deadline reminder emails 6 hours before gameweek deadline
+  deadlineReminder Boolean @default(true) @map("deadline_reminder")
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 
@@ -190,6 +192,7 @@ model User {
   collusionFlagsAsA    LeagueCollusionFlag[] @relation("FlagAccountA")
   collusionFlagsAsB    LeagueCollusionFlag[] @relation("FlagAccountB")
   suspensionAppeals    SuspensionAppeal[]
+  deadlineReminders    GameweekDeadlineReminder[]
 
   @@map("users")
 }
@@ -222,6 +225,23 @@ model Wallet {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("wallets")
+}
+
+/// Tracks deadline reminder emails sent to users for a specific gameweek.
+/// Ensures that each user receives the notification at most once per gameweek.
+model GameweekDeadlineReminder {
+  id         String   @id @default(uuid())
+  userId     String   @map("user_id")
+  gameweekId Int      @map("gameweek_id")
+  sentAt     DateTime @default(now()) @map("sent_at")
+
+  // Relations
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gameweek Gameweek @relation(fields: [gameweekId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, gameweekId])
+  @@index([gameweekId, sentAt])
+  @@map("gameweek_deadline_reminders")
 }
 
 /// A Premier League club. Data synced from the FPL API.
@@ -308,6 +328,7 @@ model Gameweek {
   chipCancellations SquadChipCancellation[]
   leagueFixtures  LeagueFixture[]
   matchRatingHistory MatchRatingHistory[]
+  deadlineReminders GameweekDeadlineReminder[]
 
   @@map("gameweeks")
 }
