@@ -12,6 +12,13 @@ import {
 } from "@/components/ui/Icons";
 import { LiveMatchEventsTimeline } from "@/components/live/LiveMatchEventsTimeline";
 
+function fixtureStatus(fixture: Fixture): { label: string; className: string } {
+  if (fixture.finished) return { label: "FT", className: "bg-slate-900 text-white" };
+  if (fixture.started && fixture.minutes === 45) return { label: "HT", className: "bg-amber-100 text-amber-800" };
+  if (fixture.started) return { label: `${fixture.minutes}' LIVE`, className: "bg-rose-100 text-rose-700 animate-pulse" };
+  return { label: "UPCOMING", className: "bg-sky-100 text-sky-700" };
+}
+
 export default function FixturesPage() {
   const [gameweeks, setGameweeks] = useState<Gameweek[]>([]);
   const [selectedGwId, setSelectedGwId] = useState<number | null>(null);
@@ -60,6 +67,8 @@ export default function FixturesPage() {
     }
 
     loadFixtures();
+    const timer = window.setInterval(loadFixtures, 30_000);
+    return () => window.clearInterval(timer);
   }, [selectedGwId]);
 
   const selectedGw = gameweeks.find((g) => g.id === selectedGwId);
@@ -202,6 +211,7 @@ export default function FixturesPage() {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   {dateFixtures.map((fix) => {
                     const kickoff = fix.kickoffTime ? new Date(fix.kickoffTime) : null;
+                    const status = fixtureStatus(fix);
 
                     return (
                       <div
@@ -211,7 +221,7 @@ export default function FixturesPage() {
                         {/* Home Team */}
                         <div className="flex-1 flex items-center gap-3">
                           <div className="w-8 h-8 rounded-xl bg-purple-50 border border-purple-100 flex items-center justify-center font-bold text-xs font-mono text-[#37003c]">
-                            {fix.homeTeam?.shortName || "PL"}
+                            {fix.homeTeam?.logoUrl ? <img src={fix.homeTeam.logoUrl} alt="" className="w-6 h-6 object-contain" /> : (fix.homeTeam?.shortName || "PL")}
                           </div>
                           <span className="font-bold text-xs sm:text-sm text-slate-900 truncate">
                             {fix.homeTeam?.name || `Team ${fix.homeTeamId}`}
@@ -225,8 +235,8 @@ export default function FixturesPage() {
                               <span className="font-mono font-black text-base text-slate-900 tabular-nums tracking-wider">
                                 {fix.homeScore ?? 0} - {fix.awayScore ?? 0}
                               </span>
-                              <span className="text-[10px] text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded font-mono mt-1 font-bold uppercase">
-                                {fix.finished ? "Full Time" : `${fix.minutes}'`}
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono mt-1 font-bold uppercase ${status.className}`}>
+                                {status.label}
                               </span>
                             </div>
                           ) : (
@@ -240,6 +250,7 @@ export default function FixturesPage() {
                                   : "TBD"}
                               </span>
                               <span className="text-[10px] text-slate-400 mt-0.5">Kickoff</span>
+                              <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold mt-1 ${status.className}`}>{status.label}</span>
                             </div>
                           )}
                         </div>
@@ -250,7 +261,7 @@ export default function FixturesPage() {
                             {fix.awayTeam?.name || `Team ${fix.awayTeamId}`}
                           </span>
                           <div className="w-8 h-8 rounded-xl bg-purple-50 border border-purple-100 flex items-center justify-center font-bold text-xs font-mono text-[#37003c]">
-                            {fix.awayTeam?.shortName || "PL"}
+                            {fix.awayTeam?.logoUrl ? <img src={fix.awayTeam.logoUrl} alt="" className="w-6 h-6 object-contain" /> : (fix.awayTeam?.shortName || "PL")}
                           </div>
                         </div>
                       </div>

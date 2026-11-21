@@ -1129,6 +1129,19 @@ model CryptoAuditLogEntry {
   @@map("crypto_audit_log")
 }
 
+/// Definitive session revocation record checked only after a Redis Bloom hit.
+model RevokedSession {
+  id        String   @id @default(uuid())
+  sessionId String   @unique @map("session_id")
+  userId    String?  @map("user_id")
+  reason    String?
+  revokedAt DateTime @default(now()) @map("revoked_at")
+  expiresAt DateTime @map("expires_at")
+
+  @@index([expiresAt])
+  @@map("revoked_sessions")
+}
+
 /// An on-chain transaction whose finality is tracked by TransactionCoordinatorService.
 /// State lives here (not in memory) so polling resumes after a backend restart.
 model CoordinatedTransaction {

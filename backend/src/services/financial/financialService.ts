@@ -16,6 +16,7 @@ import { stellarConfig } from "../../config/stellar.js";
 import { StellarService, stellarService } from "./stellarService.js";
 import { PrizeService } from "../league/prizeService.js";
 import { createSettlementProof } from "./settlementProof.js";
+import { payoutAuditAnchorService } from "../audit/payoutAuditAnchorService.js";
 import { EmailService, emailService } from "../email/emailService.js";
 import {
   PayoutDeadLetterService,
@@ -1032,6 +1033,7 @@ export class FinancialService {
       await tx.coordinatedTransaction.updateMany({ where: { settlementKey: leagueId },
         data: { status: "SUCCESS", ledgerSeq, finalizedAt: confirmedAt, transactionId: ledgerRows[0].id } });
     });
+    await payoutAuditAnchorService.recordSettlement(txHash);
     return { leagueId, contractLeagueId: FinancialService.toContractLeagueId(leagueId).toString(),
       stellarTxHash: txHash, ledgerSeq, winnerTransactionCount: plan.winners.length, platformFee: plan.platformFee };
   }

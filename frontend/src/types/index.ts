@@ -99,6 +99,8 @@ export interface Player {
   teamId: number;
   team?: Team;
   price: number;
+  priceDelta?: number;
+  priceChangedAt?: string | null;
   totalPoints: number;
   minutesPlayed: number;
   goalsScored: number;
