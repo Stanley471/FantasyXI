@@ -1,5 +1,26 @@
 import React from "react";
 import { Position, LeagueStatus, MembershipStatus } from "@/types";
+import {
+  PositionBadge,
+  POSITION_COLOR_TOKENS,
+  getPositionColorToken,
+  normalizePositionCode,
+  calculateContrastRatio,
+  type PositionBadgeProps,
+  type PositionBadgeCode,
+  type PositionColorToken,
+} from "@/components/ui/PositionBadge";
+
+export {
+  PositionBadge,
+  POSITION_COLOR_TOKENS,
+  getPositionColorToken,
+  normalizePositionCode,
+  calculateContrastRatio,
+  type PositionBadgeProps,
+  type PositionBadgeCode,
+  type PositionColorToken,
+};
 
 interface BadgeProps {
   children?: React.ReactNode;
@@ -33,60 +54,6 @@ export const Badge: React.FC<BadgeProps> = ({
       {children}
     </span>
   );
-};
-
-export const PositionBadge: React.FC<{ position: Position | string; size?: "sm" | "md" }> = ({
-  position,
-  size = "sm",
-}) => {
-  switch (position) {
-    case Position.GKP:
-    case "GKP":
-      return (
-        <span
-          className={`inline-flex items-center font-bold uppercase rounded ${
-            size === "sm" ? "px-1.5 py-0.5 text-[10px]" : "px-2 py-0.5 text-xs"
-          } bg-amber-500/20 text-amber-300 border border-amber-500/30`}
-        >
-          GKP
-        </span>
-      );
-    case Position.DEF:
-    case "DEF":
-      return (
-        <span
-          className={`inline-flex items-center font-bold uppercase rounded ${
-            size === "sm" ? "px-1.5 py-0.5 text-[10px]" : "px-2 py-0.5 text-xs"
-          } bg-sky-500/20 text-sky-300 border border-sky-500/30`}
-        >
-          DEF
-        </span>
-      );
-    case Position.MID:
-    case "MID":
-      return (
-        <span
-          className={`inline-flex items-center font-bold uppercase rounded ${
-            size === "sm" ? "px-1.5 py-0.5 text-[10px]" : "px-2 py-0.5 text-xs"
-          } bg-emerald-500/20 text-emerald-300 border border-emerald-500/30`}
-        >
-          MID
-        </span>
-      );
-    case Position.FWD:
-    case "FWD":
-      return (
-        <span
-          className={`inline-flex items-center font-bold uppercase rounded ${
-            size === "sm" ? "px-1.5 py-0.5 text-[10px]" : "px-2 py-0.5 text-xs"
-          } bg-rose-500/20 text-rose-300 border border-rose-500/30`}
-        >
-          FWD
-        </span>
-      );
-    default:
-      return <Badge size={size}>{position}</Badge>;
-  }
 };
 
 export const StatusBadge: React.FC<{ status: LeagueStatus | MembershipStatus | string }> = ({

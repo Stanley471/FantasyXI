@@ -4,6 +4,7 @@ import React, { useEffect } from "react";
 import { LivePlayerEvent, LiveStandingsEntry } from "@/types";
 import { IconClose } from "@/components/ui/Icons";
 import { LivePitchCanvas } from "@/components/pitch/LivePitchCanvas";
+import { PositionBadge } from "@/components/ui/PositionBadge";
 
 export interface LiveSquadModalProps {
   entry: LiveStandingsEntry;
@@ -28,7 +29,9 @@ export const LiveSquadModal: React.FC<LiveSquadModalProps> = ({ entry, events, o
 
   const renderRow = (p: LiveStandingsEntry["lineup"][number], muted = false) => (
     <tr key={p.playerId} className={muted ? "text-slate-500" : "text-slate-200"}>
-      <td className="py-1.5 pr-2 text-[10px] font-mono text-slate-500">{p.position}</td>
+      <td className="py-1.5 pr-2">
+        <PositionBadge position={p.position} size="sm" />
+      </td>
       <td className="py-1.5 pr-2">
         <span className="font-semibold">{p.name}</span>
         <span className="text-[10px] text-slate-500 ml-1">{p.teamShortName}</span>

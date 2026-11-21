@@ -9,6 +9,7 @@ import { Squad, League, GameweekHistoryEntry } from "@/types";
 import { Button } from "@/components/ui/Button";
 import { SignInMethods } from "@/components/auth/SignInMethods";
 import { ActiveSessionsManager } from "@/components/profile/ActiveSessionsManager";
+import { MultiChainWalletLinker } from "@/components/profile/MultiChainWalletLinker";
 import {
   IconUser,
   IconFootball,
@@ -228,6 +229,9 @@ export default function ProfilePage() {
 
       {/* Email/password and Google sign-in management */}
       <SignInMethods />
+
+      {/* Multi-chain crypto wallet account linker & session recovery (Issue #426) */}
+      <MultiChainWalletLinker />
 
       {/* Active multi-device sessions & remote invalidation (Issue #342) */}
       <ActiveSessionsManager />

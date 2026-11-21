@@ -49,7 +49,14 @@ describe("CopyButton", () => {
     assert.equal(button.getAttribute("aria-label"), "Copy invitation link");
   });
 
-  it("copies the full URL and shows transient feedback", async () => {
+  it("copies the full URL, triggers toast notification, and announces confirmation to screen readers", async () => {
+    const toastEvents: Array<{ message: string; type: string }> = [];
+    const listener = (e: Event) => {
+      const detail = (e as CustomEvent<{ message: string; type: string }>).detail;
+      if (detail) toastEvents.push(detail);
+    };
+    dom.window.addEventListener("fantasyxi:toast", listener);
+
     const button = render();
     const status = () => container.querySelector('[role="status"]')!;
     assert.equal(status().getAttribute("aria-live"), "polite");
@@ -61,7 +68,42 @@ describe("CopyButton", () => {
 
     assert.deepEqual(written, [URL_TO_COPY]);
     assert.match(container.textContent ?? "", /Copied!/);
-    assert.equal(status().textContent, "Copied to clipboard!");
+    assert.equal(status().textContent, "Invite link copied to clipboard");
+    assert.equal(toastEvents.length, 1);
+    assert.equal(toastEvents[0].type, "success");
+    assert.equal(toastEvents[0].message, "Invite link copied to clipboard");
+
+    dom.window.removeEventListener("fantasyxi:toast", listener);
+  });
+
+  it("emits an error toast and announces failure when clipboard write rejects", async () => {
+    setGlobal("navigator", {
+      clipboard: {
+        writeText: async () => {
+          throw new Error("Clipboard permission denied");
+        },
+      },
+    });
+    const toastEvents: Array<{ message: string; type: string }> = [];
+    const listener = (e: Event) => {
+      const detail = (e as CustomEvent<{ message: string; type: string }>).detail;
+      if (detail) toastEvents.push(detail);
+    };
+    dom.window.addEventListener("fantasyxi:toast", listener);
+
+    const button = render();
+    const status = () => container.querySelector('[role="status"]')!;
+
+    await act(async () => {
+      button.click();
+    });
+
+    assert.match(container.textContent ?? "", /Copy failed/);
+    assert.equal(status().textContent, "Copy failed");
+    assert.equal(toastEvents.length, 1);
+    assert.equal(toastEvents[0].type, "error");
+
+    dom.window.removeEventListener("fantasyxi:toast", listener);
   });
 });
 
