@@ -472,11 +472,15 @@ export async function setPassword(
       return;
     }
 
-    const user = await authService.setPassword(req.user.id, req.body ?? {});
+    const { user, revokedSessions } = await authService.setPassword(req.user.id, req.body ?? {});
     res.json({
       success: true,
-      message: "Password updated",
+      message:
+        revokedSessions > 0
+          ? `Password updated. Revoked ${revokedSessions} other active session(s).`
+          : "Password updated",
       data: user,
+      revokedSessions,
     });
   } catch (error) {
     if (error instanceof AuthValidationError) {
