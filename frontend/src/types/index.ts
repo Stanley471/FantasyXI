@@ -113,6 +113,17 @@ export interface Player {
   isAvailable: boolean;
 }
 
+export interface Notification {
+  id: string;
+  type: string;
+  title: string;
+  body?: string | null;
+  link?: string | null;
+  isRead: boolean;
+  createdAt: string;
+  readAt?: string | null;
+}
+
 export interface Fixture {
   id: number;
   fplId: number;
