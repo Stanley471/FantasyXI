@@ -17,7 +17,7 @@ import {
 } from "@/lib/offlineQueue";
 import { registerServiceWorker } from "@/lib/pushNotifications";
 import { useOnlineStatus } from "@/lib/useOnlineStatus";
-import { Squad, Player, Position, SQUAD_RULES, ChipType, SquadChipUsage } from "@/types";
+import { Squad, Player, Position, SQUAD_RULES, SQUAD_NAME_MAX_LENGTH, ChipType, SquadChipUsage } from "@/types";
 import { Pitch } from "@/components/pitch/Pitch";
 import { Bench } from "@/components/pitch/Bench";
 import { BudgetBar } from "@/components/team/BudgetBar";
@@ -712,10 +712,20 @@ export default function TeamPage() {
               <input
                 type="text"
                 value={squadName}
-                onChange={(e) => setSquadName(e.target.value)}
+                onChange={(e) => setSquadName(e.target.value.slice(0, SQUAD_NAME_MAX_LENGTH))}
+                maxLength={SQUAD_NAME_MAX_LENGTH}
                 placeholder="My Fantasy XI"
+                aria-describedby="squad-name-counter"
                 className="text-xl sm:text-2xl font-black text-slate-900 bg-transparent border-b border-dashed border-slate-300 hover:border-emerald-600 focus:border-emerald-600 focus:outline-none uppercase tracking-tight"
               />
+              <span
+                id="squad-name-counter"
+                className={`text-[11px] font-mono shrink-0 ${
+                  squadName.length >= SQUAD_NAME_MAX_LENGTH ? "text-rose-500 font-bold" : "text-slate-400"
+                }`}
+              >
+                {squadName.length}/{SQUAD_NAME_MAX_LENGTH}
+              </span>
             </div>
           </div>
 
