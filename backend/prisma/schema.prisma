@@ -671,6 +671,10 @@ model Transaction {
 
   // A batched refund shares one Stellar hash across several members
   @@unique([stellarTxHash, memberId])
+  // Supports cursor-paginated, filtered lookups of a user's own transaction history.
+  @@index([userId, createdAt])
+  @@index([userId, status])
+  @@index([userId, type])
   @@map("transactions")
 }
 
