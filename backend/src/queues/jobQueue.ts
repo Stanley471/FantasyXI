@@ -1,7 +1,7 @@
 import { financialService } from "../services/financial/financialService.js";
 import PgBoss from "pg-boss";
 import { collectMatchdaySyncTasks } from "../jobs/matchdayPolling.js";
-import { lockDueGameweeks } from "../jobs/deadlineLocking.js";
+import { lockDueGameweeksAndRefreshOwnership } from "../jobs/ownershipStatsRefresh.js";
 import { settleCompletedGameweeks } from "../jobs/gameweekSettlement.js";
 import { processLeagueRefunds } from "../jobs/leagueRefunds.js";
 import { sorobanTransactionReplayDaemon } from "../services/financial/sorobanTransactionReplayQueue.js";
@@ -53,7 +53,7 @@ export interface QueueMetrics {
 export const JOB_DEFINITIONS: JobDefinition[] = [
   { name: "settlement-recovery", cron: "* * * * *", handler: () => financialService.recoverPendingSettlements() },
   { name: "matchday-poll", cron: "* * * * *", handler: () => enqueuePendingSyncs() },
-  { name: "deadline-lock", cron: "* * * * *", handler: () => lockDueGameweeks() },
+  { name: "deadline-lock", cron: "* * * * *", handler: () => lockDueGameweeksAndRefreshOwnership() },
   { name: "gameweek-settlement", cron: "*/5 * * * *", handler: () => settleCompletedGameweeks() },
   { name: "league-refunds", cron: "*/5 * * * *", handler: () => processLeagueRefunds() },
   { name: "ledger-delta-audit", cron: "*/5 * * * *", handler: () => ledgerAuditService.runAudit() },

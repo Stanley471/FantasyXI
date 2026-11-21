@@ -5,6 +5,7 @@ import {
   playerAnalyticsEngine,
   PlayerNotFoundError,
 } from "../services/analytics/playerAnalyticsEngine.js";
+import { ownershipStatsService } from "../services/analytics/ownershipStatsService.js";
 
 /**
  * Player Controller.
@@ -354,6 +355,34 @@ export async function getPlayerAnalytics(
       res.status(404).json({ success: false, message: error.message });
       return;
     }
+    next(error);
+  }
+}
+
+/**
+ * GET /api/v1/players/stats/ownership
+ *
+ * Serves the Redis-cached platform-wide ownership/captaincy snapshot
+ * computed by the post-deadline worker (issue #499). Never recomputes on
+ * request, so a cache hit stays well under the 50ms response target.
+ */
+export async function getOwnershipAndCaptaincyStats(
+  _req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const cached = await ownershipStatsService.getCached();
+    if (!cached) {
+      res.status(503).json({
+        success: false,
+        message: "Ownership stats have not been computed yet. Try again after the next gameweek deadline.",
+      });
+      return;
+    }
+
+    res.json({ success: true, data: cached });
+  } catch (error) {
     next(error);
   }
 }

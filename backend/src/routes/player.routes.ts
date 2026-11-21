@@ -3,6 +3,7 @@ import {
   getPlayers,
   getPlayerById,
   getPlayerOwnershipStats,
+  getOwnershipAndCaptaincyStats,
   batchPlayerStats,
   getPlayerAnalytics,
 } from "../controllers/player.controller.js";
@@ -16,6 +17,9 @@ router.get("/", getPlayers);
 
 // GET /api/v1/players/ownership-stats
 router.get("/ownership-stats", getPlayerOwnershipStats);
+
+// GET /api/v1/players/stats/ownership (cached ownership % + captaincy % per player)
+router.get("/stats/ownership", getOwnershipAndCaptaincyStats);
 
 // POST /api/v1/players/batch-stats (authenticated, rate limited)
 router.post("/batch-stats", requireAuth, authenticatedRateLimiter, batchPlayerStats);

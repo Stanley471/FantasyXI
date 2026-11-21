@@ -130,6 +130,19 @@ export interface LeagueSearchResult<T> {
   pageSize: number;
 }
 
+/**
+ * Official tie-break criteria applied, in order, when two or more managers
+ * finish with identical total points (issue #503): fewest transfers made,
+ * then most goals scored by squad, then fewest goals conceded.
+ */
+export type TieBreakCriterion = "transfers" | "goalsScored" | "goalsConceded";
+
+export interface SquadTieBreakStats {
+  transfersMade: number;
+  goalsScored: number;
+  goalsConceded: number;
+}
+
 export class LeagueService {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   constructor(private readonly db: any = prisma) { }
@@ -1007,12 +1020,132 @@ export class LeagueService {
   }
 
   /**
+   * Gathers the per-squad stats needed for the official tie-break hierarchy
+   * (fewest transfers, most goals scored, fewest goals conceded) in three
+   * bulk queries regardless of league size.
+   */
+  private async computeTieBreakStats(
+    squadIds: string[],
+    startGameweekId: number,
+    endGameweekId: number
+  ): Promise<Map<string, SquadTieBreakStats>> {
+    const stats = new Map<string, SquadTieBreakStats>(
+      squadIds.map((id: string) => [id, { transfersMade: 0, goalsScored: 0, goalsConceded: 0 }])
+    );
+    if (squadIds.length === 0) return stats;
+
+    const transferCounts = await this.db.squadTransfer.groupBy({
+      by: ["squadId"],
+      where: {
+        squadId: { in: squadIds },
+        gameweekId: { gte: startGameweekId, lte: endGameweekId },
+      },
+      _count: { _all: true },
+    });
+    for (const row of transferCounts as Array<{ squadId: string; _count: { _all: number } }>) {
+      stats.get(row.squadId)!.transfersMade = row._count._all;
+    }
+
+    const squadPlayers = await this.db.squadPlayer.findMany({
+      where: { squadId: { in: squadIds } },
+      select: { squadId: true, playerId: true, player: { select: { goalsScored: true } } },
+    });
+    const playerIdsBySquad = new Map<string, number[]>();
+    for (const sp of squadPlayers as Array<{ squadId: string; playerId: number; player: { goalsScored: number } }>) {
+      stats.get(sp.squadId)!.goalsScored += sp.player.goalsScored;
+      const list = playerIdsBySquad.get(sp.squadId) ?? [];
+      list.push(sp.playerId);
+      playerIdsBySquad.set(sp.squadId, list);
+    }
+
+    const allPlayerIds = [...new Set(squadPlayers.map((sp: { playerId: number }) => sp.playerId))];
+    if (allPlayerIds.length > 0) {
+      const concededStats = await this.db.playerGameweekStats.groupBy({
+        by: ["playerId"],
+        where: {
+          playerId: { in: allPlayerIds },
+          gameweekId: { gte: startGameweekId, lte: endGameweekId },
+        },
+        _sum: { goalsConceded: true },
+      });
+      const concededByPlayer = new Map<number, number>(
+        (concededStats as Array<{ playerId: number; _sum: { goalsConceded: number | null } }>).map(
+          (row) => [row.playerId, row._sum.goalsConceded ?? 0]
+        )
+      );
+      for (const [squadId, playerIds] of playerIdsBySquad) {
+        const conceded = playerIds.reduce((sum, id) => sum + (concededByPlayer.get(id) ?? 0), 0);
+        stats.get(squadId)!.goalsConceded = conceded;
+      }
+    }
+
+    return stats;
+  }
+
+  /** Compares two squads using the official tie-break hierarchy; 0 if still tied on every criterion. */
+  private static compareByOfficialTieBreak(
+    squadIdA: string,
+    squadIdB: string,
+    stats: Map<string, SquadTieBreakStats>
+  ): number {
+    const a = stats.get(squadIdA) ?? { transfersMade: 0, goalsScored: 0, goalsConceded: 0 };
+    const b = stats.get(squadIdB) ?? { transfersMade: 0, goalsScored: 0, goalsConceded: 0 };
+    return (
+      a.transfersMade - b.transfersMade ||
+      b.goalsScored - a.goalsScored ||
+      a.goalsConceded - b.goalsConceded
+    );
+  }
+
+  /**
+   * Labels every squad tied on total points with whichever official
+   * tie-break criterion actually separated it from at least one other squad
+   * in its tied group, so the standings table can show which rule applied.
+   */
+  private static labelTieBreakGroups(
+    entries: Array<{ squadId: string; totalPoints: number }>,
+    stats: Map<string, SquadTieBreakStats>
+  ): Map<string, TieBreakCriterion> {
+    const labels = new Map<string, TieBreakCriterion>();
+    let groupStart = 0;
+    for (let i = 1; i <= entries.length; i++) {
+      const endOfGroup = i === entries.length || entries[i].totalPoints !== entries[groupStart].totalPoints;
+      if (endOfGroup) {
+        const group = entries.slice(groupStart, i);
+        if (group.length > 1) {
+          const label = LeagueService.resolveTieBreakCriterion(group, stats);
+          if (label) {
+            for (const entry of group) labels.set(entry.squadId, label);
+          }
+        }
+        groupStart = i;
+      }
+    }
+    return labels;
+  }
+
+  /** The first criterion (in official order) that varies across a tied-on-points group. */
+  private static resolveTieBreakCriterion(
+    group: Array<{ squadId: string }>,
+    stats: Map<string, SquadTieBreakStats>
+  ): TieBreakCriterion | null {
+    const values = group.map(
+      (entry) => stats.get(entry.squadId) ?? { transfersMade: 0, goalsScored: 0, goalsConceded: 0 }
+    );
+    if (new Set(values.map((v) => v.transfersMade)).size > 1) return "transfers";
+    if (new Set(values.map((v) => v.goalsScored)).size > 1) return "goalsScored";
+    if (new Set(values.map((v) => v.goalsConceded)).size > 1) return "goalsConceded";
+    return null;
+  }
+
+  /**
    * Computes deterministic league standings across the competition's gameweek window.
    *
-   * Tie-breaking hierarchy:
-   * 1. Total Points in the league window (descending)
-   * 2. Highest Single Gameweek Score in that window (descending)
-   * 3. Earliest joined timestamp (ascending)
+   * Tie-breaking hierarchy when total points are equal (official rules, issue #503):
+   * 1. Fewest transfers made (ascending)
+   * 2. Most goals scored by squad (descending)
+   * 3. Fewest goals conceded by squad (ascending)
+   * 4. Earliest joined timestamp (ascending) — final deterministic fallback
    */
   public async getLeagueStandings(leagueId: string, gameweekId?: number): Promise<{
     league: {
@@ -1062,6 +1195,12 @@ export class LeagueService {
     const previousGameweekId = gameweekId === undefined
       ? undefined
       : completedGameweeks.filter((gameweek: { id: number }) => gameweek.id < gameweekId).at(-1)?.id;
+
+    const tieBreakStats = await this.computeTieBreakStats(
+      squadIds,
+      league.startGameweekId,
+      league.endGameweekId
+    );
 
     const scoringConfig = league.scoringConfig
       ? parseLeagueScoringConfig(league.scoringConfig)
@@ -1119,6 +1258,7 @@ export class LeagueService {
       bestGameweekPoints: number;
       gameweekScores: Array<{ gameweekId: number; gameweekName: string; points: number }>;
       joinedAt: Date;
+      tieBreak: TieBreakCriterion | null;
     };
     const rankAt = (throughGameweekId?: number): RankedStandings[] => {
       const entries = league.members.map((member: {
@@ -1146,12 +1286,17 @@ export class LeagueService {
           joinedAt: member.joinedAt,
         };
       });
-      entries.sort((a: Omit<RankedStandings, "rank">, b: Omit<RankedStandings, "rank">) =>
+      entries.sort((a: Omit<RankedStandings, "rank" | "tieBreak">, b: Omit<RankedStandings, "rank" | "tieBreak">) =>
         b.totalPoints - a.totalPoints ||
-        b.bestGameweekPoints - a.bestGameweekPoints ||
+        LeagueService.compareByOfficialTieBreak(a.squadId, b.squadId, tieBreakStats) ||
         a.joinedAt.getTime() - b.joinedAt.getTime()
       );
-      return entries.map((entry: Omit<RankedStandings, "rank">, index: number) => ({ rank: index + 1, ...entry }));
+      const tieBreakLabels = LeagueService.labelTieBreakGroups(entries, tieBreakStats);
+      return entries.map((entry: Omit<RankedStandings, "rank" | "tieBreak">, index: number) => ({
+        rank: index + 1,
+        ...entry,
+        tieBreak: tieBreakLabels.get(entry.squadId) ?? null,
+      }));
     };
 
     const previousRanks = previousGameweekId === undefined

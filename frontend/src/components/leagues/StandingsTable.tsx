@@ -4,7 +4,13 @@ import React, { useLayoutEffect, useRef } from "react";
 import { LeagueStandingsEntry, MembershipStatus } from "@/types";
 import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { IconCheck, IconAlertCircle, IconChevronUp, IconChevronDown, IconUsers } from "@/components/ui/Icons";
+import { IconCheck, IconAlertCircle, IconChevronUp, IconChevronDown, IconUsers, IconInfo } from "@/components/ui/Icons";
+
+const TIE_BREAK_LABELS: Record<NonNullable<LeagueStandingsEntry["tieBreak"]>, string> = {
+  transfers: "Fewer transfers made",
+  goalsScored: "More goals scored by squad",
+  goalsConceded: "Fewer goals conceded",
+};
 
 export interface StandingsTableProps {
   standings: LeagueStandingsEntry[];
@@ -179,6 +185,15 @@ export const StandingsTable: React.FC<StandingsTableProps> = ({
                     {isMe && (
                       <span className="text-[10px] uppercase font-bold tracking-wide text-emerald-400/80">
                         You
+                      </span>
+                    )}
+                    {entry.tieBreak && (
+                      <span
+                        className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-amber-400"
+                        title={`Tied on points — resolved by: ${TIE_BREAK_LABELS[entry.tieBreak]}`}
+                      >
+                        <IconInfo className="w-3 h-3" />
+                        Tie-break
                       </span>
                     )}
                   </div>

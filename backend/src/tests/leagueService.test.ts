@@ -63,81 +63,290 @@ describe("LeagueService Competition Engine & Standings", () => {
       assert.equal(ranked[1].totalPoints, 120);
     });
 
-    it("should break ties using highest single gameweek score (Peak Score Tie-break)", () => {
-      // Both Charlie and David scored 150 total points across 3 gameweeks.
-      // Charlie: 40 + 50 + 60 (peak: 60)
-      // David:   30 + 50 + 70 (peak: 70)
-      // David should win the tie-break!
-      const entries = [
-        {
-          userId: "user-3",
-          username: "Charlie",
-          squadId: "squad-3",
-          squadName: "Charlie FC",
-          membershipStatus: MembershipStatus.ACTIVE,
-          totalPoints: 150,
-          bestGameweekPoints: 60,
-          joinedAt: new Date("2026-08-01T09:00:00Z"), // Earlier join
-        },
-        {
-          userId: "user-4",
-          username: "David",
-          squadId: "squad-4",
-          squadName: "David FC",
-          membershipStatus: MembershipStatus.ACTIVE,
-          totalPoints: 150,
-          bestGameweekPoints: 70, // Higher peak gameweek score!
-          joinedAt: new Date("2026-08-01T12:00:00Z"),
-        },
-      ];
+  });
 
-      entries.sort((a, b) => {
-        if (b.totalPoints !== a.totalPoints) {
-          return b.totalPoints - a.totalPoints;
-        }
-        if (b.bestGameweekPoints !== a.bestGameweekPoints) {
-          return b.bestGameweekPoints - a.bestGameweekPoints;
-        }
-        return a.joinedAt.getTime() - b.joinedAt.getTime();
-      });
+  describe("Official tie-break hierarchy (issue #503)", () => {
+    interface MemberSetup {
+      userId: string;
+      username: string;
+      squadId: string;
+      squadName: string;
+      joinedAt: string;
+      points: number[]; // one entry per gameweek, gameweeks 1..N
+      transfers: number;
+      playerGoalsScored: number[]; // one player per entry, this player's season goals
+      playerGoalsConceded: number[]; // goals conceded recorded for the same players, within the window
+    }
 
-      assert.equal(entries[0].username, "David");
-      assert.equal(entries[1].username, "Charlie");
+    function buildMockDb(members: MemberSetup[], gameweekCount: number) {
+      const league = {
+        id: "league-1",
+        name: "Tie-break League",
+        status: LeagueStatus.ACTIVE,
+        entryFee: 0,
+        prizePool: 0,
+        currentMembers: members.length,
+        startGameweekId: 1,
+        endGameweekId: gameweekCount,
+        scoringConfig: null,
+        startGameweek: { id: 1, name: "Gameweek 1" },
+        endGameweek: { id: gameweekCount, name: `Gameweek ${gameweekCount}` },
+        members: members.map((m) => ({
+          userId: m.userId,
+          squadId: m.squadId,
+          status: MembershipStatus.ACTIVE,
+          joinedAt: new Date(m.joinedAt),
+          user: { username: m.username },
+          squad: { name: m.squadName },
+        })),
+      };
+
+      const gameweeks = Array.from({ length: gameweekCount }, (_, i) => ({
+        id: i + 1,
+        name: `Gameweek ${i + 1}`,
+      }));
+
+      const squadGameweekScores = members.flatMap((m) =>
+        m.points.map((points, i) => ({
+          squadId: m.squadId,
+          gameweekId: i + 1,
+          points,
+          gameweek: { id: i + 1, name: `Gameweek ${i + 1}` },
+        }))
+      );
+
+      // One synthetic player per member, scoped to that squad, carrying the
+      // season goals and gameweek-conceded figures the test wants to exercise.
+      const squadPlayers = members.flatMap((m, idx) => ({
+        squadId: m.squadId,
+        playerId: idx + 1,
+        player: { goalsScored: m.playerGoalsScored[0] ?? 0 },
+      }));
+
+      const playerGameweekStatsByPlayer = new Map<number, number>(
+        members.map((m, idx) => [idx + 1, m.playerGoalsConceded.reduce((s, v) => s + v, 0)])
+      );
+
+      return {
+        league: { findUnique: async () => ({ ...league }) },
+        gameweek: { findMany: async () => gameweeks },
+        squadGameweekScore: {
+          findMany: async ({ where }: any) =>
+            squadGameweekScores.filter(
+              (s) =>
+                where.squadId.in.includes(s.squadId) &&
+                s.gameweekId >= where.gameweekId.gte &&
+                s.gameweekId <= where.gameweekId.lte
+            ),
+        },
+        squadTransfer: {
+          groupBy: async ({ where }: any) => {
+            const counts = new Map<string, number>();
+            for (const m of members) {
+              if (where.squadId.in.includes(m.squadId)) counts.set(m.squadId, m.transfers);
+            }
+            return Array.from(counts.entries()).map(([squadId, count]) => ({
+              squadId,
+              _count: { _all: count },
+            }));
+          },
+        },
+        squadPlayer: {
+          findMany: async ({ where }: any) =>
+            squadPlayers.filter((sp) => where.squadId.in.includes(sp.squadId)),
+        },
+        playerGameweekStats: {
+          groupBy: async ({ where }: any) =>
+            where.playerId.in
+              .filter((id: number) => playerGameweekStatsByPlayer.has(id))
+              .map((id: number) => ({
+                playerId: id,
+                _sum: { goalsConceded: playerGameweekStatsByPlayer.get(id) ?? 0 },
+              })),
+        },
+      };
+    }
+
+    it("resolves identical totals by fewest transfers made, and flags the tie-break", async () => {
+      const db = buildMockDb(
+        [
+          {
+            userId: "user-a",
+            username: "Alice",
+            squadId: "squad-a",
+            squadName: "Alice FC",
+            joinedAt: "2026-08-01T09:00:00Z",
+            points: [75, 75],
+            transfers: 3,
+            playerGoalsScored: [10],
+            playerGoalsConceded: [5],
+          },
+          {
+            userId: "user-b",
+            username: "Bob",
+            squadId: "squad-b",
+            squadName: "Bob FC",
+            joinedAt: "2026-08-01T12:00:00Z",
+            points: [60, 90],
+            transfers: 1,
+            playerGoalsScored: [10],
+            playerGoalsConceded: [5],
+          },
+        ],
+        2
+      );
+      const service = new LeagueService(db);
+      const { standings } = await service.getLeagueStandings("league-1");
+
+      assert.equal(standings[0].username, "Bob");
+      assert.equal(standings[0].tieBreak, "transfers");
+      assert.equal(standings[1].username, "Alice");
+      assert.equal(standings[1].tieBreak, "transfers");
     });
 
-    it("should break secondary ties using earliest join timestamp (Deterministic Timestamp Tie-break)", () => {
-      // Both Emma and Frank scored 100 points AND both have peak gameweek of 50.
-      // Emma joined at 10:00:00, Frank joined at 10:05:00.
-      // Emma wins the secondary tie-break deterministically!
-      const entries = [
-        {
-          userId: "user-6",
-          username: "Frank",
-          totalPoints: 100,
-          bestGameweekPoints: 50,
-          joinedAt: new Date("2026-08-01T10:05:00Z"),
-        },
-        {
-          userId: "user-5",
-          username: "Emma",
-          totalPoints: 100,
-          bestGameweekPoints: 50,
-          joinedAt: new Date("2026-08-01T10:00:00Z"),
-        },
-      ];
+    it("falls through to most goals scored by squad when transfers also tie", async () => {
+      const db = buildMockDb(
+        [
+          {
+            userId: "user-c",
+            username: "Charlie",
+            squadId: "squad-c",
+            squadName: "Charlie FC",
+            joinedAt: "2026-08-01T09:00:00Z",
+            points: [150],
+            transfers: 2,
+            playerGoalsScored: [12],
+            playerGoalsConceded: [8],
+          },
+          {
+            userId: "user-d",
+            username: "David",
+            squadId: "squad-d",
+            squadName: "David FC",
+            joinedAt: "2026-08-01T12:00:00Z",
+            points: [150],
+            transfers: 2,
+            playerGoalsScored: [20],
+            playerGoalsConceded: [8],
+          },
+        ],
+        1
+      );
+      const service = new LeagueService(db);
+      const { standings } = await service.getLeagueStandings("league-1");
 
-      entries.sort((a, b) => {
-        if (b.totalPoints !== a.totalPoints) {
-          return b.totalPoints - a.totalPoints;
-        }
-        if (b.bestGameweekPoints !== a.bestGameweekPoints) {
-          return b.bestGameweekPoints - a.bestGameweekPoints;
-        }
-        return a.joinedAt.getTime() - b.joinedAt.getTime();
-      });
+      assert.equal(standings[0].username, "David");
+      assert.equal(standings[0].tieBreak, "goalsScored");
+      assert.equal(standings[1].username, "Charlie");
+    });
 
-      assert.equal(entries[0].username, "Emma");
-      assert.equal(entries[1].username, "Frank");
+    it("falls through to fewest goals conceded when transfers and goals scored also tie", async () => {
+      const db = buildMockDb(
+        [
+          {
+            userId: "user-e",
+            username: "Emma",
+            squadId: "squad-e",
+            squadName: "Emma FC",
+            joinedAt: "2026-08-01T09:00:00Z",
+            points: [100],
+            transfers: 1,
+            playerGoalsScored: [15],
+            playerGoalsConceded: [10],
+          },
+          {
+            userId: "user-f",
+            username: "Frank",
+            squadId: "squad-f",
+            squadName: "Frank FC",
+            joinedAt: "2026-08-01T12:00:00Z",
+            points: [100],
+            transfers: 1,
+            playerGoalsScored: [15],
+            playerGoalsConceded: [3],
+          },
+        ],
+        1
+      );
+      const service = new LeagueService(db);
+      const { standings } = await service.getLeagueStandings("league-1");
+
+      assert.equal(standings[0].username, "Frank");
+      assert.equal(standings[0].tieBreak, "goalsConceded");
+      assert.equal(standings[1].username, "Emma");
+    });
+
+    it("falls back to earliest join timestamp when every official criterion ties, without a tie-break flag", async () => {
+      const db = buildMockDb(
+        [
+          {
+            userId: "user-g",
+            username: "Frank2",
+            squadId: "squad-g",
+            squadName: "Frank2 FC",
+            joinedAt: "2026-08-01T10:05:00Z",
+            points: [100],
+            transfers: 1,
+            playerGoalsScored: [15],
+            playerGoalsConceded: [5],
+          },
+          {
+            userId: "user-h",
+            username: "Emma2",
+            squadId: "squad-h",
+            squadName: "Emma2 FC",
+            joinedAt: "2026-08-01T10:00:00Z",
+            points: [100],
+            transfers: 1,
+            playerGoalsScored: [15],
+            playerGoalsConceded: [5],
+          },
+        ],
+        1
+      );
+      const service = new LeagueService(db);
+      const { standings } = await service.getLeagueStandings("league-1");
+
+      assert.equal(standings[0].username, "Emma2");
+      assert.equal(standings[1].username, "Frank2");
+      assert.equal(standings[0].tieBreak, null);
+      assert.equal(standings[1].tieBreak, null);
+    });
+
+    it("does not flag a tie-break for managers who are not tied on points", async () => {
+      const db = buildMockDb(
+        [
+          {
+            userId: "user-i",
+            username: "Grace",
+            squadId: "squad-i",
+            squadName: "Grace FC",
+            joinedAt: "2026-08-01T09:00:00Z",
+            points: [120],
+            transfers: 5,
+            playerGoalsScored: [8],
+            playerGoalsConceded: [12],
+          },
+          {
+            userId: "user-j",
+            username: "Henry",
+            squadId: "squad-j",
+            squadName: "Henry FC",
+            joinedAt: "2026-08-01T12:00:00Z",
+            points: [90],
+            transfers: 0,
+            playerGoalsScored: [20],
+            playerGoalsConceded: [1],
+          },
+        ],
+        1
+      );
+      const service = new LeagueService(db);
+      const { standings } = await service.getLeagueStandings("league-1");
+
+      assert.equal(standings[0].username, "Grace");
+      assert.equal(standings[0].tieBreak, null);
+      assert.equal(standings[1].tieBreak, null);
     });
   });
 
