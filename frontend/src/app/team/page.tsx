@@ -7,6 +7,13 @@ import { api, ApiError } from "@/lib/api";
 import { isOfflineError, loadSquadSnapshot, saveSquadSnapshot } from "@/lib/offlineStore";
 import { flushOfflineQueue } from "@/lib/offlineSyncCoordinator";
 import {
+  resolveTransferConflicts,
+  subscribeTransferConflicts,
+  type JournalSyncOutcome,
+} from "@/lib/transferJournalSync";
+import type { MergeResolutionMap } from "@/lib/mergeResolver";
+import { TransferConflictModal } from "@/components/team/TransferConflictModal";
+import {
   enqueueSquadMutation,
   getQueuedMutations,
   getQueuedMutationCount,
@@ -62,7 +69,7 @@ export default function TeamPage() {
     substitutionFeedback, setSubstitutionFeedback,
     activeModalState, setActiveModalState,
     handleSwap, handleSetCaptain, handleSetViceCaptain,
-    setOwnerId, hydrateFromSquad, persistLineupOffline
+    setOwnerId, hydrateFromSquad, persistLineupOffline, recordTransfer
   } = useTeamStore();
 
   const { validateSquad: solveSquad } = useSquadSolver();
@@ -91,6 +98,16 @@ export default function TeamPage() {
   const [squadRevision, setSquadRevision] = useState<string | undefined>();
   const [conflictMutation, setConflictMutation] = useState<QueuedSquadMutation | null>(null);
   const [isSyncingOfflineQueue, setIsSyncingOfflineQueue] = useState<boolean>(false);
+  // 3-way merge conflicts from the offline transfer journal (issue #457).
+  const [transferConflict, setTransferConflict] = useState<
+    Extract<JournalSyncOutcome, { status: "conflicts" }> | null
+  >(null);
+
+  // The journal sync notifies here when a reconnect leaves conflicts to resolve.
+  useEffect(
+    () => subscribeTransferConflicts((outcome) => setTransferConflict(outcome)),
+    []
+  );
   const showingSnapshot = useRef(false);
   const userId = user?.id;
 
@@ -470,6 +487,7 @@ export default function TeamPage() {
     const replacing = activeModalState.replacingPlayer;
     if (!replacing) return;
 
+    const replacingLocal = players.find((p) => p.playerId === replacing.id);
     setPlayers((prev) => {
       const idx = prev.findIndex((p) => p.playerId === replacing.id);
       if (idx === -1) return prev;
@@ -483,7 +501,40 @@ export default function TeamPage() {
       return clone;
     });
 
+    // Offline: record the transfer in the journal for the 3-way merge.
+    if (!isOnline && replacingLocal) recordTransfer(newPlayer, replacingLocal);
+
     setSelectedPlayerId(null);
+  };
+
+  // Applies the manager's per-conflict choices and resumes the journal sync.
+  const handleResolveTransferConflicts = async (resolutions: MergeResolutionMap) => {
+    if (!transferConflict) return;
+    const pending = transferConflict;
+    setTransferConflict(null);
+    try {
+      const outcome = await resolveTransferConflicts({
+        squadId,
+        userId: userId ?? null,
+        squadName,
+        conflicts: pending.conflicts,
+        resolutions,
+        base: pending.base,
+        local: pending.local,
+        remote: pending.remote,
+        merged: pending.merged,
+      });
+      if (outcome.status === "synced") {
+        toast.success("Offline transfers synced after resolving the conflicts.");
+      } else if (outcome.status === "held") {
+        toast.info("Your draft is saved on this device for the next gameweek.");
+      } else {
+        toast.info("Offline draft discarded; the server squad stands.");
+      }
+      await refreshQueueCount();
+    } catch {
+      toast.error("Couldn't apply the resolutions. Your draft is still saved on this device.");
+    }
   };
 
   // Save changes to backend with optimistic rollback or offline queue
@@ -816,6 +867,15 @@ export default function TeamPage() {
             </div>
           </section>
         )}
+
+        {/* Offline transfer journal conflicts (issue #457): server vs local draft */}
+        <TransferConflictModal
+          open={transferConflict !== null}
+          conflicts={transferConflict?.conflicts ?? []}
+          squadName={squadName}
+          onResolve={handleResolveTransferConflicts}
+          onCancel={() => setTransferConflict(null)}
+        />
 
         {/* Offline mode: read-only view of the squad saved on this device */}
         {(offlineSnapshotAt || !isOnline) && queuedMutationsCount === 0 && (

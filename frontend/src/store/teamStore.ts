@@ -4,6 +4,12 @@ import { emitToast } from "@/context/ToastContext";
 import { validateCompleteSquad, validateSubstitution } from "@/lib/formation";
 import { enqueueSquadMutation, QueuedSquadMutation, SquadMutationPayload } from "@/lib/offlineQueue";
 import { saveSquadSnapshot } from "@/lib/offlineStore";
+import {
+  appendJournalEntry,
+  ensureJournalBase,
+  type JournalPlayer,
+  type NewJournalEntry,
+} from "@/lib/transferJournal";
 
 export interface LocalSquadPlayer {
   id?: number | string;
@@ -76,6 +82,12 @@ interface TeamState {
   handleSetCaptain: (playerId: number) => void;
   handleSetViceCaptain: (playerId: number) => void;
   handlePlayerClick: (clickedPlayer: Player | null, position?: Position) => void;
+  /**
+   * Records a transfer (replace) in the offline transfer journal
+   * (issue #457) so it can be replayed, reviewed and merged on reconnect.
+   * Only records while offline; online saves go straight to the API.
+   */
+  recordTransfer: (incoming: Player, outgoing: LocalSquadPlayer) => void;
 }
 
 export const useTeamStore = create<TeamState>((set, get) => ({
@@ -250,10 +262,12 @@ export const useTeamStore = create<TeamState>((set, get) => ({
       },
     });
     persistIfOffline();
+    recordJournalEdit(prev, { kind: "formation", playerId: playerAId, otherPlayerId: playerBId });
     return true;
   },
 
   handleSetCaptain: (playerId) => {
+    const prev = get().players;
     set((state) => ({
       players: state.players.map((p) => ({
         ...p,
@@ -262,9 +276,11 @@ export const useTeamStore = create<TeamState>((set, get) => ({
       }))
     }));
     persistIfOffline();
+    recordJournalEdit(prev, { kind: "captain", playerId });
   },
 
   handleSetViceCaptain: (playerId) => {
+    const prev = get().players;
     set((state) => ({
       players: state.players.map((p) => ({
         ...p,
@@ -273,6 +289,18 @@ export const useTeamStore = create<TeamState>((set, get) => ({
       }))
     }));
     persistIfOffline();
+    recordJournalEdit(prev, { kind: "vice-captain", playerId });
+  },
+
+  recordTransfer: (incoming, outgoing) => {
+    recordJournalEdit(get().players, {
+      kind: "transfer",
+      playerId: incoming.id,
+      outgoingPlayerId: outgoing.playerId,
+      playerSnapshot: incoming,
+      isStarter: outgoing.isStarter,
+      positionOrder: outgoing.positionOrder,
+    });
   },
 }));
 
@@ -283,4 +311,36 @@ function persistIfOffline(): void {
     .getState()
     .persistLineupOffline()
     .catch(() => emitToast.error("Couldn't save your lineup change on this device."));
+}
+
+function toJournalPlayers(players: LocalSquadPlayer[]): JournalPlayer[] {
+  return players.map(({ playerId, player, isStarter, isCaptain, isViceCaptain, positionOrder }) => ({
+    playerId,
+    player,
+    isStarter,
+    isCaptain,
+    isViceCaptain,
+    positionOrder,
+  }));
+}
+
+/**
+ * Records one granular draft action in the transfer journal (issue #457).
+ * The base snapshot is captured from the pre-edit squad the first time
+ * only, so the 3-way merge always has the last synced server state.
+ * Fire-and-forget: a journal failure must never block the lineup edit.
+ */
+function recordJournalEdit(
+  beforePlayers: LocalSquadPlayer[],
+  entry: Omit<NewJournalEntry, "squadId" | "userId">
+): void {
+  if (!isOffline()) return;
+  const { ownerId, squadId } = useTeamStore.getState();
+  if (!ownerId) return;
+  const captureBase = squadId
+    ? ensureJournalBase(squadId, toJournalPlayers(beforePlayers))
+    : Promise.resolve();
+  captureBase
+    .then(() => appendJournalEntry({ ...entry, squadId, userId: ownerId }))
+    .catch(() => emitToast.error("Couldn't save your transfer draft on this device."));
 }
