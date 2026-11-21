@@ -72,6 +72,12 @@ export class RefreshTokenService {
   private async revokeFamily(familyId: string): Promise<void> {
     await this.db.refreshToken.updateMany({ where: { familyId, revokedAt: null }, data: { revokedAt: new Date() } });
   }
+
+  /** Revokes every refresh token the user holds, across all devices/families. */
+  async revokeAllForUser(userId: string): Promise<void> {
+    if (!this.db.refreshToken) return;
+    await this.db.refreshToken.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: new Date() } });
+  }
 }
 
 export const refreshTokenService = new RefreshTokenService();

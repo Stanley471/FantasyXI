@@ -190,6 +190,7 @@ model User {
   collusionFlagsAsA    LeagueCollusionFlag[] @relation("FlagAccountA")
   collusionFlagsAsB    LeagueCollusionFlag[] @relation("FlagAccountB")
   suspensionAppeals    SuspensionAppeal[]
+  notifications        Notification[]
 
   @@map("users")
 }
@@ -208,6 +209,26 @@ model RefreshToken {
   @@index([familyId])
   @@index([userId])
   @@map("refresh_tokens")
+}
+
+/// A user-facing notification (league invite, gameweek finalization, payment
+/// confirmation, ...) shown in the notification center drawer (issue #500).
+model Notification {
+  id        String    @id @default(uuid())
+  userId    String    @map("user_id")
+  type      String
+  title     String
+  body      String?
+  link      String?
+  isRead    Boolean   @default(false) @map("is_read")
+  createdAt DateTime  @default(now()) @map("created_at")
+  readAt    DateTime? @map("read_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([userId, isRead])
+  @@map("notifications")
 }
 
 /// A Stellar wallet linked to a user for USDC payments.
@@ -671,6 +692,10 @@ model Transaction {
 
   // A batched refund shares one Stellar hash across several members
   @@unique([stellarTxHash, memberId])
+  // Supports cursor-paginated, filtered lookups of a user's own transaction history.
+  @@index([userId, createdAt])
+  @@index([userId, status])
+  @@index([userId, type])
   @@map("transactions")
 }
 

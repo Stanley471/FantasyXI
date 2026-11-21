@@ -8,6 +8,7 @@ import {
 } from "../services/financial/financialService.js";
 import { proofOfReserveService } from "../services/financial/proofOfReserveService.js";
 import { SorobanContractClient } from "../services/financial/sorobanContractClient.js";
+import { TransactionStatus, TransactionType } from "../types/index.js";
 
 /**
  * Financial Controller — Stellar Escrow & Payment Endpoints
@@ -16,6 +17,50 @@ import { SorobanContractClient } from "../services/financial/sorobanContractClie
  * Coordinates payment requirement generation, transaction hash submission,
  * on-chain verification, and settlement manifests.
  */
+
+/** GET /api/v1/financial/transactions (Protected: cursor-paginated transaction history, issue #496) */
+export async function getTransactions(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user?.id) {
+      res.status(401).json({ success: false, message: "Authentication required" });
+      return;
+    }
+
+    const { limit, before, after, status, type } = req.query;
+
+    if (status && !Object.values(TransactionStatus).includes(status as TransactionStatus)) {
+      res.status(400).json({ success: false, message: `Invalid status filter: ${status}` });
+      return;
+    }
+    if (type && !Object.values(TransactionType).includes(type as TransactionType)) {
+      res.status(400).json({ success: false, message: `Invalid type filter: ${type}` });
+      return;
+    }
+
+    const result = await financialService.listUserTransactions(req.user.id, {
+      limit: limit ? parseInt(limit as string, 10) : undefined,
+      before: typeof before === "string" ? before : undefined,
+      after: typeof after === "string" ? after : undefined,
+      status: status as TransactionStatus | undefined,
+      type: type as TransactionType | undefined,
+    });
+
+    res.json({
+      success: true,
+      data: result.transactions,
+      pagination: {
+        nextCursor: result.nextCursor,
+        prevCursor: result.prevCursor,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
 
 export async function getPaymentRequirement(
   req: Request,
