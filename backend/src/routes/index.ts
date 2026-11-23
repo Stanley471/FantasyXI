@@ -13,6 +13,7 @@ import adminRoutes from "./admin.routes.js";
 import analyticsRoutes from "./analytics.routes.js";
 import leaderboardRoutes from "./leaderboard.routes.js";
 import financialRoutes from "./financial.routes.js";
+import fxOracleRoutes from "./fxOracle.routes.js";
 import sep8Routes from "./sep8.routes.js";
 import webhookRoutes from "./webhook.routes.js";
 import { replicaReads } from "../middleware/readConsistency.js";
@@ -38,6 +39,7 @@ apiV1Router.use("/admin/sync", fplDataFreshness, syncRoutes);
 apiV1Router.use("/admin", adminRoutes);
 apiV1Router.use("/sep8", sep8Routes);
 apiV1Router.use("/financial", financialRoutes);
+apiV1Router.use("/fx", fxOracleRoutes);
 // Public: latest proof-of-reserve roots and totals (no participant data)
 apiV1Router.get("/proof-of-reserve", getProofOfReserve);
 apiV1Router.use("/webhooks", webhookRoutes);
