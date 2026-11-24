@@ -9,6 +9,7 @@ import { ledgerAuditService } from "../services/financial/ledgerAuditService.js"
 import { runLedgerReconciliationJob } from "../jobs/ledgerReconciliation.js";
 import { runProofOfReserveJob } from "../jobs/proofOfReserve.js";
 import { runStellarReconciliationJob, STELLAR_RECONCILIATION_CRON, STELLAR_RECONCILIATION_JOB_NAME } from "../jobs/stellarReconciliation.js";
+import { runSorobanTtlExtensionJob, SOROBAN_TTL_EXTENSION_CRON, SOROBAN_TTL_EXTENSION_JOB_NAME } from "../jobs/sorobanTtlExtension.js";
 import { applyRetroactiveBpsAdjustments } from "../jobs/retroactiveBpsAdjustments.js";
 import { jwtKeyRotationService } from "../services/auth/jwtKeyRotationService.js";
 import { auditLeaguesForCollusion } from "../jobs/leagueIntegrityAudit.js";
@@ -70,6 +71,8 @@ export const JOB_DEFINITIONS: JobDefinition[] = [
   { name: "ledger-reconciliation", cron: "30 2 * * *", handler: () => runLedgerReconciliationJob() },
   // Escrow balance vs ledger drift detection, every 6 hours (issue #560)
   { name: STELLAR_RECONCILIATION_JOB_NAME, cron: STELLAR_RECONCILIATION_CRON, handler: () => runStellarReconciliationJob() },
+  // Soroban contract and storage TTL extension worker, every 12 hours (issue #548)
+  { name: SOROBAN_TTL_EXTENSION_JOB_NAME, cron: SOROBAN_TTL_EXTENSION_CRON, handler: () => runSorobanTtlExtensionJob() },
   { name: "proof-of-reserve", cron: "*/15 * * * *", handler: () => runProofOfReserveJob() },
   { name: "payout-audit-anchor", cron: "*/15 * * * *", handler: () => anchorPayoutAuditRoot() },
   { name: "retroactive-bps", cron: "*/30 * * * *", handler: () => applyRetroactiveBpsAdjustments() },
