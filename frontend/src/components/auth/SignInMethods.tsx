@@ -14,6 +14,7 @@ import {
 } from "@/lib/passkeys";
 import { Button } from "@/components/ui/Button";
 import { IconGoogle, IconShield, IconCheck, IconAlertCircle } from "@/components/ui/Icons";
+import { configurePasskeyRecovery } from "@/lib/passkeyRecovery";
 
 type Notice = { kind: "success" | "error"; text: string } | null;
 
@@ -42,8 +43,9 @@ export function SignInMethods() {
   const hasGoogle = Boolean(user?.authProviders?.google);
 
   const [notice, setNotice] = useState<Notice>(readLinkResult);
-  const [busy, setBusy] = useState<"link" | "unlink" | "password" | "passkey" | `remove:${string}` | null>(null);
+  const [busy, setBusy] = useState<"link" | "unlink" | "password" | "passkey" | "recovery" | `remove:${string}` | null>(null);
   const [passkeys, setPasskeys] = useState<Passkey[]>([]);
+  const [recoveryPhrase, setRecoveryPhrase] = useState<string | null>(null);
   const canUsePasskey = usePasskeySupport();
 
   useEffect(() => {
@@ -121,6 +123,20 @@ export function SignInMethods() {
       setNotice({ kind: "success", text: "Passkey removed." });
     } catch (err) {
       setNotice({ kind: "error", text: errorText(err, "Could not remove the passkey.") });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleRecoverySetup = async () => {
+    setNotice(null);
+    setBusy("recovery");
+    try {
+      const phrase = await configurePasskeyRecovery();
+      setRecoveryPhrase(phrase);
+      setNotice({ kind: "success", text: "Recovery phrase created. Store it offline before leaving this page." });
+    } catch (err) {
+      setNotice({ kind: "error", text: errorText(err, "Could not create a recovery phrase.") });
     } finally {
       setBusy(null);
     }
@@ -335,6 +351,33 @@ export function SignInMethods() {
                 </li>
               ))}
             </ul>
+          )}
+          {passkeys.length > 0 && !recoveryPhrase && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleRecoverySetup}
+              isLoading={busy === "recovery"}
+              className="rounded-xl text-xs font-bold"
+            >
+              Create recovery phrase
+            </Button>
+          )}
+          {recoveryPhrase && (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 p-4" role="status">
+              <p className="text-xs font-bold text-amber-950">Store this phrase offline. It is shown only once.</p>
+              <p className="mt-2 select-all break-words font-mono text-sm leading-6 text-slate-900">{recoveryPhrase}</p>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="mt-3 rounded-xl text-xs font-bold"
+                onClick={() => navigator.clipboard.writeText(recoveryPhrase)}
+              >
+                Copy recovery phrase
+              </Button>
+            </div>
           )}
         </div>
       </div>

@@ -2,9 +2,14 @@
 #![allow(clippy::too_many_arguments)]
 
 #[cfg(test)]
-extern crate std;
-#[cfg(test)]
 extern crate self as fantasyxi_escrow;
+#[cfg(test)]
+extern crate std;
+pub mod shielded_batcher;
+pub use shielded_batcher::{
+    BatchExecutionReport, BatcherConfig, QuarantinedPayout, QueuedPayout, ShieldedBatch,
+    ShieldedOutput, MAX_BATCH_SIZE,
+};
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Bytes,
@@ -59,8 +64,8 @@ pub enum EscrowError {
     ProposalExecuted = 30,
     UpgradeNotProposed = 31,
     InvalidFederationPeer = 32,
-    PauseProposalNotFound = 31,
-    AlreadyProposed = 32,
+    PauseProposalNotFound = 41,
+    AlreadyProposed = 42,
     LeagueFrozen = 33,
     DisputeActive = 34,
     DisputeWindowOpen = 35,
@@ -69,6 +74,14 @@ pub enum EscrowError {
     InsufficientStake = 38,
     DisputeNotExpired = 39,
     InvalidDisputeConfig = 40,
+    UpgradeNotProposed = 41,
+    InvalidFederationPeer = 42,
+    BatchWindowNotElapsed = 43,
+    InvalidBatchConfig = 44,
+    AllocationMismatch = 45,
+    EmptyBatch = 46,
+    InsufficientShieldedBalance = 47,
+    UnshieldedLeakDetected = 48,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -125,6 +138,8 @@ pub struct UpgradeProposal {
     pub wasm_hash: BytesN<32>,
     pub proposer: Address,
     pub unlock_ledger: u32,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[contracttype]
 #[repr(u32)]
@@ -168,6 +183,15 @@ pub enum DataKey {
     MerkleRoot(u64),
     Claimed(u64, Address),
     DisputeReason(u64),
+    BatcherConfig,
+    NextPayoutId,
+    NextBatchId,
+    PayoutQueue(Address),
+    BatchWindowStart(Address),
+    QuarantinedPayouts,
+    ShieldedBalance(BytesN<32>, Address),
+    ShieldedBatch(u64),
+    TransparentAddressFingerprint(BytesN<32>),
 }
 
 /// # Issue #83: Soroban Escrow Smart Contract for Fantasy Leagues
@@ -219,6 +243,8 @@ impl FantasyXIEscrow {
             .set(&DataKey::EmergencyUnpauseAfter, &unpause_after);
         env.events()
             .publish((Symbol::new(env, "EmergencyPause"),), unpause_after);
+    }
+
     fn is_league_frozen_internal(env: &Env, league_id: u64) -> bool {
         env.storage()
             .persistent()
@@ -1658,10 +1684,8 @@ impl FantasyXIEscrow {
         let token_client = token::Client::new(&env, &league.asset);
         token_client.transfer(&env.current_contract_address(), &winner, &amount);
 
-        env.events().publish(
-            (symbol_short!("m_claimed"), league_id),
-            (winner, amount),
-        );
+        env.events()
+            .publish((symbol_short!("m_claimed"), league_id), (winner, amount));
 
         Ok(())
     }
@@ -1702,10 +1726,8 @@ impl FantasyXIEscrow {
             PERSISTENT_BUMP_AMOUNT,
         );
 
-        env.events().publish(
-            (Symbol::new(&env, "LeagueFrozen"), league_id),
-            reason_hash,
-        );
+        env.events()
+            .publish((Symbol::new(&env, "LeagueFrozen"), league_id), reason_hash);
 
         Ok(())
     }
@@ -1762,7 +1784,14 @@ impl FantasyXIEscrow {
         env.storage()
             .persistent()
             .remove(&DataKey::DisputeReason(league_id));
-        Self::settle(env, admin, league_id, winners, platform_treasury, platform_fee)
+        Self::settle(
+            env,
+            admin,
+            league_id,
+            winners,
+            platform_treasury,
+            platform_fee,
+        )
     }
 
     /// Resolves dispute with decreed proportional refund, unfreezing contract atomically.
@@ -2101,7 +2130,11 @@ impl FantasyXIEscrow {
         );
 
         env.events().publish(
-            (Symbol::new(&env, "PauseActionProposed"), proposal_id, action as u32),
+            (
+                Symbol::new(&env, "PauseActionProposed"),
+                proposal_id,
+                action as u32,
+            ),
             (caller, reason_hash),
         );
 
@@ -2186,12 +2219,6 @@ impl FantasyXIEscrow {
             return Err(EscrowError::ProposalExecuted);
         }
 
-        if env.ledger().sequence() < proposal.unlock_ledger {
-            return Err(EscrowError::TimelockActive);
-        }
-
-        Self::ensure_operational(&env)?;
-
         let required_threshold = if config.signers.len() >= 2 && config.threshold < 2 {
             2
         } else {
@@ -2199,7 +2226,6 @@ impl FantasyXIEscrow {
         };
 
         if proposal.approvals.len() < required_threshold {
-        if proposal.approvals.len() < config.threshold {
             return Err(EscrowError::InvalidMultisig);
         }
 
@@ -2288,6 +2314,127 @@ impl FantasyXIEscrow {
     pub fn get_pause_proposal(env: Env, proposal_id: u64) -> Option<PauseProposal> {
         let key = DataKey::PauseProposal(proposal_id);
         env.storage().persistent().get(&key)
+    }
+
+    /// Configures the privacy-preserving payout batcher window and max batch size (1..=50).
+    pub fn set_batcher_config(
+        env: Env,
+        admin: Address,
+        config: BatcherConfig,
+    ) -> Result<(), EscrowError> {
+        Self::require_admin(&env, &admin)?;
+        shielded_batcher::set_config(&env, config)
+    }
+
+    /// Returns the active payout batcher configuration.
+    pub fn get_batcher_config(env: Env) -> BatcherConfig {
+        shielded_batcher::get_config(&env)
+    }
+
+    /// Registers a transparent address fingerprint so the batcher can detect and block
+    /// accidental unshielded wallet linkages.
+    pub fn register_transparent_address(
+        env: Env,
+        admin: Address,
+        address: Address,
+    ) -> Result<(), EscrowError> {
+        Self::require_admin(&env, &admin)?;
+        shielded_batcher::register_transparent_address(&env, &address);
+        Ok(())
+    }
+
+    /// Enqueues a settled gameweek reward payout into the shielded batching queue.
+    pub fn enqueue_shielded_payout(
+        env: Env,
+        admin: Address,
+        league_id: u64,
+        asset: Address,
+        shielded_recipient: BytesN<32>,
+        amount: i128,
+        blinding_factor: BytesN<32>,
+    ) -> Result<u64, EscrowError> {
+        Self::ensure_operational(&env)?;
+        Self::require_admin(&env, &admin)?;
+        shielded_batcher::enqueue_payout(
+            &env,
+            league_id,
+            asset,
+            shielded_recipient,
+            amount,
+            blinding_factor,
+        )
+    }
+
+    /// Returns all currently queued payouts for an asset.
+    pub fn get_queued_payouts(env: Env, asset: Address) -> Vec<QueuedPayout> {
+        shielded_batcher::get_queued_payouts(&env, asset)
+    }
+
+    /// Returns all quarantined (malformed or unshielded-leaking) payout records.
+    pub fn get_quarantined_payouts(env: Env) -> Vec<QuarantinedPayout> {
+        shielded_batcher::get_quarantined_payouts(&env)
+    }
+
+    /// Flushes queued payouts into unified shielded batch transactions (up to 50 outputs
+    /// per batch), isolating malformed entries without halting valid settlements.
+    pub fn flush_payout_batch(
+        env: Env,
+        admin: Address,
+        asset: Address,
+        salt: BytesN<32>,
+        expected_valid_total: Option<i128>,
+        force: bool,
+    ) -> Result<BatchExecutionReport, EscrowError> {
+        Self::ensure_operational(&env)?;
+        Self::require_admin(&env, &admin)?;
+        shielded_batcher::flush_payout_batch(&env, asset, salt, expected_valid_total, force)
+    }
+
+    /// Retrieves a stored shielded batch by ID.
+    pub fn get_shielded_batch(env: Env, batch_id: u64) -> Option<ShieldedBatch> {
+        shielded_batcher::get_batch(&env, batch_id)
+    }
+
+    /// Returns the aggregated shielded balance for a shielded recipient and asset.
+    pub fn get_shielded_balance(env: Env, shielded_recipient: BytesN<32>, asset: Address) -> i128 {
+        shielded_batcher::get_shielded_balance(&env, shielded_recipient, asset)
+    }
+
+    /// Cryptographically verifies a shielded batch proof, amount conservation, and
+    /// absence of unshielded wallet linkages.
+    pub fn verify_shielded_batch_proof(
+        env: Env,
+        batch: ShieldedBatch,
+        salt: BytesN<32>,
+        expected_proof: BytesN<32>,
+    ) -> bool {
+        shielded_batcher::verify_batch_proof(&env, &batch, &salt, &expected_proof)
+    }
+
+    /// Derives a 32-byte shielded address from a 32-byte secret preimage.
+    pub fn derive_shielded_address(env: Env, secret: BytesN<32>) -> BytesN<32> {
+        shielded_batcher::derive_shielded_address(&env, &secret)
+    }
+
+    /// Claims funds from an aggregated shielded balance by proving ownership of the
+    /// shielded address preimage, without linking the destination to any league.
+    pub fn claim_shielded_balance(
+        env: Env,
+        shielded_recipient: BytesN<32>,
+        asset: Address,
+        destination: Address,
+        amount: i128,
+        preimage_secret: BytesN<32>,
+    ) -> Result<(), EscrowError> {
+        Self::ensure_operational(&env)?;
+        shielded_batcher::claim_shielded_balance(
+            &env,
+            shielded_recipient,
+            asset,
+            destination,
+            amount,
+            preimage_secret,
+        )
     }
 }
 
@@ -3454,7 +3601,6 @@ mod test {
         let league = client.get_league(&702).unwrap();
         assert_eq!(league.status, LeagueStatus::Upcoming);
         assert_eq!(client.get_settlement_hash(&702), None);
-
     }
 
     #[test]
@@ -3629,12 +3775,7 @@ mod test {
         assert_eq!(premature_unpause_propose, Err(Ok(EscrowError::NotPaused)));
 
         // 3. Valid pause proposal by Signer 1
-        client.propose_pause_action(
-            &signer_one,
-            &proposal_id,
-            &PauseAction::Pause,
-            &reason_hash,
-        );
+        client.propose_pause_action(&signer_one, &proposal_id, &PauseAction::Pause, &reason_hash);
 
         let prop = client.get_pause_proposal(&proposal_id).unwrap();
         assert_eq!(prop.id, proposal_id);

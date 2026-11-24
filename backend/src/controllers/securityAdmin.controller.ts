@@ -4,6 +4,7 @@ import {
   sybilDetectionGraphService,
   SybilLeagueNotFoundError,
 } from "../services/security/sybilDetectionGraph.js";
+import { prisma } from "../config/db.js";
 
 /**
  * Security Administration Controller (issue #117).
@@ -67,6 +68,52 @@ export async function getLeagueSybilReport(
       res.status(404).json({ success: false, message: error.message });
       return;
     }
+    next(error);
+  }
+}
+
+/** Clears an automated payout hold after an administrator completes review. */
+export async function releaseSybilPayoutHold(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const leagueId = String(req.params.leagueId);
+    const userId = String(req.params.userId);
+    const member = await prisma.leagueMember.findUnique({
+      where: { leagueId_userId: { leagueId, userId } },
+      select: { payoutHoldAt: true, payoutRiskScore: true },
+    });
+    if (!member) {
+      res.status(404).json({ success: false, message: "League member not found" });
+      return;
+    }
+    if (!member.payoutHoldAt) {
+      res.status(409).json({ success: false, message: "This account does not have an active payout hold" });
+      return;
+    }
+
+    await prisma.$transaction([
+      prisma.leagueMember.update({
+        where: { leagueId_userId: { leagueId, userId } },
+        data: { payoutHoldAt: null, payoutHoldReason: null, payoutRiskScore: null },
+      }),
+      prisma.accountSecurityEvent.create({
+        data: {
+          userId,
+          type: "SYBIL_PAYOUT_HOLD_RELEASED",
+          detail: {
+            leagueId,
+            previousRiskScore: member.payoutRiskScore,
+            reviewedBy: req.user?.id ?? null,
+          },
+        },
+      }),
+    ]);
+
+    res.json({ success: true, message: "Payout hold released" });
+  } catch (error) {
     next(error);
   }
 }

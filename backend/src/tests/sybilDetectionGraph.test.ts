@@ -136,11 +136,10 @@ describe("Sybil graph: coordinated squad submissions (#274)", () => {
 
     assert.equal(result.clusters.length, 1);
     const link = result.clusters[0].links[0];
-    // 0.85 x Jaccard 1 x min(1, 0.5 + 0.125 x 2 mirrored transfers)
-    assert.equal(link.confidence, 0.638);
+    assert.equal(link.confidence, 0.85, "all transfers matched inside the 60-second coordination window");
     assert.equal(link.evidence[0].type, "COORDINATED_SQUAD");
-    assert.match(link.evidence[0].values[0], /15 shared players \(Jaccard 1\), 2 mirrored transfers/);
-    assert.equal(result.clusters[0].rating, "MEDIUM");
+    assert.match(link.evidence[0].values[0], /2\/2 transfers matched within 60s/);
+    assert.equal(result.clusters[0].rating, "HIGH");
   });
 
   it("does not link popular template squads built at different times", () => {
@@ -261,7 +260,7 @@ describe("SybilDetectionGraphService (#274)", () => {
   });
 
   const db = {
-    league: { findUnique: async ({ where }: any) => (where.id === "league-1" ? { id: "league-1" } : null) },
+    league: { findUnique: async ({ where }: any) => (where.id === "league-1" ? { id: "league-1", entryFee: 10 } : null) },
     leagueMember: {
       findMany: async () => {
         queries++;
@@ -272,6 +271,7 @@ describe("SybilDetectionGraphService (#274)", () => {
           member("d", "GD", minutes(1800)),
         ];
       },
+      updateMany: async ({ where }: any) => ({ count: ["a", "b", "c"].includes(where.userId) ? 1 : 0 }),
     },
     accountSignal: { groupBy: async () => [] },
     stellarAccountFunder: {
@@ -314,6 +314,8 @@ describe("SybilDetectionGraphService (#274)", () => {
     assert.deepEqual(funderRows.map((r) => r.address).sort(), ["GA", "GB", "GC"], "unknown funders are not stored");
     assert.equal(report.memberCount, 4);
     assert.equal(report.clusters.length, 1);
+    assert.equal(report.payoutHoldsApplied, 3);
+    assert.ok(report.accounts.every((account) => account.riskScorePercent >= 0 && account.riskScorePercent <= 100));
     assert.deepEqual(report.clusters[0].members.map((m) => m.userId).sort(), ["a", "b", "c"]);
     assert.deepEqual(
       anomalies.query({ type: SecurityAnomalyType.SYBIL_CLUSTER_SUSPECTED }).map((e) => e.userId).sort(),

@@ -88,6 +88,9 @@ export class AuthNotFoundError extends Error {
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const BCRYPT_SALT_ROUNDS = 10;
 const MIN_PASSWORD_LENGTH = 8;
+const PASSWORD_UPPERCASE_REGEX = /[A-Z]/;
+const PASSWORD_DIGIT_REGEX = /[0-9]/;
+const PASSWORD_SPECIAL_CHAR_REGEX = /[^A-Za-z0-9\s]/;
 
 export function toSafeUser(user: {
   id: string;
@@ -156,6 +159,38 @@ export class AuthService {
   }
 
   /**
+   * Validates password length and character complexity rules.
+   * Collects all failed criteria so the caller receives a single descriptive
+   * error message enumerating every missing requirement.
+   */
+  public validatePassword(password: unknown): void {
+    if (!password || typeof password !== "string") {
+      throw new AuthValidationError("Password is required");
+    }
+
+    const failures: string[] = [];
+
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      failures.push(`at least ${MIN_PASSWORD_LENGTH} characters`);
+    }
+    if (!PASSWORD_UPPERCASE_REGEX.test(password)) {
+      failures.push("at least one uppercase letter");
+    }
+    if (!PASSWORD_DIGIT_REGEX.test(password)) {
+      failures.push("at least one digit");
+    }
+    if (!PASSWORD_SPECIAL_CHAR_REGEX.test(password)) {
+      failures.push("at least one special character");
+    }
+
+    if (failures.length > 0) {
+      throw new AuthValidationError(
+        `Password must contain ${failures.join(", ")}`
+      );
+    }
+  }
+
+  /**
    * Validates registration inputs.
    */
   public validateRegisterInput(input: RegisterInput): {
@@ -171,15 +206,7 @@ export class AuthService {
       throw new AuthValidationError("Invalid email address format");
     }
 
-    if (!input.password || typeof input.password !== "string") {
-      throw new AuthValidationError("Password is required");
-    }
-
-    if (input.password.length < MIN_PASSWORD_LENGTH) {
-      throw new AuthValidationError(
-        `Password must be at least ${MIN_PASSWORD_LENGTH} characters long`
-      );
-    }
+    this.validatePassword(input.password);
 
     let normalizedUsername: string | undefined;
     if (input.username) {
@@ -406,6 +433,28 @@ export class AuthService {
     }
     this.signals.record(user.id, context);
     return this.issueAuthResult(user);
+  }
+
+  /**
+   * Signs in the account whose connected Stellar wallet is `stellarAddress`.
+   * The caller must already have proven control of that key (SEP-10, issue #562);
+   * the session carries the user's real role and permissions like any other login.
+   */
+  public async loginWithStellarAccount(
+    stellarAddress: string,
+    context?: AuthRequestContext
+  ): Promise<AuthResult> {
+    const wallet = await this.db.wallet.findUnique({
+      where: { stellarAddress },
+      include: { user: true },
+    });
+    if (!wallet?.user) {
+      throw new AuthUnauthorizedError("No FantasyXI account is linked to this Stellar wallet");
+    }
+    if (context) {
+      this.signals.record(wallet.user.id, { ip: context.ip });
+    }
+    return this.issueAuthResult(wallet.user);
   }
 
   /**
@@ -657,14 +706,8 @@ export class AuthService {
     userId: string,
     input: { password?: string; currentPassword?: string }
   ): Promise<SafeUser> {
-    if (!input.password || typeof input.password !== "string") {
-      throw new AuthValidationError("Password is required");
-    }
-    if (input.password.length < MIN_PASSWORD_LENGTH) {
-      throw new AuthValidationError(
-        `Password must be at least ${MIN_PASSWORD_LENGTH} characters long`
-      );
-    }
+    this.validatePassword(input.password);
+    const nextPassword = input.password as string;
 
     const user = await this.db.user.findUnique({ where: { id: userId } });
     if (!user) {
@@ -680,7 +723,7 @@ export class AuthService {
       }
     }
 
-    const passwordHash = await bcrypt.hash(input.password, BCRYPT_SALT_ROUNDS);
+    const passwordHash = await bcrypt.hash(nextPassword, BCRYPT_SALT_ROUNDS);
     const updated = await this.db.user.update({
       where: { id: userId },
       data: { passwordHash },

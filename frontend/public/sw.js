@@ -77,10 +77,21 @@ async function trimCache(cacheName, maxEntries) {
   await Promise.all(keys.slice(0, Math.max(0, keys.length - maxEntries)).map((key) => cache.delete(key)));
 }
 
+async function reportCacheError(cacheName) {
+  const windowClients = await clients.matchAll({ type: "window", includeUncontrolled: true });
+  for (const client of windowClients) {
+    client.postMessage({ type: "FANTASYXI_CACHE_ERROR", cacheName, timestamp: Date.now() });
+  }
+}
+
 async function putInCache(cacheName, request, response, maxEntries) {
-  const cache = await caches.open(cacheName);
-  await cache.put(request, response);
-  if (maxEntries) await trimCache(cacheName, maxEntries);
+  try {
+    const cache = await caches.open(cacheName);
+    await cache.put(request, response);
+    if (maxEntries) await trimCache(cacheName, maxEntries);
+  } catch {
+    await reportCacheError(cacheName);
+  }
 }
 
 // Install: precache the offline shell, then warm the offline pages
@@ -281,5 +292,19 @@ self.addEventListener("sync", (event) => {
       })()
     );
   }
+});
+
+self.addEventListener("message", (event) => {
+  if (event.data?.type !== "CLEAR_RUNTIME_CACHES_AND_RESYNC") return;
+  event.waitUntil(
+    (async () => {
+      await Promise.all([PAGE_CACHE, ASSET_CACHE, API_CACHE].map((name) => caches.delete(name)));
+      await Promise.allSettled(OFFLINE_PAGES.map(cachePageWithAssets));
+      const windowClients = await clients.matchAll({ type: "window", includeUncontrolled: true });
+      for (const client of windowClients) {
+        client.postMessage({ type: "SYNC_SQUAD_MUTATIONS", tag: "manual-cache-repair", timestamp: Date.now() });
+      }
+    })()
+  );
 });
 

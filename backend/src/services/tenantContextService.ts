@@ -84,7 +84,7 @@ export async function resolveTenant(tenantId: string): Promise<TenantContext> {
  * @returns Cache entry if hit and not expired, null otherwise
  */
 async function getCachedTenant(
-  tenantId: string
+  tenantId: string,
 ): Promise<TenantCacheEntry | null> {
   const cacheKey = `${REDIS_TENANT_CACHE_KEY_PREFIX}${tenantId}`;
 
@@ -127,7 +127,7 @@ async function getCachedTenant(
  */
 async function cacheTenant(
   context: TenantContext,
-  ttlMs: number = DEFAULT_CACHE_TTL_MS
+  ttlMs: number = DEFAULT_CACHE_TTL_MS,
 ): Promise<void> {
   const entry: TenantCacheEntry = {
     context,
@@ -146,11 +146,7 @@ async function cacheTenant(
     try {
       await redis.set(cacheKey, JSON.stringify(entry), "EX", ttlSeconds);
     } catch (error) {
-      console.warn(
-        "[TenantCache] Redis set error for %s:",
-        context.id,
-        error
-      );
+      console.warn("[TenantCache] Redis set error for %s:", context.id, error);
       // Fallback to memory cache already done above
     }
   }
@@ -173,11 +169,7 @@ export async function invalidateTenantCache(tenantId: string): Promise<void> {
     try {
       await redis.del(cacheKey);
     } catch (error) {
-      console.warn(
-        "[TenantCache] Redis delete error for %s:",
-        tenantId,
-        error
-      );
+      console.warn("[TenantCache] Redis delete error for %s:", tenantId, error);
     }
   }
 }
@@ -203,18 +195,18 @@ function isCacheExpired(entry: TenantCacheEntry): boolean {
 export async function createTenant(
   tier: TenantTier,
   displayName: string,
-  customRetentionDays?: number
+  customRetentionDays?: number,
 ): Promise<TenantContext> {
   if (tier === TenantTier.PUBLIC) {
     throw new Error(
-      "Cannot create PUBLIC tier tenant; it uses the shared 'public' schema"
+      "Cannot create PUBLIC tier tenant; it uses the shared 'public' schema",
     );
   }
 
   // Generate schema name (tenant_<uuid> or sponsored_<uuid>)
   const schemaName = generateSchemaName(
     `${Date.now()}-${Math.random().toString(36).substring(7)}`,
-    tier
+    tier,
   );
 
   if (!validateSchemaName(schemaName)) {
@@ -225,7 +217,7 @@ export async function createTenant(
   const quotas = getTenantQuotasByTier(tier);
   const retentionDays = Math.min(
     customRetentionDays || 365,
-    quotas.maxDataRetentionDays
+    quotas.maxDataRetentionDays,
   );
 
   // Create tenant record
@@ -243,7 +235,7 @@ export async function createTenant(
   // Initialize schema DDL (create schema if not exists)
   try {
     await prisma.$executeRawUnsafe(
-      `CREATE SCHEMA IF NOT EXISTS "${schemaName}"`
+      `CREATE SCHEMA IF NOT EXISTS "${schemaName}"`,
     );
     console.log(`[Tenant] Created schema: ${schemaName}`);
   } catch (error) {
@@ -311,7 +303,9 @@ export async function deactivateTenant(tenantId: string): Promise<void> {
  *
  * @param tenantId - The tenant ID to reactivate
  */
-export async function reactivateTenant(tenantId: string): Promise<TenantContext> {
+export async function reactivateTenant(
+  tenantId: string,
+): Promise<TenantContext> {
   const record = await prisma.tenant.update({
     where: { id: tenantId },
     data: { isActive: true },
@@ -345,7 +339,7 @@ export async function updateTenantMetadata(
     displayName?: string;
     retentionDays?: number;
     maxLeagues?: number;
-  }
+  },
 ): Promise<TenantContext> {
   // Respect tier quotas for retention days
   let finalUpdates = { ...updates };
@@ -358,7 +352,7 @@ export async function updateTenantMetadata(
       const quotas = getTenantQuotasByTier(record.tier as TenantTier);
       finalUpdates.retentionDays = Math.min(
         updates.retentionDays,
-        quotas.maxDataRetentionDays
+        quotas.maxDataRetentionDays,
       );
     }
   }
@@ -394,7 +388,7 @@ export async function updateTenantMetadata(
  */
 export async function userBelongsToTenant(
   userId: string,
-  tenantId: string
+  tenantId: string,
 ): Promise<boolean> {
   // For now, check if user has any membership/league in this tenant's schema
   // In a full implementation, you'd have a tenants_users bridge table
@@ -429,7 +423,7 @@ export async function userBelongsToTenant(
  * @returns User's default tenant (or PUBLIC tier)
  */
 export async function getUserDefaultTenant(
-  userId: string
+  userId: string,
 ): Promise<TenantContext> {
   // Check if user belongs to any enterprise/sponsored leagues
   const leagueMembership = await prisma.leagueMember.findFirst({
@@ -493,4 +487,52 @@ export function getTenantCacheStats(): {
     memoryCacheSize: memoryCache.size,
     ttlMs: DEFAULT_CACHE_TTL_MS,
   };
+}
+
+// ─── Per-tenant connection quota (#434) ──────────────────────────────────────
+
+/**
+ * Maximum concurrent database connections permitted per tenant.
+ * Tenants exceeding this receive HTTP 429 with Retry-After.
+ * Override per-tier by setting TENANT_CONNECTION_QUOTA_<TIER>=N env vars.
+ */
+const TENANT_QUOTA_DEFAULTS: Record<string, number> = {
+  ENTERPRISE: Number(process.env.TENANT_CONNECTION_QUOTA_ENTERPRISE ?? 50),
+  SPONSORED: Number(process.env.TENANT_CONNECTION_QUOTA_SPONSORED ?? 20),
+  PUBLIC: Number(process.env.TENANT_CONNECTION_QUOTA_PUBLIC ?? 10),
+};
+
+/** Active connection counts, keyed by tenantId. */
+const tenantActiveConnections = new Map<string, number>();
+
+/**
+ * Acquire a connection slot for a tenant (#434).
+ * Returns true when the slot was granted, false when the tenant is at quota.
+ * Callers must call `releaseConnectionSlot` in a finally block.
+ */
+export function acquireConnectionSlot(tenantId: string, tier: string): boolean {
+  const quota = TENANT_QUOTA_DEFAULTS[tier] ?? TENANT_QUOTA_DEFAULTS.PUBLIC;
+  const current = tenantActiveConnections.get(tenantId) ?? 0;
+  if (current >= quota) return false;
+  tenantActiveConnections.set(tenantId, current + 1);
+  return true;
+}
+
+/**
+ * Release a previously acquired connection slot (#434).
+ */
+export function releaseConnectionSlot(tenantId: string): void {
+  const current = tenantActiveConnections.get(tenantId) ?? 0;
+  if (current <= 1) {
+    tenantActiveConnections.delete(tenantId);
+  } else {
+    tenantActiveConnections.set(tenantId, current - 1);
+  }
+}
+
+/**
+ * Returns current active connection counts per tenant for monitoring (#434).
+ */
+export function getTenantConnectionStats(): Record<string, number> {
+  return Object.fromEntries(tenantActiveConnections);
 }

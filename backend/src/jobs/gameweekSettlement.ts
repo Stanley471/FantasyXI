@@ -8,6 +8,7 @@ import { tournamentBracketService } from "../services/league/tournamentService.j
 import { eventBus, publishOrThrow } from "../services/events/eventBus.js";
 import { GAMEWEEK_UPDATED_EVENT } from "../services/events/domainEvents.js";
 import { gameweekOracleService } from "../services/financial/gameweekOracleService.js";
+import { createGameweekAuditAnchorService } from "../services/financial/gameweekAuditAnchorService.js";
 import { updateMatchRatings } from "../services/league/matchRatingService.js";
 // Imported for its side effect: subscribes the scoring, free-hit and league
 // settlement handlers to GAMEWEEK_UPDATED_EVENT (issue #118). This job no
@@ -181,6 +182,13 @@ export async function settleGameweek(gameweekId: number): Promise<void> {
     where: { id: gameweekId },
     data: { isFinished: true, settledAt: new Date() },
   });
+
+  // Anchor the final standings and prizes on Stellar (issue #559). Best effort:
+  // a failure is logged and retried by settleCompletedGameweeks, and never
+  // un-settles the gameweek.
+  if (process.env.STELLAR_AUDIT_ANCHOR_SECRET) {
+    await (await createGameweekAuditAnchorService()).anchorGameweekSafely(gameweekId);
+  }
 }
 
 /**
@@ -200,6 +208,9 @@ export async function settleCompletedGameweeks(): Promise<number[]> {
       await settleGameweek(gw.id);
       settled.push(gw.id);
     }
+  }
+  if (process.env.STELLAR_AUDIT_ANCHOR_SECRET) {
+    await (await createGameweekAuditAnchorService()).retryUnanchored();
   }
   return settled;
 }
