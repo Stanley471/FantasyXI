@@ -1,6 +1,6 @@
 "use client";
 
-import React, { createContext, useContext, useEffect, useState } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { StellarWalletsKit } from "@creit.tech/stellar-wallets-kit/sdk";
 import { defaultModules } from "@creit.tech/stellar-wallets-kit/modules/utils";
 import {
@@ -14,6 +14,13 @@ import {
 } from "@creit.tech/stellar-wallets-kit/types";
 import type { WalletAdapter, WalletTransactionSigner } from "@/lib/stellar/sorobanDeposit";
 import { createSupportedWalletModules } from "@/lib/stellar/walletModal";
+import {
+  classifyWalletError,
+  connectionTypeFor,
+  type WalletConnectionErrorCode,
+  type WalletConnectionType,
+} from "@/lib/stellar/walletConnect";
+import { ConnectWalletModal } from "@/components/wallet/ConnectWalletModal";
 
 export type WalletProviderId = "freighter" | "albedo" | "xbull" | "hana" | "wallet_connect";
 
@@ -24,10 +31,18 @@ export interface SupportedWallet extends ISupportedWallet {
 interface WalletContextValue {
   wallets: SupportedWallet[];
   selectedWallet: WalletProviderId | null;
+  /** How the active wallet is reached: extension, web popup, or mobile (WalletConnect). */
+  connectionType: WalletConnectionType | null;
   publicKey: string | null;
   isConnecting: boolean;
+  /** Wallet currently awaiting approval, if any. */
+  connectingWalletId: WalletProviderId | null;
   isReady: boolean;
   error: string | null;
+  errorCode: WalletConnectionErrorCode | null;
+  isConnectModalOpen: boolean;
+  openConnectModal: () => void;
+  closeConnectModal: () => void;
   connect: (walletId: WalletProviderId) => Promise<void>;
   disconnect: () => Promise<void>;
   signTransaction: WalletTransactionSigner;
@@ -43,6 +58,10 @@ const WALLET_IDS = new Set<WalletProviderId>([
   "hana",
   "wallet_connect",
 ]);
+
+/** Extension wallets expose the active account silently, so account switches can be polled. */
+const WATCHABLE_WALLETS = new Set<WalletProviderId>(["freighter", "xbull", "hana"]);
+const ACCOUNT_POLL_INTERVAL_MS = 2500;
 
 const walletConnectProjectId = process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID;
 
@@ -72,6 +91,44 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   const [isConnecting, setIsConnecting] = useState(false);
   const [isReady, setIsReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState<WalletConnectionErrorCode | null>(null);
+  const [connectingWalletId, setConnectingWalletId] = useState<WalletProviderId | null>(null);
+  const [isConnectModalOpen, setIsConnectModalOpen] = useState(false);
+  const publicKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    publicKeyRef.current = publicKey;
+  }, [publicKey]);
+
+  const openConnectModal = useCallback(() => {
+    setError(null);
+    setErrorCode(null);
+    setIsConnectModalOpen(true);
+  }, []);
+  const closeConnectModal = useCallback(() => setIsConnectModalOpen(false), []);
+
+  // Reflect account switches made inside the wallet extension without a reload.
+  useEffect(() => {
+    if (!selectedWallet || !WATCHABLE_WALLETS.has(selectedWallet)) return;
+    let cancelled = false;
+    const sync = async () => {
+      try {
+        const { address } = await StellarWalletsKit.getAddress();
+        if (!cancelled && address && address !== publicKeyRef.current) setPublicKey(address);
+      } catch {
+        // Wallet locked or temporarily unavailable: keep the last known account.
+      }
+    };
+    const timer = setInterval(sync, ACCOUNT_POLL_INTERVAL_MS);
+    window.addEventListener("focus", sync);
+    document.addEventListener("visibilitychange", sync);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      window.removeEventListener("focus", sync);
+      document.removeEventListener("visibilitychange", sync);
+    };
+  }, [selectedWallet]);
 
   useEffect(() => {
     const modules = createModules();
@@ -118,7 +175,9 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
 
   const connect = async (walletId: WalletProviderId) => {
     setIsConnecting(true);
+    setConnectingWalletId(walletId);
     setError(null);
+    setErrorCode(null);
     try {
       StellarWalletsKit.setWallet(walletId);
       const result = await StellarWalletsKit.fetchAddress();
@@ -126,10 +185,13 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       setPublicKey(result.address);
       localStorage.setItem(WALLET_STORAGE_KEY, walletId);
     } catch (connectionError: unknown) {
-      setError(connectionError instanceof Error ? connectionError.message : "Wallet connection was rejected.");
-      throw connectionError;
+      const classified = classifyWalletError(connectionError, walletId);
+      setError(classified.message);
+      setErrorCode(classified.code);
+      throw classified;
     } finally {
       setIsConnecting(false);
+      setConnectingWalletId(null);
     }
   };
 
@@ -164,10 +226,16 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       value={{
         wallets,
         selectedWallet,
+        connectionType: selectedWallet ? connectionTypeFor(selectedWallet) : null,
         publicKey,
         isConnecting,
+        connectingWalletId,
         isReady,
         error,
+        errorCode,
+        isConnectModalOpen,
+        openConnectModal,
+        closeConnectModal,
         connect,
         disconnect,
         signTransaction,
@@ -175,6 +243,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       }}
     >
       {children}
+      <ConnectWalletModal />
     </WalletContext.Provider>
   );
 }

@@ -16,6 +16,7 @@ import { stellarConfig } from "../../config/stellar.js";
 import { StellarService, stellarService } from "./stellarService.js";
 import { PrizeService } from "../league/prizeService.js";
 import { createSettlementProof } from "./settlementProof.js";
+import { payoutAuditAnchorService } from "../audit/payoutAuditAnchorService.js";
 import { EmailService, emailService } from "../email/emailService.js";
 import {
   PayoutDeadLetterService,
@@ -826,6 +827,9 @@ export class FinancialService {
         prizeAmount: winner.prizeAmount,
       })),
     });
+    const heldWinnerUserIds = sortedMembers
+      .filter((member: any) => member.payoutHoldAt && winners.some((winner) => winner.userId === member.userId))
+      .map((member: any) => member.userId);
 
     return {
       leagueId: league.id,
@@ -837,10 +841,14 @@ export class FinancialService {
       platformFee: distribution.platformFee,
       netPrizePool: distribution.prizePool,
       winners,
+      ...(heldWinnerUserIds.length > 0 ? { heldWinnerUserIds } : {}),
       ...(league.payoutPreset && league.payoutPreset !== "standard" && distribution.prizePool > 0 && winners.length > 0
         ? { distributionBps: PrizeService.encodeSorobanPayoutAmounts(winners.map((winner) => winner.prizeAmount), distribution.prizePool) }
         : {}),
-      canSettle: true,
+      canSettle: heldWinnerUserIds.length === 0,
+      ...(heldWinnerUserIds.length > 0
+        ? { unsettledReason: "Settlement is on administrative hold while winner fraud signals are reviewed." }
+        : {}),
       proofHash,
     };
   }
@@ -1032,6 +1040,7 @@ export class FinancialService {
       await tx.coordinatedTransaction.updateMany({ where: { settlementKey: leagueId },
         data: { status: "SUCCESS", ledgerSeq, finalizedAt: confirmedAt, transactionId: ledgerRows[0].id } });
     });
+    await payoutAuditAnchorService.recordSettlement(txHash);
     return { leagueId, contractLeagueId: FinancialService.toContractLeagueId(leagueId).toString(),
       stellarTxHash: txHash, ledgerSeq, winnerTransactionCount: plan.winners.length, platformFee: plan.platformFee };
   }

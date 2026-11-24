@@ -8,9 +8,11 @@ import { sorobanTransactionReplayDaemon } from "../services/financial/sorobanTra
 import { ledgerAuditService } from "../services/financial/ledgerAuditService.js";
 import { runLedgerReconciliationJob } from "../jobs/ledgerReconciliation.js";
 import { runProofOfReserveJob } from "../jobs/proofOfReserve.js";
+import { runStellarReconciliationJob, STELLAR_RECONCILIATION_CRON, STELLAR_RECONCILIATION_JOB_NAME } from "../jobs/stellarReconciliation.js";
 import { applyRetroactiveBpsAdjustments } from "../jobs/retroactiveBpsAdjustments.js";
 import { jwtKeyRotationService } from "../services/auth/jwtKeyRotationService.js";
 import { auditLeaguesForCollusion } from "../jobs/leagueIntegrityAudit.js";
+import { anchorPayoutAuditRoot } from "../jobs/payoutAuditAnchor.js";
 import {
   executeFplSyncTask,
   FPL_SYNC_DLQ_NAME,
@@ -66,7 +68,10 @@ export const JOB_DEFINITIONS: JobDefinition[] = [
     },
   },
   { name: "ledger-reconciliation", cron: "30 2 * * *", handler: () => runLedgerReconciliationJob() },
+  // Escrow balance vs ledger drift detection, every 6 hours (issue #560)
+  { name: STELLAR_RECONCILIATION_JOB_NAME, cron: STELLAR_RECONCILIATION_CRON, handler: () => runStellarReconciliationJob() },
   { name: "proof-of-reserve", cron: "*/15 * * * *", handler: () => runProofOfReserveJob() },
+  { name: "payout-audit-anchor", cron: "*/15 * * * *", handler: () => anchorPayoutAuditRoot() },
   { name: "retroactive-bps", cron: "*/30 * * * *", handler: () => applyRetroactiveBpsAdjustments() },
   // Pre-publishes the next JWT signing key when due and prunes retired keys (issue #332)
   { name: "jwt-key-rotation", cron: "*/15 * * * *", handler: () => jwtKeyRotationService.rotate() },

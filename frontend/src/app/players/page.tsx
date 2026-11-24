@@ -13,6 +13,7 @@ import {
   IconUsers,
 } from "@/components/ui/Icons";
 import { useVirtualList } from "@/hooks/useVirtualList";
+import { MarketTrendsPanel } from "@/components/players/MarketTrendsPanel";
 
 export default function PlayersPage() {
   const [players, setPlayers] = useState<Player[]>([]);
@@ -22,6 +23,7 @@ export default function PlayersPage() {
   const [selectedTeamId, setSelectedTeamId] = useState<string>("ALL");
   const [sortBy, setSortBy] = useState<string>("totalPoints");
   const [sortOrder, setSortOrder] = useState<"desc" | "asc">("desc");
+  const [priceChangedOnly, setPriceChangedOnly] = useState(false);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
   // Ref on the scrollable table wrapper for the virtualiser
@@ -66,6 +68,7 @@ export default function PlayersPage() {
         params.set("sortBy", sortBy);
         params.set("sortOrder", sortOrder);
         params.set("limit", "100");
+        if (priceChangedOnly) params.set("priceChanged", "true");
 
         const res = await api.get<{
           success: boolean;
@@ -84,7 +87,7 @@ export default function PlayersPage() {
     }, 200);
 
     return () => clearTimeout(timer);
-  }, [search, selectedPosition, selectedTeamId, sortBy, sortOrder]);
+  }, [search, selectedPosition, selectedTeamId, sortBy, sortOrder, priceChangedOnly]);
 
   return (
     <div className="space-y-6 pb-12 max-w-full overflow-x-hidden">
@@ -185,13 +188,19 @@ export default function PlayersPage() {
             ))}
           </div>
 
-          <div className="text-xs font-mono text-slate-400">
-            Showing {players.length} players
+          <div className="flex items-center gap-3 text-xs font-mono text-slate-400">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" checked={priceChangedOnly} onChange={(event) => setPriceChangedOnly(event.target.checked)} className="accent-emerald-600" />
+              Price changed in 24h
+            </label>
+            <span>Showing {players.length} players</span>
           </div>
         </div>
       </div>
 
       {/* Players Data Table — virtualised */}
+      <MarketTrendsPanel />
+
       <div className="bg-white border border-slate-200/80 rounded-3xl shadow-sm overflow-hidden">
         {isLoading ? (
           <div className="py-24 text-center text-slate-400">
@@ -267,6 +276,11 @@ export default function PlayersPage() {
                         {/* Price */}
                         <td className="py-3 px-3 text-right font-mono font-bold text-slate-900" style={{ width: "9%" }}>
                           £{(p.price / 10).toFixed(1)}m
+                          {Boolean(p.priceDelta) && (
+                            <span className={`ml-1.5 rounded px-1 py-0.5 text-[9px] ${p.priceDelta! > 0 ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>
+                              {p.priceDelta! > 0 ? "+" : ""}{p.priceDelta!.toFixed(1)}
+                            </span>
+                          )}
                         </td>
 
                         {/* Points */}
@@ -341,6 +355,7 @@ export default function PlayersPage() {
                         <div className="text-slate-400 uppercase tracking-wide text-[9px] font-bold">£</div>
                         <div className="font-mono font-bold text-slate-900 text-[11px] pt-0.5">
                           {(p.price / 10).toFixed(1)}m
+                          {Boolean(p.priceDelta) && <span className={p.priceDelta! > 0 ? "ml-1 text-emerald-700" : "ml-1 text-rose-700"}>{p.priceDelta! > 0 ? "+" : ""}{p.priceDelta!.toFixed(1)}</span>}
                         </div>
                       </div>
                       <div className="rounded-xl bg-slate-50 border border-slate-200/80 px-2 py-1.5">

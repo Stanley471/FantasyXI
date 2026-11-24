@@ -1,9 +1,10 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { api, ApiError } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
-import { useWallet, type WalletProviderId } from "@/context/WalletContext";
+import { useWallet } from "@/context/WalletContext";
+import { TrustlineGuard } from "@/components/stellar/TrustlineGuard";
 import {
   IconClose,
   IconCopy,
@@ -14,7 +15,12 @@ import {
   IconChevronDown,
   IconChevronUp,
 } from "@/components/ui/Icons";
-import { depositToSorobanEscrow, SorobanDepositTimeoutError } from "@/lib/stellar/sorobanDeposit";
+import {
+  depositToSorobanEscrow,
+  DepositCancelledError,
+  SorobanDepositTimeoutError,
+  type FeeEstimate,
+} from "@/lib/stellar/sorobanDeposit";
 import { mapDepositErrorToMessage } from "@/lib/stellar/depositErrorMessage";
 
 export interface PaymentModalProps {
@@ -43,6 +49,7 @@ type DepositStep =
   | "idle"
   | "connecting"
   | "simulating"
+  | "reviewing"
   | "signing"
   | "submitting"
   | "confirming"
@@ -70,7 +77,9 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [connectedAccount, setConnectedAccount] = useState<string | null>(null);
   const [confirmedTxHash, setConfirmedTxHash] = useState<string | null>(null);
-  const [showWalletPicker, setShowWalletPicker] = useState<boolean>(false);
+  const [canDeposit, setCanDeposit] = useState<boolean>(false);
+  const [feeEstimate, setFeeEstimate] = useState<FeeEstimate | null>(null);
+  const feeDecision = useRef<((approved: boolean) => void) | null>(null);
   // A deposit that was signed and submitted but whose confirmation we lost track of
   // (network drop / RPC timeout). Retrying must re-check this hash, never resubmit.
   const [pendingTxHash, setPendingTxHash] = useState<string | null>(null);
@@ -79,10 +88,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     wallets,
     selectedWallet,
     publicKey,
-    isConnecting,
     error: walletError,
-    connect,
-    disconnect,
+    openConnectModal,
     signTransaction,
   } = useWallet();
 
@@ -140,7 +147,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
    */
   const handleWalletDeposit = async () => {
     if (!selectedWallet || !publicKey) {
-      setShowWalletPicker(true);
+      openConnectModal();
       return;
     }
 
@@ -157,6 +164,12 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         leagueId,
         userPublicKey: publicKey,
         signTransaction,
+        onFeeEstimate: (estimate) =>
+          new Promise<boolean>((resolve) => {
+            feeDecision.current = resolve;
+            setFeeEstimate(estimate);
+            setStep("reviewing");
+          }),
         onProgress: (status) => {
           setStatusMessage(status);
           if (status.includes("Simulating")) setStep("simulating");
@@ -200,6 +213,9 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       }
     } catch (err: unknown) {
       setStep("idle");
+      setFeeEstimate(null);
+
+      if (err instanceof DepositCancelledError) return;
 
       if (err instanceof SorobanDepositTimeoutError) {
         // The deposit may have actually succeeded on-chain; keep the hash around so
@@ -252,13 +268,11 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     }
   };
 
-  const handleWalletConnect = async (walletId: WalletProviderId) => {
-    try {
-      await connect(walletId);
-      setShowWalletPicker(false);
-    } catch {
-      // The provider exposes the detailed error through WalletContext.
-    }
+  const resolveFeeReview = (approved: boolean) => {
+    feeDecision.current?.(approved);
+    feeDecision.current = null;
+    setFeeEstimate(null);
+    if (approved) setStep("signing");
   };
 
   /**
@@ -325,6 +339,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const isWorking =
     step === "connecting" ||
     step === "simulating" ||
+    step === "reviewing" ||
     step === "signing" ||
     step === "submitting" ||
     step === "confirming" ||
@@ -437,14 +452,51 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                 </div>
               </div>
 
+              {publicKey && (
+                <TrustlineGuard
+                  publicKey={publicKey}
+                  signTransaction={signTransaction}
+                  onStatusChange={setCanDeposit}
+                />
+              )}
+
+              {/* Simulated fee breakdown, shown before the wallet is opened */}
+              {step === "reviewing" && feeEstimate && (
+                <div className="p-4 rounded-xl bg-slate-950/80 border border-emerald-500/30 space-y-3 text-xs">
+                  <div className="font-bold text-white uppercase tracking-wide text-[11px]">
+                    Confirm estimated network fee
+                  </div>
+                  <dl className="space-y-1.5 text-slate-300 font-mono text-[11px]">
+                    <div className="flex justify-between"><dt>Resource fee</dt><dd>{feeEstimate.resourceFeeStroops} stroops</dd></div>
+                    <div className="flex justify-between"><dt>Inclusion fee</dt><dd>{feeEstimate.inclusionFeeStroops} stroops</dd></div>
+                    <div className="flex justify-between text-emerald-400 font-bold"><dt>Estimated total</dt><dd>{feeEstimate.totalFeeXlm} XLM</dd></div>
+                    <div className="flex justify-between text-slate-500"><dt>Maximum authorized</dt><dd>{feeEstimate.maxFeeStroops} stroops</dd></div>
+                    {feeEstimate.cpuInstructions !== undefined && (
+                      <div className="flex justify-between text-slate-500"><dt>CPU instructions</dt><dd>{feeEstimate.cpuInstructions.toLocaleString()}</dd></div>
+                    )}
+                    {feeEstimate.readBytes !== undefined && (
+                      <div className="flex justify-between text-slate-500"><dt>Read / write bytes</dt><dd>{feeEstimate.readBytes} / {feeEstimate.writeBytes}</dd></div>
+                    )}
+                  </dl>
+                  <div className="flex gap-2">
+                    <Button type="button" variant="secondary" size="sm" onClick={() => resolveFeeReview(false)} className="flex-1 justify-center">
+                      Cancel
+                    </Button>
+                    <Button type="button" variant="primary" size="sm" onClick={() => resolveFeeReview(true)} className="flex-1 justify-center">
+                      Continue to wallet
+                    </Button>
+                  </div>
+                </div>
+              )}
+
               {/* Status / In Progress Display */}
-              {isWorking && (
+              {isWorking && step !== "reviewing" && (
                 <div className="p-4 rounded-xl bg-emerald-950/20 border border-emerald-500/30 text-center space-y-2">
                   <div className="inline-block w-6 h-6 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin" />
                   <p className="text-xs font-semibold text-emerald-300">{statusMessage}</p>
                   <p className="text-[11px] text-slate-400">
                     {step === "signing"
-                      ? "Please review and approve the transaction in the Freighter popup."
+                      ? "Please review and approve the transaction in your wallet."
                       : "Please wait while your transaction is processed on the Stellar ledger."}
                   </p>
                 </div>
@@ -485,14 +537,14 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                         </div>
                         <div className="truncate text-[11px] font-mono text-slate-300 mt-1">{publicKey}</div>
                       </div>
-                      <button type="button" onClick={() => disconnect()} className="shrink-0 text-[11px] text-slate-400 hover:text-white underline">
+                      <button type="button" onClick={openConnectModal} className="shrink-0 text-[11px] text-slate-400 hover:text-white underline">
                         Change
                       </button>
                     </div>
                   ) : (
                     <button
                       type="button"
-                      onClick={() => setShowWalletPicker(true)}
+                      onClick={openConnectModal}
                       className="w-full flex items-center justify-between p-3 rounded-lg bg-slate-950/70 border border-slate-700 hover:border-emerald-500/50 transition-colors text-left"
                     >
                       <span>
@@ -508,7 +560,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                     variant="primary"
                     size="lg"
                     onClick={handleWalletDeposit}
-                    disabled={isWorking || !publicKey}
+                    disabled={isWorking || !publicKey || !canDeposit}
                     className="w-full justify-center uppercase font-bold tracking-wide text-xs py-3.5"
                   >
                     <IconWallet className="w-4 h-4 mr-2" />
@@ -591,45 +643,6 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
             </>
           )}
         </div>
-
-        {showWalletPicker && (
-          <div className="absolute inset-0 z-10 flex items-center justify-center p-4 bg-slate-950/95">
-            <div className="w-full max-w-sm space-y-4">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h3 className="text-base font-bold text-white">Connect wallet</h3>
-                  <p className="text-xs text-slate-400 mt-1">Choose how to sign your Soroban deposit.</p>
-                </div>
-                <button type="button" onClick={() => setShowWalletPicker(false)} className="p-1.5 text-slate-400 hover:text-white" aria-label="Close wallet picker">
-                  <IconClose className="w-5 h-5" />
-                </button>
-              </div>
-              <div className="space-y-2">
-                {wallets.map((wallet) => (
-                  <button
-                    key={wallet.id}
-                    type="button"
-                    disabled={isConnecting || !wallet.isAvailable}
-                    onClick={() => handleWalletConnect(wallet.id)}
-                    className="w-full flex items-center gap-3 p-3 rounded-lg bg-slate-900 border border-slate-800 hover:border-emerald-500/50 disabled:opacity-50 disabled:cursor-not-allowed text-left"
-                  >
-                    <img src={wallet.icon} alt="" className="w-8 h-8 rounded-lg" />
-                    <span className="flex-1">
-                      <span className="block text-sm font-semibold text-white">{wallet.name}</span>
-                      <span className="block text-[11px] text-slate-500">{wallet.isAvailable ? "Available" : "Install or enable wallet"}</span>
-                    </span>
-                    {selectedWallet === wallet.id && <IconCheck className="w-4 h-4 text-emerald-400" />}
-                  </button>
-                ))}
-              </div>
-              {!wallets.some((wallet) => wallet.id === "wallet_connect") && (
-                <p className="text-[11px] text-slate-500 border-t border-slate-800 pt-3">
-                  WalletConnect requires <code className="text-emerald-400">NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID</code> to be configured.
-                </p>
-              )}
-            </div>
-          </div>
-        )}
 
         {/* Footer info */}
         <div className="p-3.5 border-t border-pitch-border bg-slate-950/80 text-center text-[11px] text-slate-500 flex items-center justify-center gap-1.5">

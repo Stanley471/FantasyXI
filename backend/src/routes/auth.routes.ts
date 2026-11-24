@@ -24,6 +24,11 @@ import {
   deletePasskey,
   refresh,
   logout,
+  getStellarChallenge,
+  verifyStellarChallenge,
+  configurePasskeyRecovery,
+  beginPasskeyRecovery,
+  completePasskeyRecovery,
 } from "../controllers/auth.controller.js";
 import { requireAuth, requirePermission } from "../middleware/authMiddleware.js";
 import { Permission } from "../types/index.js";
@@ -51,6 +56,12 @@ router.post("/logout", authRateLimiter, logout);
 
 // POST /api/v1/auth/login/verify (step-up code for a login from a new device)
 router.post("/login/verify", authRateLimiter, verifyLoginChallenge);
+
+// SEP-0010 Stellar Web Authentication (issue #562)
+// GET /api/v1/auth/stellar/challenge?account=G...
+router.get("/stellar/challenge", authRateLimiter, getStellarChallenge);
+// POST /api/v1/auth/stellar/verify
+router.post("/stellar/verify", authRateLimiter, verifyStellarChallenge);
 
 // GET /api/v1/auth/me (Protected)
 router.get("/me", requireAuth, authenticatedRateLimiter, requirePermission(Permission.PROFILE_READ), getMe);
@@ -120,6 +131,9 @@ router.post("/wallets/verify", ...passkeyOwner, verifyAndLinkWalletHandler);
 router.get("/wallets", requireAuth, authenticatedRateLimiter, listLinkedWalletsHandler);
 router.patch("/wallets/:walletId", ...passkeyOwner, renameLinkedWalletHandler);
 router.delete("/wallets/:walletId", ...passkeyOwner, unlinkWalletHandler);
+router.post("/webauthn/recovery/configure", ...passkeyOwner, configurePasskeyRecovery);
+router.post("/webauthn/recovery/begin", authRateLimiter, beginPasskeyRecovery);
+router.post("/webauthn/recovery/complete", authRateLimiter, completePasskeyRecovery);
 
 // POST /api/v1/auth/keys/:kid/revoke (ADMIN or service key: revokes a JWT signing key on every node)
 router.post("/keys/:kid/revoke", requireAuth, requirePermission(Permission.AUTH_KEYS_MANAGE), revokeSigningKey);

@@ -38,6 +38,13 @@ import {
   createSorobanEventIngestionService,
   type SorobanEventIngestionService,
 } from "./services/financial/sorobanEventIngestionService.js";
+import { metricsMiddleware } from "./middleware/metricsMiddleware.js";
+import { exportMetrics, exportMetricsJson } from "./controllers/metrics.controller.js";
+import {
+  createStellarStreamService,
+  type StellarStreamService,
+} from "./services/financial/stellarStreamService.js";
+import { createConnectionLeakDetector } from "./services/monitoring/connectionLeakDetector.js";
 
 dotenv.config();
 
@@ -53,6 +60,9 @@ app.set("trust proxy", 1);
 // ============================================================
 // Middleware
 // ============================================================
+
+// Metrics collection middleware (must be early to capture all requests)
+app.use(metricsMiddleware);
 
 app.use(
   cors({
@@ -164,6 +174,28 @@ app.get(
 );
 
 // ============================================================
+// Metrics Endpoint (Prometheus)
+// ============================================================
+
+// Protected by service key authentication via requireAuth
+app.get(
+  "/metrics",
+  requireAuth,
+  async (req: Request, res: Response, next: NextFunction) => {
+    await exportMetrics(req, res, next);
+  }
+);
+
+// Metrics debug endpoint (JSON format)
+app.get(
+  "/metrics/json",
+  requireAuth,
+  async (req: Request, res: Response, next: NextFunction) => {
+    await exportMetricsJson(req, res, next);
+  }
+);
+
+// ============================================================
 // Global error handler
 // ============================================================
 
@@ -195,9 +227,12 @@ function startTransactionCoordinator(): void {
 
 let liveSocketServer: ReturnType<typeof attachLiveSocketServer> | null = null;
 let sorobanEventIngestion: SorobanEventIngestionService | null = null;
+let stellarStream: StellarStreamService | null = null;
 let chatAdapter: Awaited<ReturnType<typeof initRedisChat>> = null;
+const connectionLeakDetector = createConnectionLeakDetector();
 
 async function startServer(): Promise<void> {
+  connectionLeakDetector?.start();
   if (process.env.DATABASE_URL && process.env.PARTITION_ROTATION_ENABLED !== "false") {
     partitionRotationWorker.start();
   }
@@ -205,6 +240,11 @@ async function startServer(): Promise<void> {
   if (process.env.DATABASE_URL && process.env.SOROBAN_INGEST_ENABLED !== "false") {
     sorobanEventIngestion = await createSorobanEventIngestionService();
     sorobanEventIngestion?.start();
+  }
+  // Horizon SSE deposit listener (set STELLAR_STREAM_ENABLED=false to disable)
+  if (process.env.DATABASE_URL && process.env.STELLAR_STREAM_ENABLED !== "false") {
+    stellarStream = await createStellarStreamService();
+    stellarStream?.start();
   }
   await eventFanout.start();
   chatAdapter = await initRedisChat();
@@ -277,6 +317,7 @@ startServer().catch((error) => {
 process.on("SIGTERM", () => {
   partitionRotationWorker.stop();
   sorobanEventIngestion?.stop();
+  stellarStream?.stop();
   // Persist buffered financial audit entries before exiting
   stopJobQueue()
     .finally(() => transactionCoordinator.stop())
@@ -288,5 +329,6 @@ process.on("SIGTERM", () => {
     .finally(() => chatAdapter?.close())
     .finally(() => eventFanout.close())
     .finally(() => closeRedisClient())
+    .finally(() => connectionLeakDetector?.stop())
     .finally(() => process.exit(0));
 });

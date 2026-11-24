@@ -98,7 +98,15 @@ export interface SybilCluster {
 
 export interface SybilAnalysis {
   clusters: SybilCluster[];
-  accounts: Array<{ userId: string; username: string; riskScore: number; clusterId: string; flagged: boolean }>;
+  accounts: Array<{
+    userId: string;
+    username: string;
+    riskScore: number;
+    riskScorePercent: number;
+    clusterId: string;
+    flagged: boolean;
+    payoutHeld?: boolean;
+  }>;
   suppressedSignals: Array<{ signal: string; accounts: number }>;
 }
 
@@ -106,6 +114,7 @@ export interface SybilLeagueReport extends SybilAnalysis {
   leagueId: string;
   analyzedAt: string;
   memberCount: number;
+  payoutHoldsApplied: number;
 }
 
 /** Stellar testnet Friendbot creates every testnet account: a shared funder carrying no signal. */
@@ -123,7 +132,7 @@ export const DEFAULT_SYBIL_POLICY: SybilPolicy = {
   minLinkConfidence: 0.5,
   flagRiskThreshold: 0.8,
   minSquadOverlap: 0.8,
-  coordinationWindowMs: 10 * 60_000,
+  coordinationWindowMs: 60_000,
   signalLookbackMs: 90 * 24 * 60 * 60_000,
   ignoredFunders: new Set([TESTNET_FRIENDBOT]),
 };
@@ -278,16 +287,28 @@ export function analyzeSybilGraph(input: SybilGraphInput, policy: SybilPolicy = 
   for (const [key, mirroredTransfers] of candidates) {
     const [a, b] = key.split("|");
     const overlap = jaccard(players.get(a)!, players.get(b)!);
-    if (overlap.score < policy.minSquadOverlap) continue;
-    // Identical squads created together score half; each mirrored transfer adds an eighth
-    const confidence =
-      policy.weights.COORDINATED_SQUAD * overlap.score * Math.min(1, 0.5 + 0.125 * mirroredTransfers);
+    const nodeA = input.nodes.find((node) => node.userId === a)!;
+    const nodeB = input.nodes.find((node) => node.userId === b)!;
+    const coordinatedTransferCount = nodeA.transfers.filter((left) =>
+      nodeB.transfers.some(
+        (right) =>
+          left.gameweekId === right.gameweekId &&
+          left.playerInId === right.playerInId &&
+          left.playerOutId === right.playerOutId &&
+          Math.abs(left.at.getTime() - right.at.getTime()) <= window
+      )
+    ).length;
+    const transferDenominator = Math.max(nodeA.transfers.length, nodeB.transfers.length, 1);
+    const transferSimilarity = coordinatedTransferCount / transferDenominator;
+    if (overlap.score < policy.minSquadOverlap && transferSimilarity <= 0.8) continue;
+    const squadConfidence = overlap.score * Math.min(1, 0.5 + 0.125 * mirroredTransfers);
+    const confidence = policy.weights.COORDINATED_SQUAD * Math.max(squadConfidence, transferSimilarity);
     addEvidence(
       a,
       b,
       "COORDINATED_SQUAD",
       confidence,
-      `${overlap.shared} shared players (Jaccard ${round(overlap.score)}), ${mirroredTransfers} mirrored transfers`
+      `${overlap.shared} shared players (Jaccard ${round(overlap.score)}), ${coordinatedTransferCount}/${transferDenominator} transfers matched within ${window / 1000}s`
     );
   }
 
@@ -340,6 +361,7 @@ export function analyzeSybilGraph(input: SybilGraphInput, policy: SybilPolicy = 
     .flatMap((cluster) =>
       cluster.members.map((member) => ({
         ...member,
+        riskScorePercent: Math.round(member.riskScore * 100),
         clusterId: cluster.id,
         flagged: member.riskScore >= policy.flagRiskThreshold,
       }))
@@ -430,7 +452,7 @@ export class SybilDetectionGraphService {
       if (cached) return cached;
     }
 
-    const league = await this.db.league.findUnique({ where: { id: leagueId }, select: { id: true } });
+    const league = await this.db.league.findUnique({ where: { id: leagueId }, select: { id: true, entryFee: true } });
     if (!league) throw new SybilLeagueNotFoundError();
 
     const nodes = await this.loadNodes(leagueId);
@@ -442,6 +464,7 @@ export class SybilDetectionGraphService {
       leagueId,
       analyzedAt: new Date().toISOString(),
       memberCount: nodes.length,
+      payoutHoldsApplied: 0,
       ...analyzeSybilGraph({ nodes, funders, globalFanout }, this.policy),
     };
 
@@ -454,6 +477,18 @@ export class SybilDetectionGraphService {
         ip: "n/a",
         detail: { riskScore: account.riskScore, clusterId: account.clusterId },
       });
+      if (Number(league.entryFee) > 0 && this.db.leagueMember?.updateMany) {
+        const held = await this.db.leagueMember.updateMany({
+          where: { leagueId, userId: account.userId },
+          data: {
+            payoutHoldAt: new Date(),
+            payoutHoldReason: `Automated Sybil/collusion review: ${account.clusterId}`,
+            payoutRiskScore: account.riskScorePercent,
+          },
+        });
+        account.payoutHeld = held.count > 0;
+        report.payoutHoldsApplied += held.count;
+      }
     }
 
     await this.cacheReport(cacheKey, report);
