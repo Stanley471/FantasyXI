@@ -1,4 +1,4 @@
-import { BaseFee, Horizon, Keypair, Memo, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
+import { BASE_FEE, Horizon, Keypair, Memo, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
 import { prisma } from "../../config/db.js";
 import { stellarConfig } from "../../config/stellar.js";
 import { GENESIS_HASH, PersistentCryptoAuditLog } from "./cryptoAuditLog.js";
@@ -39,7 +39,7 @@ export class PayoutAuditAnchorService {
     const keypair = Keypair.fromSecret(secret);
     const server = new Horizon.Server(stellarConfig.horizonUrl);
     const account = await server.loadAccount(keypair.publicKey());
-    const transaction = new TransactionBuilder(account, { fee: BaseFee, networkPassphrase: stellarConfig.networkPassphrase })
+    const transaction = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: stellarConfig.networkPassphrase })
       .addMemo(Memo.hash(Buffer.from(head.hash, "hex")))
       .addOperation(Operation.manageData({ name: "fantasyxi_payout_audit", value: Buffer.from(head.hash, "hex") }))
       .setTimeout(60)
