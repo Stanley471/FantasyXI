@@ -35,7 +35,12 @@ import {
   applyMicropaymentStateUpdateHandler,
   disputeMicropaymentChannelHandler,
   settleGameweekMicropaymentChannelsHandler,
-} from "../controllers/micropayment.controller.js";
+  inspectLeagueDisputeArbitrationHandler,
+  inspectRefundProposalHandler,
+  initiateRefundProposalHandler,
+  signRefundProposalHandler,
+  broadcastRefundProposalHandler,
+  processDisputeTimeoutsHandler,
 
 const router = Router({ mergeParams: true });
 // Private high-roller leagues require a ZK buy-in range proof with each deposit
@@ -95,5 +100,41 @@ router.get("/micropayments/channels/:channelId", getMicropaymentChannelHandler);
 router.post("/micropayments/channels/:channelId/state", applyMicropaymentStateUpdateHandler);
 router.post("/micropayments/channels/:channelId/dispute", mutationRateLimiter, disputeMicropaymentChannelHandler);
 router.post("/micropayments/gameweeks/:gameweekId/settle", requireRole(UserRole.ADMIN), settleGameweekMicropaymentChannelsHandler);
+
+// Multi-signature smart escrow dispute arbitration & refund flow (Issue #419)
+router.get(
+  "/disputes/arbitration",
+  requirePermission(Permission.DISPUTE_INSPECT),
+  inspectLeagueDisputeArbitrationHandler
+);
+router.get(
+  "/disputes/arbitration/:proposalId",
+  requirePermission(Permission.DISPUTE_INSPECT),
+  inspectRefundProposalHandler
+);
+router.post(
+  "/disputes/arbitration/proposals",
+  mutationRateLimiter,
+  requirePermission(Permission.DISPUTE_ARBITRATE),
+  initiateRefundProposalHandler
+);
+router.post(
+  "/disputes/arbitration/:proposalId/sign",
+  mutationRateLimiter,
+  requirePermission(Permission.DISPUTE_ARBITRATE),
+  signRefundProposalHandler
+);
+router.post(
+  "/disputes/arbitration/:proposalId/broadcast",
+  mutationRateLimiter,
+  requirePermission(Permission.DISPUTE_ARBITRATE),
+  broadcastRefundProposalHandler
+);
+router.post(
+  "/disputes/arbitration/process-timeouts",
+  mutationRateLimiter,
+  requirePermission(Permission.DISPUTE_ARBITRATE),
+  processDisputeTimeoutsHandler
+);
 
 export default router;

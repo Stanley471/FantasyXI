@@ -821,6 +821,49 @@ export class SorobanContractClient {
   }
 
   /**
+   * Executes a multi-signature authorized refund (e.g. 2-of-3) across participants.
+   * Rejects locally before broadcasting to Soroban RPC if fewer than `requiredThreshold`
+   * distinct signers are provided.
+   */
+  public async refundWithMultisig(
+    approverSecrets: string[],
+    leagueId: number | bigint,
+    participants: string[],
+    requiredThreshold: number
+  ): Promise<InvocationResult> {
+    if (requiredThreshold < 1) {
+      return this.failure("Refund multisig threshold must be at least 1");
+    }
+    const distinctApprovers = new Set(approverSecrets).size;
+    if (distinctApprovers < requiredThreshold) {
+      return this.failure(
+        `Insufficient signatures for multisig refund: ${distinctApprovers} of ${requiredThreshold} required signer(s) provided`
+      );
+    }
+    return this.invokeWithMultisig(approverSecrets, "execute_multisig_refund", (approvals) => [
+      approvals,
+      SorobanContractClient.u64(leagueId),
+      xdr.ScVal.scvVec(participants.map((p) => SorobanContractClient.address(p))),
+    ]);
+  }
+
+  /**
+   * Executes an automated timeout proportional refund once the dispute lock window elapses.
+   */
+  public async executeTimeoutProportionalRefund(
+    callerSecret: string,
+    callerPublic: string,
+    leagueId: number | bigint,
+    proposalId: number | bigint
+  ): Promise<InvocationResult> {
+    return this.invoke(callerSecret, this.escrowContractId, "execute_timeout_refund", [
+      SorobanContractClient.address(callerPublic),
+      SorobanContractClient.u64(leagueId),
+      SorobanContractClient.u64(proposalId),
+    ]);
+  }
+
+  /**
    * Admin refunds deposits for cancelled league.
    */
   public async refund(
