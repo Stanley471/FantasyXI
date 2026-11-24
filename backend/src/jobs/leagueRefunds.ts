@@ -62,5 +62,13 @@ export async function processLeagueRefunds(): Promise<void> {
       `[jobs] League ${id} escrow reconciliation: remaining=${reconciliation.remainingEscrowStroops} stroops, ` +
         `fullyRefunded=${reconciliation.isFullyRefunded}`
     );
+
+    if (reconciliation.isFullyRefunded) {
+      await prisma.league.update({
+        where: { id },
+        data: { status: LeagueStatus.REFUNDED },
+      });
+      console.log(`[jobs] League ${id} internal status updated to REFUNDED`);
+    }
   }
 }

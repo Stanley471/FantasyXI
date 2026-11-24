@@ -80,6 +80,8 @@ pub enum EscrowError {
     EmptyBatch = 46,
     InsufficientShieldedBalance = 47,
     UnshieldedLeakDetected = 48,
+    DeadlineNotPassed = 49,
+    LeagueAlreadyActive = 50,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -231,6 +233,7 @@ pub enum DataKey {
     ShieldedBalance(BytesN<32>, Address),
     ShieldedBatch(u64),
     TransparentAddressFingerprint(BytesN<32>),
+    LeagueDeadline(u64),
 }
 
 /// # Issue #83: Soroban Escrow Smart Contract for Fantasy Leagues
@@ -1424,6 +1427,130 @@ impl FantasyXIEscrow {
 
         env.events().publish(
             (Symbol::new(&env, "LeagueRefundClaimed"), league_id),
+            (participant, amount),
+        );
+        Ok(())
+    }
+
+    /// Sets a deadline lock timestamp and minimum participant threshold for a league.
+    /// Authorized by league creator or admin.
+    pub fn set_league_deadline(
+        env: Env,
+        caller: Address,
+        league_id: u64,
+        deadline_timestamp: u64,
+        min_participants: u32,
+    ) -> Result<(), EscrowError> {
+        caller.require_auth();
+
+        let league_key = DataKey::League(league_id);
+        let league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&league_key)
+            .ok_or(EscrowError::LeagueNotFound)?;
+
+        let admin: Option<Address> = env.storage().instance().get(&DataKey::Admin);
+        let is_admin = admin.as_ref().map_or(false, |a| a == &caller);
+        let is_creator = league.creator == caller;
+
+        if !is_admin && !is_creator {
+            return Err(EscrowError::NotAuthorized);
+        }
+
+        if league.status != LeagueStatus::Upcoming {
+            return Err(EscrowError::LeagueAlreadyActive);
+        }
+
+        let deadline_key = DataKey::LeagueDeadline(league_id);
+        env.storage()
+            .persistent()
+            .set(&deadline_key, &(deadline_timestamp, min_participants));
+        env.storage().persistent().extend_ttl(
+            &deadline_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "LeagueDeadlineSet"), league_id),
+            (deadline_timestamp, min_participants),
+        );
+        Ok(())
+    }
+
+    /// Queries the deadline timestamp and minimum participant threshold for a league.
+    pub fn get_league_deadline(env: Env, league_id: u64) -> Option<(u64, u32)> {
+        let deadline_key = DataKey::LeagueDeadline(league_id);
+        env.storage().persistent().get(&deadline_key)
+    }
+
+    /// Participant self-service refund if league passes deadline without reaching min_participants or transitioning to Active.
+    /// Protects user funds in abandoned or cancelled competitions.
+    pub fn claim_timeout_refund(
+        env: Env,
+        participant: Address,
+        league_id: u64,
+    ) -> Result<(), EscrowError> {
+        participant.require_auth();
+
+        let league_key = DataKey::League(league_id);
+        let mut league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&league_key)
+            .ok_or(EscrowError::LeagueNotFound)?;
+
+        if league.status == LeagueStatus::Settled {
+            return Err(EscrowError::AlreadySettled);
+        }
+        if league.status == LeagueStatus::Active {
+            return Err(EscrowError::LeagueAlreadyActive);
+        }
+
+        let deadline_key = DataKey::LeagueDeadline(league_id);
+        let (deadline, min_parts): (u64, u32) = env
+            .storage()
+            .persistent()
+            .get(&deadline_key)
+            .ok_or(EscrowError::DeadlineNotPassed)?;
+
+        let current_time = env.ledger().timestamp();
+        if current_time < deadline {
+            return Err(EscrowError::DeadlineNotPassed);
+        }
+
+        if min_parts > 0 && league.participant_count >= min_parts && league.status != LeagueStatus::Cancelled {
+            return Err(EscrowError::LeagueAlreadyActive);
+        }
+
+        let deposit_key = DataKey::Deposit(league_id, participant.clone());
+        let amount: i128 = env
+            .storage()
+            .persistent()
+            .get(&deposit_key)
+            .ok_or(EscrowError::NoDeposit)?;
+
+        if amount <= 0 {
+            return Err(EscrowError::AlreadyClaimed);
+        }
+
+        env.storage().persistent().set(&deposit_key, &0i128);
+        league.total_deposited = league.total_deposited.saturating_sub(amount);
+        league.participant_count = league.participant_count.saturating_sub(1);
+        if league.total_deposited == 0 {
+            league.status = LeagueStatus::Refunded;
+        }
+        env.storage().persistent().set(&league_key, &league);
+
+        token::Client::new(&env, &league.asset).transfer(
+            &env.current_contract_address(),
+            &participant,
+            &amount,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "TimeoutRefundClaimed"), league_id),
             (participant, amount),
         );
         Ok(())
@@ -4640,5 +4767,59 @@ mod test {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn test_timeout_refund_allows_withdrawal_after_deadline_and_prevents_double_claim() {
+        let (env, admin, token_addr, client) = setup_test();
+        let token_admin_client = token::StellarAssetClient::new(&env, &token_addr);
+        let token_client = token::Client::new(&env, &token_addr);
+
+        let user1 = Address::generate(&env);
+        let user2 = Address::generate(&env);
+
+        token_admin_client.mint(&user1, &50_000_000);
+        token_admin_client.mint(&user2, &50_000_000);
+
+        let league_id = 901;
+        client.create_league(&admin, &league_id, &50_000_000, &token_addr);
+
+        let deadline = 10_000;
+        let min_participants = 5;
+        client.set_league_deadline(&admin, &league_id, &deadline, &min_participants);
+
+        assert_eq!(client.get_league_deadline(&league_id), Some((deadline, min_participants)));
+
+        client.deposit(&user1, &league_id);
+        client.deposit(&user2, &league_id);
+
+        assert_eq!(token_client.balance(&user1), 0);
+        assert_eq!(token_client.balance(&user2), 0);
+
+        // Attempting refund before deadline fails with DeadlineNotPassed
+        env.ledger().with_mut(|li| li.timestamp = 5_000);
+        let premature = client.try_claim_timeout_refund(&user1, &league_id);
+        assert_eq!(premature, Err(Ok(EscrowError::DeadlineNotPassed)));
+
+        // Advance ledger timestamp past deadline (deadline passed without reaching min_participants: 2 < 5)
+        env.ledger().with_mut(|li| li.timestamp = 10_001);
+
+        // Self-service timeout refund succeeds for user1
+        client.claim_timeout_refund(&user1, &league_id);
+        assert_eq!(token_client.balance(&user1), 50_000_000);
+
+        // Double-refund attempt is strictly rejected with AlreadyClaimed
+        let double_claim = client.try_claim_timeout_refund(&user1, &league_id);
+        assert_eq!(double_claim, Err(Ok(EscrowError::AlreadyClaimed)));
+
+        // User 2 also claims full refund
+        client.claim_timeout_refund(&user2, &league_id);
+        assert_eq!(token_client.balance(&user2), 50_000_000);
+
+        // League transitions to Refunded once all deposits are claimed
+        let final_league = client.get_league(&league_id).unwrap();
+        assert_eq!(final_league.status, LeagueStatus::Refunded);
+        assert_eq!(final_league.total_deposited, 0);
+        assert_eq!(final_league.participant_count, 0);
     }
 }
