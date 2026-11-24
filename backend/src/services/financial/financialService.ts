@@ -453,6 +453,8 @@ export class FinancialService {
       throw new FinancialNotFoundError("Membership record not found");
     }
 
+    const leagueAsset = (member.league as any).assetCode || stellarConfig.usdcAssetCode;
+
     // Idempotency: if already confirmed and active, return success immediately
     if (
       member.paymentStatus === PaymentStatus.PAYMENT_CONFIRMED &&
@@ -462,7 +464,7 @@ export class FinancialService {
         success: true,
         txHash: stellarTxHash,
         amount: member.league.entryFee,
-        assetCode: stellarConfig.usdcAssetCode,
+        assetCode: leagueAsset,
       };
     }
 
@@ -474,6 +476,7 @@ export class FinancialService {
       txHash: stellarTxHash,
       expectedDestination,
       expectedAmount: member.league.entryFee,
+      expectedAssetCode: leagueAsset,
       expectedMemo,
       expectedSender: member.stellarAddress || undefined,
       expectedLeagueId: leagueId,

@@ -25,6 +25,10 @@ export interface DepositParams {
   leagueId: number | string;
   userPublicKey: string;
   signTransaction: WalletTransactionSigner;
+  /** SAC Token Symbol: either USDC (default) or native XLM SAC (Issue #545). */
+  tokenSymbol?: "USDC" | "XLM";
+  /** Optional custom Soroban SAC token address if different from default. */
+  tokenAddress?: string;
   rpcUrl?: string;
   networkPassphrase?: string;
   onProgress?: (status: string) => void;
@@ -152,7 +156,9 @@ export function mapSimulationError(errMsg: string): string {
     lower.includes("balance") ||
     lower.includes("underfunded")
   ) {
-    return "Insufficient USDC balance or missing USDC trustline in your connected wallet.";
+    return tokenSymbol === "XLM"
+      ? "Insufficient native XLM balance in your connected wallet."
+      : "Insufficient USDC balance or missing USDC trustline in your connected wallet.";
   }
   return `Transaction simulation failed: ${errMsg}`;
 }
@@ -164,17 +170,18 @@ export function mapSimulationError(errMsg: string): string {
  */
 export async function simulateDeposit(
   server: Pick<SimulationServer, "simulateTransaction">,
-  tx: Parameters<typeof rpc.assembleTransaction>[0]
+  tx: Parameters<typeof rpc.assembleTransaction>[0],
+  tokenSymbol: "USDC" | "XLM" = "USDC"
 ): Promise<{ preparedTx: ReturnType<ReturnType<typeof rpc.assembleTransaction>["build"]>; estimate: FeeEstimate }> {
   let sim: Awaited<ReturnType<SimulationServer["simulateTransaction"]>>;
   try {
     sim = await server.simulateTransaction(tx);
   } catch (err: unknown) {
-    throw new Error(mapSimulationError(err instanceof Error ? err.message : String(err)));
+    throw new Error(mapSimulationError(err instanceof Error ? err.message : String(err), tokenSymbol));
   }
 
   if (rpc.Api.isSimulationError(sim)) {
-    throw new Error(mapSimulationError(sim.error));
+    throw new Error(mapSimulationError(sim.error, tokenSymbol));
   }
   if (rpc.Api.isSimulationRestore(sim)) {
     throw new Error(
@@ -295,9 +302,11 @@ export async function depositToSorobanEscrow(
     .setTimeout(180)
     .build();
 
+  const tokenSymbol = params.tokenSymbol ?? "USDC";
+
   // 4. Simulate first: surfaces contract reverts and exact fees before any wallet prompt
-  onProgress?.("Simulating transaction footprint...");
-  const { preparedTx, estimate } = await simulateDeposit(server, tx);
+  onProgress?.(`Simulating ${tokenSymbol} transaction footprint...`);
+  const { preparedTx, estimate } = await simulateDeposit(server, tx, tokenSymbol);
 
   if (onFeeEstimate) {
     const approved = await onFeeEstimate(estimate);

@@ -481,13 +481,14 @@ export class StellarService {
               participantAddress
             );
             if (onChainDeposit > 0n) {
-              const depositedUsdc = Number(onChainDeposit) / 10_000_000;
-              if (Math.abs(depositedUsdc - expectedAmount) > 0.0001) {
+              const depositedAmount = Number(onChainDeposit) / 10_000_000;
+              const assetDisplay = expectedAssetCode || "USDC";
+              if (Math.abs(depositedAmount - expectedAmount) > 0.0001) {
                 return {
                   success: false,
                   txHash,
                   ledgerSeq: tx.ledger_attr,
-                  error: `Deposit amount mismatch: expected ${expectedAmount} USDC, contract recorded ${depositedUsdc} USDC.`,
+                  error: `Deposit amount mismatch: expected ${expectedAmount} ${assetDisplay}, contract recorded ${depositedAmount} ${assetDisplay}.`,
                 };
               }
             }
@@ -597,6 +598,27 @@ export class StellarService {
         error: `Stellar network error: ${error?.message || "Unknown error"}`,
         retryable: true,
       };
+    }
+  }
+
+  /**
+   * Look up the native XLM balance for a given Stellar account (Issue #545).
+   * Returns 0 if account doesn't exist on the network.
+   */
+  public async getAccountXlmBalance(stellarAddress: string): Promise<number> {
+    if (!this.isValidStellarAddress(stellarAddress)) {
+      throw new Error(`Invalid Stellar address: ${stellarAddress}`);
+    }
+
+    try {
+      const account = await this.runHorizon((server) => server.loadAccount(stellarAddress));
+      const nativeBalance = account.balances.find((b: any) => b.asset_type === "native");
+      return nativeBalance ? parseFloat(nativeBalance.balance) : 0;
+    } catch (error: any) {
+      if (error?.response?.status === 404 || error?.status === 404) {
+        return 0;
+      }
+      throw error;
     }
   }
 

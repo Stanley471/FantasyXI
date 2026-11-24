@@ -620,5 +620,64 @@ describe("StellarService Abstraction & Validation", () => {
       assert.strictEqual(result.success, false);
       assert.match(result.error!, /Participant mismatch/);
     });
+
+    it("should successfully verify a native XLM SAC deposit (Issue #545)", async () => {
+      const xdr = buildMockSorobanDepositEnvelope({
+        contractId: TEST_ESCROW_CONTRACT,
+        sourceKp: senderKp,
+        participantAddress: senderKp.publicKey(),
+        leagueId: 102n,
+      });
+
+      const mockServer = createMockServer({
+        txRecord: {
+          hash: VALID_TX_HASH,
+          successful: true,
+          ledger_attr: 1234568,
+          envelope_xdr: xdr,
+          created_at: "2026-11-24T12:00:00Z",
+        },
+      });
+
+      const service = new StellarService(mockServer);
+
+      const result = await service.verifyPaymentTransaction({
+        txHash: VALID_TX_HASH,
+        expectedDestination: TEST_ESCROW_CONTRACT,
+        expectedAmount: 25.0,
+        expectedAssetCode: "XLM",
+        expectedSender: senderKp.publicKey(),
+        expectedLeagueId: 102,
+      });
+
+      assert.strictEqual(result.success, true);
+      assert.strictEqual(result.assetCode, "XLM");
+      assert.strictEqual(result.amount, 25.0);
+    });
+  });
+
+  describe("Native XLM Balance Lookup (getAccountXlmBalance - Issue #545)", () => {
+    it("should return the correct native XLM balance", async () => {
+      const mockServer = createMockServer({
+        accountBalances: [
+          { asset_type: "native", balance: "150.5000000" },
+          { asset_type: "credit_alphanum4", asset_code: "USDC", balance: "100.00" },
+        ],
+      });
+
+      const service = new StellarService(mockServer);
+      const balance = await service.getAccountXlmBalance(senderKp.publicKey());
+      assert.strictEqual(balance, 150.5);
+    });
+
+    it("should return 0 when account is not funded on network (404)", async () => {
+      const mockServer = createMockServer({
+        accountError: { response: { status: 404 } },
+      });
+
+      const service = new StellarService(mockServer);
+      const balance = await service.getAccountXlmBalance(senderKp.publicKey());
+      assert.strictEqual(balance, 0);
+    });
   });
 });
