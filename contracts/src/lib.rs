@@ -74,8 +74,6 @@ pub enum EscrowError {
     InsufficientStake = 38,
     DisputeNotExpired = 39,
     InvalidDisputeConfig = 40,
-    UpgradeNotProposed = 41,
-    InvalidFederationPeer = 42,
     BatchWindowNotElapsed = 43,
     InvalidBatchConfig = 44,
     AllocationMismatch = 45,
@@ -92,6 +90,9 @@ pub enum LeagueStatus {
     Active = 1,
     Settled = 2,
     Cancelled = 3,
+    Disputed = 4,
+    ArbitrationPending = 5,
+    Refunded = 6,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -160,6 +161,21 @@ pub struct PauseProposal {
     pub executed: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct MultisigRefundProposal {
+    pub id: u64,
+    pub league_id: u64,
+    pub proposer: Address,
+    pub participants: Vec<Address>,
+    pub reason_hash: BytesN<32>,
+    pub approvals: Vec<Address>,
+    pub threshold: u32,
+    pub created_at: u64,
+    pub timeout_at: u64,
+    pub executed: bool,
+}
+
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
@@ -183,6 +199,8 @@ pub enum DataKey {
     MerkleRoot(u64),
     Claimed(u64, Address),
     DisputeReason(u64),
+    RefundProposal(u64),
+    NextRefundProposalId,
     BatcherConfig,
     NextPayoutId,
     NextBatchId,
@@ -1809,6 +1827,312 @@ impl FantasyXIEscrow {
             .persistent()
             .remove(&DataKey::DisputeReason(league_id));
         Self::refund(env, admin, league_id, participants)
+    }
+
+    /// Initiates a multi-signature refund proposal for a disputed or cancelled league.
+    /// Transitions LeagueStatus to Disputed (or ArbitrationPending if already disputed).
+    pub fn propose_multisig_refund(
+        env: Env,
+        proposer: Address,
+        league_id: u64,
+        participants: Vec<Address>,
+        reason_hash: BytesN<32>,
+        lock_window_seconds: u64,
+    ) -> Result<u64, EscrowError> {
+        proposer.require_auth();
+        let config: AdminConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminConfig)
+            .ok_or(EscrowError::NotInitialized)?;
+
+        let league_key = DataKey::League(league_id);
+        let mut league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&league_key)
+            .ok_or(EscrowError::LeagueNotFound)?;
+
+        let is_authorized_signer =
+            config.signers.iter().any(|s| s == proposer) || league.creator == proposer;
+        if !is_authorized_signer {
+            return Err(EscrowError::NotAuthorized);
+        }
+
+        if league.status == LeagueStatus::Settled || league.status == LeagueStatus::Refunded {
+            return Err(EscrowError::AlreadySettled);
+        }
+        if lock_window_seconds == 0 {
+            return Err(EscrowError::InvalidDisputeConfig);
+        }
+
+        let proposal_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextRefundProposalId)
+            .unwrap_or(1);
+        env.storage()
+            .instance()
+            .set(&DataKey::NextRefundProposalId, &(proposal_id + 1));
+
+        let now = env.ledger().timestamp();
+        let mut approvals = Vec::new(&env);
+        approvals.push_back(proposer.clone());
+
+        let proposal = MultisigRefundProposal {
+            id: proposal_id,
+            league_id,
+            proposer: proposer.clone(),
+            participants,
+            reason_hash: reason_hash.clone(),
+            approvals,
+            threshold: config.threshold,
+            created_at: now,
+            timeout_at: now.saturating_add(lock_window_seconds),
+            executed: false,
+        };
+
+        let proposal_key = DataKey::RefundProposal(proposal_id);
+        env.storage().persistent().set(&proposal_key, &proposal);
+        env.storage().persistent().extend_ttl(
+            &proposal_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        league.status = LeagueStatus::Disputed;
+        env.storage().persistent().set(&league_key, &league);
+        env.storage().persistent().extend_ttl(
+            &league_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::LeagueFrozen(league_id), &true);
+        env.storage()
+            .persistent()
+            .set(&DataKey::DisputeReason(league_id), &reason_hash);
+
+        env.events().publish(
+            (Symbol::new(&env, "RefundProposed"), league_id, proposal_id),
+            (proposer, reason_hash),
+        );
+
+        Ok(proposal_id)
+    }
+
+    /// Records an arbitrator or league admin approval on an active refund proposal.
+    /// Transitions LeagueStatus to ArbitrationPending.
+    pub fn approve_multisig_refund(
+        env: Env,
+        approver: Address,
+        proposal_id: u64,
+    ) -> Result<u32, EscrowError> {
+        approver.require_auth();
+        let config: AdminConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminConfig)
+            .ok_or(EscrowError::NotInitialized)?;
+
+        let proposal_key = DataKey::RefundProposal(proposal_id);
+        let mut proposal: MultisigRefundProposal = env
+            .storage()
+            .persistent()
+            .get(&proposal_key)
+            .ok_or(EscrowError::ProposalNotFound)?;
+
+        if proposal.executed {
+            return Err(EscrowError::ProposalExecuted);
+        }
+
+        let league_key = DataKey::League(proposal.league_id);
+        let mut league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&league_key)
+            .ok_or(EscrowError::LeagueNotFound)?;
+
+        let is_authorized_signer =
+            config.signers.iter().any(|s| s == approver) || league.creator == approver;
+        if !is_authorized_signer {
+            return Err(EscrowError::NotAuthorized);
+        }
+
+        if proposal.approvals.iter().any(|a| a == approver) {
+            return Err(EscrowError::AlreadyApproved);
+        }
+
+        proposal.approvals.push_back(approver.clone());
+        let count = proposal.approvals.len();
+
+        env.storage().persistent().set(&proposal_key, &proposal);
+        env.storage().persistent().extend_ttl(
+            &proposal_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        league.status = LeagueStatus::ArbitrationPending;
+        env.storage().persistent().set(&league_key, &league);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "RefundApproved"),
+                proposal.league_id,
+                proposal_id,
+            ),
+            (approver, count),
+        );
+
+        Ok(count)
+    }
+
+    /// Executes a multi-signature authorized refund across all specified participants.
+    /// Requires M-of-N threshold approvals (e.g. 2-of-3) verified via `authorize_signers`.
+    pub fn execute_multisig_refund(
+        env: Env,
+        approvals: Vec<Address>,
+        league_id: u64,
+        participants: Vec<Address>,
+    ) -> Result<(), EscrowError> {
+        Self::authorize_signers(&env, &approvals)?;
+
+        let league_key = DataKey::League(league_id);
+        let mut league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&league_key)
+            .ok_or(EscrowError::LeagueNotFound)?;
+
+        if league.status == LeagueStatus::Settled || league.status == LeagueStatus::Refunded {
+            return Err(EscrowError::AlreadySettled);
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::LeagueFrozen(league_id));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::DisputeReason(league_id));
+
+        let token_client = token::Client::new(&env, &league.asset);
+        let mut refunded_count: u32 = 0;
+
+        for participant in participants.iter() {
+            let dep_key = DataKey::Deposit(league_id, participant.clone());
+            if let Some(deposit_amount) = env.storage().persistent().get::<_, i128>(&dep_key) {
+                if deposit_amount > 0 {
+                    token_client.transfer(
+                        &env.current_contract_address(),
+                        &participant,
+                        &deposit_amount,
+                    );
+                    refunded_count += 1;
+                }
+                env.storage().persistent().remove(&dep_key);
+            }
+        }
+
+        league.status = LeagueStatus::Refunded;
+        env.storage().persistent().set(&league_key, &league);
+        env.storage().persistent().extend_ttl(
+            &league_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "MultisigRefund"), league_id),
+            (approvals.len(), refunded_count),
+        );
+
+        Ok(())
+    }
+
+    /// Automated dispute timeout: transitions an unreviewed dispute proposal to proportional
+    /// refund mode once the configurable lock window has elapsed.
+    pub fn execute_timeout_refund(
+        env: Env,
+        caller: Address,
+        league_id: u64,
+        proposal_id: u64,
+    ) -> Result<(), EscrowError> {
+        caller.require_auth();
+
+        let proposal_key = DataKey::RefundProposal(proposal_id);
+        let mut proposal: MultisigRefundProposal = env
+            .storage()
+            .persistent()
+            .get(&proposal_key)
+            .ok_or(EscrowError::ProposalNotFound)?;
+
+        if proposal.league_id != league_id {
+            return Err(EscrowError::LeagueNotFound);
+        }
+        if proposal.executed {
+            return Err(EscrowError::ProposalExecuted);
+        }
+        if env.ledger().timestamp() < proposal.timeout_at {
+            return Err(EscrowError::DisputeNotExpired);
+        }
+
+        let league_key = DataKey::League(league_id);
+        let mut league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&league_key)
+            .ok_or(EscrowError::LeagueNotFound)?;
+
+        if league.status == LeagueStatus::Settled || league.status == LeagueStatus::Refunded {
+            return Err(EscrowError::AlreadySettled);
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::LeagueFrozen(league_id));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::DisputeReason(league_id));
+
+        let token_client = token::Client::new(&env, &league.asset);
+        let mut refunded_count: u32 = 0;
+
+        for participant in proposal.participants.iter() {
+            let dep_key = DataKey::Deposit(league_id, participant.clone());
+            if let Some(deposit_amount) = env.storage().persistent().get::<_, i128>(&dep_key) {
+                if deposit_amount > 0 {
+                    token_client.transfer(
+                        &env.current_contract_address(),
+                        &participant,
+                        &deposit_amount,
+                    );
+                    refunded_count += 1;
+                }
+                env.storage().persistent().remove(&dep_key);
+            }
+        }
+
+        proposal.executed = true;
+        env.storage().persistent().set(&proposal_key, &proposal);
+
+        league.status = LeagueStatus::Refunded;
+        env.storage().persistent().set(&league_key, &league);
+
+        env.events().publish(
+            (Symbol::new(&env, "TimeoutRefund"), league_id, proposal_id),
+            (caller, refunded_count),
+        );
+
+        Ok(())
+    }
+
+    pub fn get_refund_proposal(env: Env, proposal_id: u64) -> Option<MultisigRefundProposal> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::RefundProposal(proposal_id))
     }
 
     /// Admin / Public endpoint to manually extend TTL of a league and instance

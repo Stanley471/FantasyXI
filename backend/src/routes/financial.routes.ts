@@ -29,6 +29,14 @@ import {
 import { idempotency } from "../middleware/idempotency.js";
 import { requireDepositRangeProof } from "../middleware/depositRangeProof.js";
 import { getMyDepositExceptions, getDepositRefundChallenge, submitDepositRefundClaim } from "../controllers/depositRefund.controller.js";
+import {
+  inspectLeagueDisputeArbitrationHandler,
+  inspectRefundProposalHandler,
+  initiateRefundProposalHandler,
+  signRefundProposalHandler,
+  broadcastRefundProposalHandler,
+  processDisputeTimeoutsHandler,
+} from "../controllers/escrowArbitration.controller.js";
 
 const router = Router({ mergeParams: true });
 // Private high-roller leagues require a ZK buy-in range proof with each deposit
@@ -81,5 +89,41 @@ router.post("/disputes/:disputeId/evidence", mutationRateLimiter, addEvidenceHan
 router.post("/disputes/:disputeId/resolve-payout", requireRole(UserRole.ADMIN), resolveDisputePayoutHandler);
 router.post("/disputes/:disputeId/resolve-refund", requireRole(UserRole.ADMIN), resolveDisputeRefundHandler);
 router.post("/disputes/:disputeId/reject", requireRole(UserRole.ADMIN), rejectDisputeHandler);
+
+// Multi-signature smart escrow dispute arbitration & refund flow (Issue #419)
+router.get(
+  "/disputes/arbitration",
+  requirePermission(Permission.DISPUTE_INSPECT),
+  inspectLeagueDisputeArbitrationHandler
+);
+router.get(
+  "/disputes/arbitration/:proposalId",
+  requirePermission(Permission.DISPUTE_INSPECT),
+  inspectRefundProposalHandler
+);
+router.post(
+  "/disputes/arbitration/proposals",
+  mutationRateLimiter,
+  requirePermission(Permission.DISPUTE_ARBITRATE),
+  initiateRefundProposalHandler
+);
+router.post(
+  "/disputes/arbitration/:proposalId/sign",
+  mutationRateLimiter,
+  requirePermission(Permission.DISPUTE_ARBITRATE),
+  signRefundProposalHandler
+);
+router.post(
+  "/disputes/arbitration/:proposalId/broadcast",
+  mutationRateLimiter,
+  requirePermission(Permission.DISPUTE_ARBITRATE),
+  broadcastRefundProposalHandler
+);
+router.post(
+  "/disputes/arbitration/process-timeouts",
+  mutationRateLimiter,
+  requirePermission(Permission.DISPUTE_ARBITRATE),
+  processDisputeTimeoutsHandler
+);
 
 export default router;
