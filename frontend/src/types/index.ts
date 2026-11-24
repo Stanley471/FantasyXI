@@ -462,6 +462,8 @@ export interface LivePlayerEvent {
   redCards: number;
   saves: number;
   bonus: number;
+  bps: number;
+  provisionalBonus: number;
   totalPoints: number;
 }
 

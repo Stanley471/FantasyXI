@@ -434,6 +434,7 @@ export interface SettlementPlan {
   winners: SettlementWinner[];
   distributionBps?: number[];
   canSettle: boolean;
+  heldWinnerUserIds?: string[];
   proofHash?: string;
   unsettledReason?: string;
 }

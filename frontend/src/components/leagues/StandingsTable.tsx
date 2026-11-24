@@ -1,10 +1,17 @@
+
 "use client";
 
-import React, { useLayoutEffect, useRef } from "react";
+import React, { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { LeagueStandingsEntry, MembershipStatus } from "@/types";
 import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { IconCheck, IconAlertCircle, IconChevronUp, IconChevronDown, IconUsers } from "@/components/ui/Icons";
+import {
+  IconCheck,
+  IconAlertCircle,
+  IconChevronUp,
+  IconChevronDown,
+  IconUsers,
+} from "@/components/ui/Icons";
 
 export interface StandingsTableProps {
   standings: LeagueStandingsEntry[];
@@ -19,11 +26,16 @@ export interface StandingsTableProps {
   onSelectEntry?: (userId: string) => void;
 }
 
+type SortKey = "rank" | "gameweek" | "totalPoints";
+type SortDirection = "asc" | "desc";
+
+interface SortConfig {
+  key: SortKey;
+  direction: SortDirection;
+}
+
 /**
- * StandingsTableClient — prop-driven, 'use client' component.
- *
- * Used by LeagueInteractivePanel for live SSE standings updates.
- * The RSC variant below (StandingsTable) fetches data server-side.
+ * Displays league standings with sortable Rank, Best GW and Total Points columns.
  */
 export const StandingsTable: React.FC<StandingsTableProps> = ({
   standings,
@@ -34,29 +46,164 @@ export const StandingsTable: React.FC<StandingsTableProps> = ({
   rankChanges = {},
   onSelectEntry,
 }) => {
+  const [sortConfig, setSortConfig] = useState<SortConfig | null>(null);
+
   const rowRefs = useRef(new Map<string, HTMLTableRowElement>());
   const lastTops = useRef(new Map<string, number>());
-  const order = standings.map((s) => s.userId).join(",");
 
-  // FLIP animation: slide rows from their previous position when the ranking changes
+  // Sort the displayed standings without changing the original rank calculations.
+  const sortedStandings = useMemo(() => {
+    if (!sortConfig) return standings;
+
+    return [...standings].sort((a, b) => {
+      let valueA: number;
+      let valueB: number;
+
+      switch (sortConfig.key) {
+        case "rank":
+          valueA = a.rank;
+          valueB = b.rank;
+          break;
+
+        case "gameweek":
+          valueA = a.bestGameweekPoints ?? 0;
+          valueB = b.bestGameweekPoints ?? 0;
+          break;
+
+        case "totalPoints":
+          valueA = a.totalPoints;
+          valueB = b.totalPoints;
+          break;
+
+        default:
+          return 0;
+      }
+
+      return sortConfig.direction === "asc"
+        ? valueA - valueB
+        : valueB - valueA;
+    });
+  }, [standings, sortConfig]);
+
+  const order = sortedStandings.map((s) => s.userId).join(",");
+
+  // FLIP animation: slide rows from their previous position when the ranking changes.
   useLayoutEffect(() => {
     const nextTops = new Map<string, number>();
+
     rowRefs.current.forEach((row, userId) => {
-      // offsetTop is relative to the table, so page scrolling does not trigger animations
       const top = row.offsetTop;
       nextTops.set(userId, top);
+
       const previousTop = lastTops.current.get(userId);
+
       if (previousTop !== undefined && previousTop !== top) {
         row.animate(
-          [{ transform: `translateY(${previousTop - top}px)` }, { transform: "translateY(0)" }],
-          { duration: 600, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)" }
+          [
+            { transform: `translateY(${previousTop - top}px)` },
+            { transform: "translateY(0)" },
+          ],
+          {
+            duration: 600,
+            easing: "cubic-bezier(0.2, 0.8, 0.2, 1)",
+          }
         );
       }
     });
+
     lastTops.current = nextTops;
   }, [order]);
 
-  if (standings.length === 0) {
+  const handleSort = (key: SortKey) => {
+    setSortConfig((current) => {
+      if (current?.key === key) {
+        return {
+          key,
+          direction: current.direction === "asc" ? "desc" : "asc",
+        };
+      }
+
+      return { key, direction: "asc" };
+    });
+  };
+
+  const getAriaSort = (key: SortKey): "ascending" | "descending" | "none" => {
+    if (sortConfig?.key !== key) return "none";
+
+    return sortConfig.direction === "asc" ? "ascending" : "descending";
+  };
+
+  const SortIndicator: React.FC<{ direction: SortDirection | null }> = ({
+    direction,
+  }) => (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 16 16"
+      fill="none"
+      className="w-3.5 h-3.5 shrink-0"
+    >
+      <path
+        d="M4 6L8 2L12 6"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className={
+          direction === "asc"
+            ? "text-emerald-400"
+            : direction === null
+              ? "text-slate-500"
+              : "text-slate-700"
+        }
+      />
+      <path
+        d="M4 10L8 14L12 10"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className={
+          direction === "desc"
+            ? "text-emerald-400"
+            : direction === null
+              ? "text-slate-500"
+              : "text-slate-700"
+        }
+      />
+    </svg>
+  );
+
+  const getSortDirection = (key: SortKey): SortDirection | null => {
+    return sortConfig?.key === key ? sortConfig.direction : null;
+  };
+
+  const SortableHeader: React.FC<{
+    label: string;
+    sortKey: SortKey;
+    className?: string;
+  }> = ({ label, sortKey, className = "" }) => (
+    <th
+      scope="col"
+      aria-sort={getAriaSort(sortKey)}
+      className={`py-3 px-3 ${className}`}
+    >
+      <button
+        type="button"
+        onClick={() => handleSort(sortKey)}
+        className="inline-flex items-center gap-1.5 uppercase font-semibold hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400 rounded-sm"
+        aria-label={`Sort by ${label}. ${
+          sortConfig?.key === sortKey
+            ? `Currently sorted ${sortConfig.direction === "asc" ? "ascending" : "descending"}`
+            : "Currently unsorted"
+        }`}
+      >
+        <span>{label}</span>
+        <SortIndicator direction={getSortDirection(sortKey)} />
+      </button>
+    </th>
+  );
+
+  if (sortedStandings.length === 0) {
     return (
       <EmptyState
         icon={<IconUsers className="w-6 h-6" />}
@@ -66,7 +213,7 @@ export const StandingsTable: React.FC<StandingsTableProps> = ({
     );
   }
 
-  // Calculate projected prizes for top 3
+  // Calculate projected prizes for top 3.
   const firstPrize = Math.round(prizePool * 0.6 * 100) / 100;
   const secondPrize = Math.round(prizePool * 0.3 * 100) / 100;
   const thirdPrize = Math.round(prizePool * 0.1 * 100) / 100;
@@ -113,17 +260,48 @@ export const StandingsTable: React.FC<StandingsTableProps> = ({
       <table className="w-full text-left border-collapse text-xs">
         <thead>
           <tr className="border-b border-pitch-border text-slate-400 uppercase font-semibold text-[11px] bg-slate-950/50">
-            <th className="py-3 px-3 w-12 text-center">Rank</th>
-            <th className="py-3 px-3">Manager &amp; Squad</th>
-            <th className="py-3 px-3">Escrow Status</th>
-            <th className="py-3 px-3 text-center">Best GW</th>
-            {livePoints && <th className="py-3 px-3 text-right">Live GW</th>}
-            <th className="py-3 px-3 text-right">Total Pts</th>
-            {prizePool > 0 && <th className="py-3 px-3 text-right">Projected USDC</th>}
+            <SortableHeader
+              label="Rank"
+              sortKey="rank"
+              className="w-12 text-center"
+            />
+
+            <th scope="col" className="py-3 px-3">
+              Manager &amp; Squad
+            </th>
+
+            <th scope="col" className="py-3 px-3">
+              Escrow Status
+            </th>
+
+            <SortableHeader
+              label="Best GW"
+              sortKey="gameweek"
+              className="text-center"
+            />
+
+            {livePoints && (
+              <th scope="col" className="py-3 px-3 text-right">
+                Live GW
+              </th>
+            )}
+
+            <SortableHeader
+              label="Total Pts"
+              sortKey="totalPoints"
+              className="text-right"
+            />
+
+            {prizePool > 0 && (
+              <th scope="col" className="py-3 px-3 text-right">
+                Projected USDC
+              </th>
+            )}
           </tr>
         </thead>
+
         <tbody className="divide-y divide-slate-800/60 font-medium">
-          {standings.map((entry) => {
+          {sortedStandings.map((entry) => {
             const isMe = currentUserId && entry.userId === currentUserId;
             const prize = getProjectedPrize(entry.rank);
             const change = rankChanges[entry.userId] ?? 0;
@@ -135,14 +313,20 @@ export const StandingsTable: React.FC<StandingsTableProps> = ({
                   if (row) rowRefs.current.set(entry.userId, row);
                   else rowRefs.current.delete(entry.userId);
                 }}
-                onClick={onSelectEntry ? () => onSelectEntry(entry.userId) : undefined}
+                onClick={
+                  onSelectEntry
+                    ? () => onSelectEntry(entry.userId)
+                    : undefined
+                }
                 onKeyDown={
                   onSelectEntry
                     ? (e) => e.key === "Enter" && onSelectEntry(entry.userId)
                     : undefined
                 }
                 tabIndex={onSelectEntry ? 0 : undefined}
-                className={`transition-colors ${onSelectEntry ? "cursor-pointer" : ""} ${
+                className={`transition-colors ${
+                  onSelectEntry ? "cursor-pointer" : ""
+                } ${
                   isMe
                     ? "bg-emerald-500/10 hover:bg-emerald-500/15"
                     : "hover:bg-slate-900/40"
@@ -152,6 +336,7 @@ export const StandingsTable: React.FC<StandingsTableProps> = ({
                 <td className="py-3 px-3 text-center">
                   <div className="flex items-center justify-center gap-1">
                     {getRankBadge(entry.rank)}
+
                     {change !== 0 && (
                       <span
                         className={`flex items-center text-[10px] font-bold font-mono ${
@@ -173,24 +358,35 @@ export const StandingsTable: React.FC<StandingsTableProps> = ({
                 {/* Manager & Squad */}
                 <td className="py-3 px-3">
                   <div className="flex items-center gap-2">
-                    <span className={`font-bold text-sm ${isMe ? "text-emerald-400" : "text-white"}`}>
+                    <span
+                      className={`font-bold text-sm ${
+                        isMe ? "text-emerald-400" : "text-white"
+                      }`}
+                    >
                       {entry.squadName || "Fantasy Squad"}
                     </span>
+
                     {isMe && (
                       <span className="text-[10px] uppercase font-bold tracking-wide text-emerald-400/80">
                         You
                       </span>
                     )}
                   </div>
+
                   <div className="text-[11px] text-slate-400 font-sans">
-                    Manager: <span className="font-semibold text-slate-300">@{entry.username}</span>
+                    Manager:{" "}
+                    <span className="font-semibold text-slate-300">
+                      @{entry.username}
+                    </span>
                   </div>
                 </td>
 
                 {/* Escrow Status */}
                 <td className="py-3 px-3">
                   {entryFee === 0 ? (
-                    <span className="text-xs text-slate-500">Free league</span>
+                    <span className="text-xs text-slate-500">
+                      Free league
+                    </span>
                   ) : entry.membershipStatus === MembershipStatus.ACTIVE ? (
                     <Badge variant="success" className="gap-1">
                       <IconCheck className="w-3 h-3" />
@@ -221,7 +417,9 @@ export const StandingsTable: React.FC<StandingsTableProps> = ({
                   <span className="font-mono font-black text-sm text-white">
                     {entry.totalPoints}
                   </span>
-                  <span className="text-[10px] text-slate-500 ml-1">pts</span>
+                  <span className="text-[10px] text-slate-500 ml-1">
+                    pts
+                  </span>
                 </td>
 
                 {/* Projected Prize */}

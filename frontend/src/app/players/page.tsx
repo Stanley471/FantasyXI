@@ -13,6 +13,7 @@ import {
   IconUsers,
 } from "@/components/ui/Icons";
 import { useVirtualList } from "@/hooks/useVirtualList";
+import { MarketTrendsPanel } from "@/components/players/MarketTrendsPanel";
 
 export default function PlayersPage() {
   const [players, setPlayers] = useState<Player[]>([]);
@@ -198,6 +199,8 @@ export default function PlayersPage() {
       </div>
 
       {/* Players Data Table — virtualised */}
+      <MarketTrendsPanel />
+
       <div className="bg-white border border-slate-200/80 rounded-3xl shadow-sm overflow-hidden">
         {isLoading ? (
           <div className="py-24 text-center text-slate-400">
