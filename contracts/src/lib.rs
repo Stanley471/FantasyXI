@@ -231,6 +231,7 @@ pub enum DataKey {
     ShieldedBalance(BytesN<32>, Address),
     ShieldedBatch(u64),
     TransparentAddressFingerprint(BytesN<32>),
+    PlatformFeeBps,
 }
 
 /// # Issue #83: Soroban Escrow Smart Contract for Fantasy Leagues
@@ -401,6 +402,37 @@ impl FantasyXIEscrow {
     /// Returns whether the escrow is currently paused.
     pub fn is_paused_view(env: Env) -> bool {
         Self::is_paused(&env)
+    }
+
+    pub const MAX_FEE_BPS: u32 = 500; // Hardcoded immutable ceiling: 5.00% (500 basis points)
+
+    /// Configures default platform fee basis points.
+    /// Invariant: Administrative attempts to exceed MAX_FEE_BPS (500 bps) strictly fail with FeeExceedsMaxCap.
+    pub fn set_platform_fee_bps(
+        env: Env,
+        admin: Address,
+        fee_bps: u32,
+    ) -> Result<(), EscrowError> {
+        Self::require_admin(&env, &admin)?;
+
+        if fee_bps > Self::MAX_FEE_BPS {
+            return Err(EscrowError::FeeExceedsMaxCap);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PlatformFeeBps, &fee_bps);
+        env.events()
+            .publish((Symbol::new(&env, "PlatformFeeBpsUpdated"),), fee_bps);
+        Ok(())
+    }
+
+    /// Queries the currently active platform fee basis points.
+    pub fn get_platform_fee_bps(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::PlatformFeeBps)
+            .unwrap_or(Self::MAX_FEE_BPS)
     }
 
     /// Admin quorum appoints the guardian allowed to trigger a federated emergency pause.
@@ -929,7 +961,7 @@ impl FantasyXIEscrow {
             return Err(EscrowError::AlreadySettled);
         }
 
-        if Self::is_league_frozen_internal(&env, league_id) {
+        if Self::is_paused(&env) || Self::is_league_frozen_internal(&env, league_id) {
             return Err(EscrowError::ContractPaused);
         }
 
@@ -4640,5 +4672,80 @@ mod test {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn test_circuit_breaker_halts_deposits_and_distributions_and_resumes_on_unpause() {
+        let (env, admin, token_addr, client) = setup_test();
+        let token_admin_client = token::StellarAssetClient::new(&env, &token_addr);
+        let token_client = token::Client::new(&env, &token_addr);
+
+        let user1 = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        token_admin_client.mint(&user1, &50_000_000);
+
+        let league_id = 910;
+        client.create_league(&admin, &league_id, &50_000_000, &token_addr);
+
+        // Pause contract
+        client.pause(&admin);
+        assert_eq!(client.is_paused_view(), true);
+
+        // Deposits are blocked when paused
+        let deposit_attempt = client.try_deposit(&user1, &league_id);
+        assert_eq!(deposit_attempt, Err(Ok(EscrowError::ContractPaused)));
+
+        // Unpause contract
+        client.unpause(&admin);
+        assert_eq!(client.is_paused_view(), false);
+
+        // Deposits succeed after unpausing
+        client.deposit(&user1, &league_id);
+        assert_eq!(token_client.balance(&user1), 0);
+
+        // Pause again to test settlement halt
+        client.pause(&admin);
+
+        let winners = soroban_sdk::vec![
+            &env,
+            WinnerPayout {
+                winner: user1.clone(),
+                amount: 47_500_000,
+            },
+        ];
+        let platform_fee = 2_500_000;
+
+        // Settlement/distribution is blocked when paused
+        let settle_attempt = client.try_settle(&admin, &league_id, &winners, &treasury, &platform_fee);
+        assert_eq!(settle_attempt, Err(Ok(EscrowError::ContractPaused)));
+
+        // Emergency refund is permitted even during pause
+        client.refund_deposit(&admin, &league_id, &user1);
+        assert_eq!(token_client.balance(&user1), 50_000_000);
+    }
+
+    #[test]
+    fn test_platform_fee_cap_invariant_enforced_against_admin_override() {
+        let (env, admin, _token_addr, client) = setup_test();
+
+        // Valid configuration <= 500 bps (5%) succeeds
+        assert_eq!(client.get_platform_fee_bps(), 500);
+        client.set_platform_fee_bps(&admin, &350);
+        assert_eq!(client.get_platform_fee_bps(), 350);
+
+        client.set_platform_fee_bps(&admin, &500);
+        assert_eq!(client.get_platform_fee_bps(), 500);
+
+        // Invariant guard: Setting fee above 500 bps (e.g. 501 bps or 1000 bps) fails with FeeExceedsMaxCap
+        let invalid_fee_attempt = client.try_set_platform_fee_bps(&admin, &501);
+        assert_eq!(invalid_fee_attempt, Err(Ok(EscrowError::FeeExceedsMaxCap)));
+
+        let extreme_fee_attempt = client.try_set_platform_fee_bps(&admin, &1_000);
+        assert_eq!(extreme_fee_attempt, Err(Ok(EscrowError::FeeExceedsMaxCap)));
+
+        // Non-admin cannot set fee
+        let unauthorized_user = Address::generate(&env);
+        let non_admin_attempt = client.try_set_platform_fee_bps(&unauthorized_user, &250);
+        assert_eq!(non_admin_attempt, Err(Ok(EscrowError::NotAuthorized)));
     }
 }
