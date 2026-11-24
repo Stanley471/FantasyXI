@@ -6,6 +6,11 @@ import { PositionBadge } from "@/components/ui/Badge";
 import { IconSwap } from "@/components/ui/Icons";
 import { useDraggable, useDroppable } from "@dnd-kit/core";
 import { validateSubstitution } from "@/lib/formation";
+import {
+  isKeyboardNavKey,
+  keyboardNavNext,
+  orderedSquadIds,
+} from "@/lib/dragDropFormation";
 import { useTeamStore } from "@/store/teamStore";
 import { PlayerCardSkeleton } from "@/components/team/PlayerCardSkeleton";
 
@@ -39,8 +44,60 @@ const PlayerCardComponent: React.FC<PlayerCardProps> = ({
   const handlePlayerClick = useTeamStore((state) => state.handlePlayerClick);
   const activeDragPlayer = useTeamStore((state) => state.activeDragPlayer);
   const allSquadPlayers = useTeamStore((state) => state.players);
+  const keyboardFocusedPlayerId = useTeamStore((state) => state.keyboardFocusedPlayerId);
+  const setKeyboardFocusedPlayerId = useTeamStore((state) => state.setKeyboardFocusedPlayerId);
+  const setSelectedPlayerId = useTeamStore((state) => state.setSelectedPlayerId);
+  const handleSwap = useTeamStore((state) => state.handleSwap);
+  const rejectedSwap = useTeamStore((state) => state.rejectedSwap);
 
   const onClick = () => handlePlayerClick(player || null, positionSlot);
+
+  /**
+   * Full keyboard parity with pointer drag (#462): Space selects this
+   * player, arrow keys move focus across the pitch and bench, Enter swaps
+   * the selected player with this one, Escape cancels. preventDefault
+   * suppresses the button's own Space/Enter click so a swap is never
+   * applied twice.
+   */
+  const onKeyDown = (event: React.KeyboardEvent) => {
+    if (!player || !isKeyboardNavKey(event.key)) return;
+    const selectedPlayerId = useTeamStore.getState().selectedPlayerId;
+    const { state, action } = keyboardNavNext(
+      { focusedPlayerId: player.id, selectedPlayerId },
+      event.key,
+      orderedSquadIds(allSquadPlayers)
+    );
+    event.preventDefault();
+    if (state.focusedPlayerId !== null && state.focusedPlayerId !== player.id) {
+      setKeyboardFocusedPlayerId(state.focusedPlayerId);
+      // Move DOM focus to the newly focused card after the ring updates.
+      const nextId = state.focusedPlayerId;
+      requestAnimationFrame(() => {
+        document
+          .querySelector<HTMLElement>(`[data-player-id="${nextId}"] button`)
+          ?.focus();
+      });
+    } else {
+      setKeyboardFocusedPlayerId(state.focusedPlayerId);
+    }
+    switch (action.kind) {
+      case "select":
+        setSelectedPlayerId(action.playerId);
+        break;
+      case "deselect":
+      case "cancel":
+        setSelectedPlayerId(null);
+        break;
+      case "swap": {
+        // Keep the selection on an illegal swap so another target can be tried.
+        const swapped = handleSwap(action.sourcePlayerId, action.targetPlayerId);
+        if (swapped) setSelectedPlayerId(null);
+        break;
+      }
+      default:
+        break;
+    }
+  };
 
   // Drag and Drop integration
   const dropId = player?.id?.toString() || `empty-${positionSlot}-${benchIndex ?? "starter"}`;
@@ -142,6 +199,10 @@ const PlayerCardComponent: React.FC<PlayerCardProps> = ({
   // Dynamic styling based on Drag & Drop and substitution validation
   let interactiveStyles = "hover:scale-105 cursor-grab active:cursor-grabbing";
 
+  // Snap-back: an illegal drop shakes the dragged card back to its slot (#462).
+  const isSnapBackTarget =
+    rejectedSwap !== null && player && rejectedSwap.sourcePlayerId === player.id;
+
   if (isOverlay) {
     interactiveStyles = "cursor-grabbing shadow-2xl";
   } else if (isDragging || isSelfBeingDragged) {
@@ -170,13 +231,22 @@ const PlayerCardComponent: React.FC<PlayerCardProps> = ({
     interactiveStyles = "scale-105 ring-2 ring-amber-400 rounded-xl bg-amber-950/40 p-1 animate-pulse";
   }
 
+  // Keyboard focus ring for the Space/arrows/Enter flow (#462).
+  const isKeyboardFocused =
+    !isOverlay && player && keyboardFocusedPlayerId === player.id;
+  if (isKeyboardFocused && !isSelectedForSwap) {
+    interactiveStyles += " ring-2 ring-cyan-300 rounded-xl";
+  }
+
   return (
     <div
       ref={setNodeRef}
       className={`relative flex flex-col items-center transition-all duration-150 ${
         isDragging && !isOverlay ? "opacity-30" : ""
-      }`}
+      } ${isSnapBackTarget ? "animate-snap-back" : ""}`}
       data-testid={`player-card-${player.id}`}
+      data-player-id={player.id}
+      data-flip-id={player.id}
       data-starter={isStarter ? "true" : "false"}
     >
       {/* Floating Status Tooltip during Drag */}
@@ -196,10 +266,18 @@ const PlayerCardComponent: React.FC<PlayerCardProps> = ({
       <button
         type="button"
         onClick={onClick}
+        onKeyDown={onKeyDown}
+        onFocus={() => player && setKeyboardFocusedPlayerId(player.id)}
+        onBlur={() => {
+          if (player && keyboardFocusedPlayerId === player.id) {
+            setKeyboardFocusedPlayerId(null);
+          }
+        }}
         {...(!isOverlay ? listeners : {})}
         {...(!isOverlay ? attributes : {})}
         aria-pressed={isSelectedForSwap}
-        aria-label={`${player.displayName || player.lastName}, ${positionSlot}${isStarter ? ", starter" : ", substitute"}${isSelectedForSwap ? ", selected for swap" : ""}`}
+        aria-label={`${player.displayName || player.lastName}, ${positionSlot}${isStarter ? ", starter" : ", substitute"}${isSelectedForSwap ? ", selected for swap" : ""}${isSnapBackTarget ? `. Illegal substitution: ${rejectedSwap?.reason}` : ""}`}
+        title={isSnapBackTarget ? rejectedSwap?.reason : undefined}
         style={!isOverlay ? { touchAction: "none" } : undefined}
         className={`group relative flex flex-col items-center focus:outline-none transition-all duration-200 ${interactiveStyles}`}
       >
@@ -266,6 +344,16 @@ const PlayerCardComponent: React.FC<PlayerCardProps> = ({
           </div>
         )}
       </button>
+
+      {/* Contextual warning when an illegal drop snapped this card back (#462). */}
+      {isSnapBackTarget && rejectedSwap && (
+        <div
+          role="alert"
+          className="absolute -bottom-7 z-40 max-w-[210px] truncate rounded-full bg-rose-600 px-2.5 py-0.5 font-mono text-[10px] font-black text-white shadow-xl"
+        >
+          {rejectedSwap.reason}
+        </div>
+      )}
     </div>
   );
 };

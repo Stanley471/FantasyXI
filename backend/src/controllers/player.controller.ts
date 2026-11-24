@@ -5,6 +5,17 @@ import {
   playerAnalyticsEngine,
   PlayerNotFoundError,
 } from "../services/analytics/playerAnalyticsEngine.js";
+import { marketTrendService } from "../services/fpl/marketTrendService.js";
+
+export async function getMarketTrends(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const requested = Number(req.query.windowHours ?? 6);
+    const windowHours = Number.isFinite(requested) ? Math.min(24, Math.max(1, requested)) : 6;
+    res.json({ success: true, data: await marketTrendService.getTrends(new Date(), windowHours) });
+  } catch (error) {
+    next(error);
+  }
+}
 
 /**
  * Player Controller.
