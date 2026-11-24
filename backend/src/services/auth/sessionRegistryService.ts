@@ -3,13 +3,18 @@
  *
  * Implements:
  * 1. Device fingerprinting from request headers (OS, Browser, Device Type, IP).
- * 2. Active session registry with fast revocation checking.
+ * 2. Active session registry backed by a two-tier cache (Issue #439):
+ *    - L1: node-local LRU in-memory cache (sub-millisecond lookups).
+ *    - L2: Redis Streams backbone for cross-node session creation,
+ *          heartbeat, and revocation broadcast (≤50 ms eviction).
  * 3. Cross-tab and multi-device real-time invalidation dispatch.
  */
 
 import crypto from "crypto";
 import { EventEmitter } from "events";
 import { sessionRevocationBloom } from "./sessionRevocationBloom.js";
+import { l1Get, l1Set, l1Revoke, l1Clear } from "./sessionL1Cache.js";
+import { publishSessionEvent } from "./sessionStreamSync.js";
 
 export interface DeviceInfo {
   browser: string;
@@ -102,6 +107,7 @@ export class SessionRegistryService {
 
   /**
    * Registers a new session upon login or refresh.
+   * Writes to L1 and publishes a SESSION_CREATED event to Redis Streams (L2).
    */
   public async createSession(
     userId: string,
@@ -129,6 +135,18 @@ export class SessionRegistryService {
       this.userSessionsIndex.set(userId, new Set());
     }
     this.userSessionsIndex.get(userId)!.add(sessionId);
+
+    // L1 warm-up: prime the local cache immediately
+    l1Set(sessionId, userId, expiresAt);
+
+    // L2: broadcast to other nodes via Redis Streams
+    void publishSessionEvent({
+      type: "SESSION_CREATED",
+      sessionId,
+      userId,
+      expiresAt: expiresAt.getTime(),
+      publishedAt: now.getTime(),
+    });
 
     return session;
   }
@@ -160,13 +178,45 @@ export class SessionRegistryService {
 
   /**
    * Checks whether a session ID is currently valid (not revoked and not expired).
+   *
+   * Fast path (Issue #439):
+   *  1. Check L1 cache — answers immediately without Redis or DB I/O.
+   *     a. Positive hit  → valid (also sends a heartbeat to L2).
+   *     b. Tombstone hit → invalid (revoked/expired).
+   *  2. L1 miss → fall through to Bloom filter + DB (existing path),
+   *     then populate L1 on success.
    */
   public async isSessionValid(sessionId: string, userId: string): Promise<boolean> {
-    if (await sessionRevocationBloom.isRevoked(sessionId)) {
-      this.revokedSessionIds.add(sessionId);
+    // ── L1 fast path ──────────────────────────────────────────────────────────
+    const l1Entry = l1Get(sessionId);
+    if (l1Entry !== undefined) {
+      if (!l1Entry.valid || l1Entry.userId !== userId) return false;
+
+      // Sliding expiry heartbeat: publish to Redis Streams at most once every 5 min
+      const now = new Date();
+      const session = this.sessions.get(sessionId);
+      if (session && now.getTime() - session.lastActiveAt.getTime() > 300_000) {
+        session.lastActiveAt = now;
+        void publishSessionEvent({
+          type: "SESSION_HEARTBEAT",
+          sessionId,
+          userId,
+          expiresAt: session.expiresAt.getTime(),
+          publishedAt: now.getTime(),
+        });
+      }
+      return true;
+    }
+
+    // ── L2 / authoritative path ───────────────────────────────────────────────
+    if (this.revokedSessionIds.has(sessionId)) {
+      l1Revoke(sessionId);
       return false;
     }
-    if (this.revokedSessionIds.has(sessionId)) {
+
+    if (await sessionRevocationBloom.isRevoked(sessionId)) {
+      this.revokedSessionIds.add(sessionId);
+      l1Revoke(sessionId);
       return false;
     }
 
@@ -176,6 +226,7 @@ export class SessionRegistryService {
     }
 
     if (session.userId !== userId || session.isRevoked) {
+      l1Revoke(sessionId);
       return false;
     }
 
@@ -189,17 +240,33 @@ export class SessionRegistryService {
       session.lastActiveAt = now;
     }
 
+    // Populate L1 for future fast-path hits
+    l1Set(sessionId, userId, session.expiresAt);
+
     return true;
   }
 
   /**
    * Revokes an individual session immediately.
+   * Writes an L1 tombstone locally and broadcasts a SESSION_REVOKED event to
+   * all other nodes via Redis Streams (Issue #439 ≤50 ms cross-node eviction).
    */
   public async revokeSession(sessionId: string, reason: string = "User logged out"): Promise<boolean> {
+    // L1 tombstone — instant local eviction
+    l1Revoke(sessionId);
+
     const session = this.sessions.get(sessionId);
     if (!session) {
       this.revokedSessionIds.add(sessionId);
       await sessionRevocationBloom.add(sessionId, null, reason, new Date(Date.now() + 7 * 24 * 3600 * 1000));
+
+      void publishSessionEvent({
+        type: "SESSION_REVOKED",
+        sessionId,
+        userId: "",
+        expiresAt: Date.now() + 7 * 24 * 3600 * 1000,
+        publishedAt: Date.now(),
+      });
       return false;
     }
 
@@ -208,6 +275,15 @@ export class SessionRegistryService {
     session.revocationReason = reason;
     this.revokedSessionIds.add(sessionId);
     await sessionRevocationBloom.add(sessionId, session.userId, reason, session.expiresAt);
+
+    // L2: notify all other nodes to evict from their L1 caches
+    void publishSessionEvent({
+      type: "SESSION_REVOKED",
+      sessionId,
+      userId: session.userId,
+      expiresAt: session.expiresAt.getTime(),
+      publishedAt: Date.now(),
+    });
 
     this.dispatchRevocationEvent({
       userId: session.userId,
@@ -221,6 +297,7 @@ export class SessionRegistryService {
 
   /**
    * Revokes all sessions for a user, optionally preserving one (e.g. current device).
+   * L1 tombstones and L2 stream events are emitted for each revoked session.
    */
   public async revokeAllUserSessions(
     userId: string,
@@ -238,6 +315,9 @@ export class SessionRegistryService {
         continue;
       }
 
+      // L1 tombstone immediately
+      l1Revoke(id);
+
       const session = this.sessions.get(id);
       if (session && !session.isRevoked) {
         session.isRevoked = true;
@@ -245,6 +325,14 @@ export class SessionRegistryService {
         session.revocationReason = reason;
         this.revokedSessionIds.add(id);
         await sessionRevocationBloom.add(id, userId, reason, session.expiresAt);
+
+        void publishSessionEvent({
+          type: "SESSION_REVOKED",
+          sessionId: id,
+          userId,
+          expiresAt: session.expiresAt.getTime(),
+          publishedAt: now.getTime(),
+        });
         revokedCount++;
       } else {
         this.revokedSessionIds.add(id);
@@ -277,6 +365,7 @@ export class SessionRegistryService {
     this.sessions.clear();
     this.userSessionsIndex.clear();
     this.revokedSessionIds.clear();
+    l1Clear();
   }
 }
 
