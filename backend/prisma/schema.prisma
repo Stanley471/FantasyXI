@@ -1517,3 +1517,52 @@ model SuspensionAppeal {
   @@index([accountId, status])
   @@map("suspension_appeals")
 }
+
+// ============================================================
+// TRANSACTIONAL OUTBOX  (Issue #438)
+// ============================================================
+
+/// Delivery status of a transactional outbox event.
+enum OutboxEventStatus {
+  PENDING
+  PUBLISHED
+  FAILED
+  DEAD
+}
+
+/// One integration event written atomically alongside its originating
+/// business mutation.  The outbox relay worker polls this table and
+/// publishes to the message bus with at-least-once semantics.
+///
+/// Fields
+/// ──────
+/// • deduplicationId  — caller-supplied idempotency key (e.g. <aggregateId>/<version>).
+///                      The relay skips events whose deduplicationId was already ACK-ed.
+/// • aggregateType    — logical domain entity class, e.g. "League", "User", "Payout".
+/// • aggregateId      — ID of the domain aggregate that produced the event.
+/// • eventType        — discriminator, e.g. "LEAGUE_CREATED", "PAYOUT_SETTLED".
+/// • payload          — JSON-serialised event body consumed by downstream services.
+/// • status           — lifecycle state: PENDING → PUBLISHED | FAILED → DEAD.
+/// • attempts         — cumulative publish attempts (drives exponential back-off).
+/// • lockedUntil      — relay worker sets this to claim an event and prevent
+///                      concurrent duplicate delivery.
+/// • publishedAt      — wall-clock time the relay confirmed successful publish.
+/// • nextRetryAt      — earliest time the relay may attempt another delivery.
+model OutboxEvent {
+  id              String           @id @default(uuid())
+  deduplicationId String           @unique @map("deduplication_id")
+  aggregateType   String           @map("aggregate_type")
+  aggregateId     String           @map("aggregate_id")
+  eventType       String           @map("event_type")
+  payload         Json
+  status          OutboxEventStatus @default(PENDING)
+  attempts        Int              @default(0)
+  lockedUntil     DateTime?        @map("locked_until")
+  publishedAt     DateTime?        @map("published_at")
+  nextRetryAt     DateTime         @default(now()) @map("next_retry_at")
+  createdAt       DateTime         @default(now()) @map("created_at")
+
+  @@index([status, nextRetryAt])
+  @@index([aggregateType, aggregateId])
+  @@map("outbox_events")
+}
