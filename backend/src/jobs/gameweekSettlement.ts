@@ -8,6 +8,7 @@ import { tournamentBracketService } from "../services/league/tournamentService.j
 import { eventBus, publishOrThrow } from "../services/events/eventBus.js";
 import { GAMEWEEK_UPDATED_EVENT } from "../services/events/domainEvents.js";
 import { gameweekOracleService } from "../services/financial/gameweekOracleService.js";
+import { micropaymentChannelService } from "../services/financial/micropaymentChannelService.js";
 import { createGameweekAuditAnchorService } from "../services/financial/gameweekAuditAnchorService.js";
 import { updateMatchRatings } from "../services/league/matchRatingService.js";
 // Imported for its side effect: subscribes the scoring, free-hit and league
@@ -169,6 +170,9 @@ export async function settleGameweek(gameweekId: number): Promise<void> {
   // whole platform (see recalculateClassicStandings for why this replaced a
   // per-league loop).
   await leagueService.recalculateClassicStandings(gameweekId);
+
+  // Reconcile and close off-chain micropayment channels for this gameweek (Issue #427)
+  await micropaymentChannelService.settleGameweekChannels(gameweekId);
 
   const oracleSigningKey = process.env.STELLAR_ORACLE_SIGNING_KEY;
   if (oracleSigningKey) {

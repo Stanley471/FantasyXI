@@ -2,7 +2,7 @@
  * Real-Time FX Rate Oracle Aggregator & Fiat-to-Crypto Volatility Guard (Issue #424)
  *
  * Computes real-time median conversion rates between fiat display currencies
- * and supported crypto assets (USDC, ZEC) with:
+ * and supported Stellar SAC crypto assets (USDC, XLM) with:
  * - Multiple independent public rate providers & priority fallback cascading
  * - Median filtering and outlier rejection (> 5% deviation from median)
  * - 5-minute sliding-window volatility circuit breaker with temporary checkout
@@ -20,19 +20,19 @@ import {
   type IRedisCacheClient,
 } from "../../config/redis.js";
 
-export type SupportedCryptoAsset = "USDC" | "ZEC";
+export type SupportedCryptoAsset = "USDC" | "XLM";
 
-export const SUPPORTED_CRYPTO_ASSETS: readonly SupportedCryptoAsset[] = ["USDC", "ZEC"] as const;
+export const SUPPORTED_CRYPTO_ASSETS: readonly SupportedCryptoAsset[] = ["USDC", "XLM"] as const;
 
 export function isSupportedCryptoAsset(value: string): value is SupportedCryptoAsset {
-  return value === "USDC" || value === "ZEC";
+  return value === "USDC" || value === "XLM";
 }
 
 export interface FxRateProvider {
   readonly name: string;
   /** Lower number = higher priority (primary tier = 1, fallback tiers = 2+). */
   readonly priority: number;
-  /** Returns fiat price per 1 unit of the given crypto asset (e.g. USD per 1 ZEC). */
+  /** Returns fiat price per 1 unit of the given crypto asset (e.g. USD per 1 XLM). */
   fetchRate(asset: SupportedCryptoAsset, fiat: string): Promise<number>;
 }
 
@@ -292,7 +292,7 @@ export class CoinGeckoRateProvider implements FxRateProvider {
   public readonly priority = 1;
   private readonly assetMap: Record<SupportedCryptoAsset, string> = {
     USDC: "usd-coin",
-    ZEC: "zcash",
+    XLM: "stellar",
   };
 
   constructor(private readonly timeoutMs: number = FX_ORACLE_DEFAULTS.providerTimeoutMs) {}
@@ -421,7 +421,7 @@ export class FxRateOracle {
     this.staleMaxAgeMs = options.staleMaxAgeMs ?? FX_ORACLE_DEFAULTS.staleMaxAgeMs;
     this.volatilityWindowMs = options.volatilityWindowMs ?? FX_ORACLE_DEFAULTS.volatilityWindowMs;
     this.volatilityThreshold = options.volatilityThreshold ?? FX_ORACLE_DEFAULTS.volatilityThreshold;
-    this.assetVolatilityThresholds = options.assetVolatilityThresholds ?? { USDC: 0.02, ZEC: 0.05 };
+    this.assetVolatilityThresholds = options.assetVolatilityThresholds ?? { USDC: 0.02, XLM: 0.05 };
     this.checkoutLockDurationMs =
       options.checkoutLockDurationMs ?? FX_ORACLE_DEFAULTS.checkoutLockDurationMs;
     this.redisKeyPrefix = options.redisKeyPrefix ?? FX_ORACLE_DEFAULTS.redisKeyPrefix;

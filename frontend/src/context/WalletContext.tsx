@@ -49,7 +49,7 @@ interface WalletContextValue {
   adapter: WalletAdapter | null;
 }
 
-const WalletContext = createContext<WalletContextValue | null>(null);
+export const WalletContext = createContext<WalletContextValue | null>(null);
 const WALLET_STORAGE_KEY = "fantasyxi.selected-wallet";
 const WALLET_IDS = new Set<WalletProviderId>([
   "freighter",

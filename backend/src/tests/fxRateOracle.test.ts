@@ -139,7 +139,7 @@ describe("FxRateOracle - Provider Dropout & Fallback Cascading", () => {
       ],
     });
 
-    const result = await oracle.getRate("ZEC", "USD");
+    const result = await oracle.getRate("XLM", "USD");
     assert.equal(result.rate, 42.1);
     assert.equal(result.freshness, "FRESH");
     assert.deepEqual(result.providersUsed.sort(), ["fallback-c", "primary-b"]);
@@ -155,35 +155,35 @@ describe("FxRateOracle - Provider Dropout & Fallback Cascading", () => {
 describe("FxRateOracle - Flash Crash & Volatility Circuit Breaker", () => {
   it("triggers temporary checkout lock on rapid 5-minute price move and unlocks with updated rate acceptance", async () => {
     let nowMs = 1_700_000_000_000;
-    let currentZecPrice = 40.0;
+    let currentXlmPrice = 40.0;
 
     const oracle = new FxRateOracle({
       now: () => nowMs,
       redisClient: new MockRedisClient(() => nowMs),
       freshTtlMs: 10_000,
       volatilityWindowMs: 5 * 60 * 1000,
-      assetVolatilityThresholds: { ZEC: 0.05, USDC: 0.02 },
+      assetVolatilityThresholds: { XLM: 0.05, USDC: 0.02 },
       checkoutLockDurationMs: 120_000,
       minQuorum: 2,
       providers: [
-        makeProvider("p1", 1, async () => currentZecPrice),
-        makeProvider("p2", 1, async () => currentZecPrice),
+        makeProvider("p1", 1, async () => currentXlmPrice),
+        makeProvider("p2", 1, async () => currentXlmPrice),
       ],
     });
 
     // Initial stable checkout succeeds
-    const initialConversion = await oracle.convertFiatToCrypto(100, "ZEC", "USD");
+    const initialConversion = await oracle.convertFiatToCrypto(100, "XLM", "USD");
     assert.equal(initialConversion.rate, 40.0);
     assert.equal(initialConversion.cryptoAmount, 2.5);
     assert.equal(initialConversion.rateAccepted, false);
 
     // 1 minute later: flash crash (-15% drop from $40 to $34)
     nowMs += 60_000;
-    currentZecPrice = 34.0;
-    await oracle.getRate("ZEC", "USD", { forceRefresh: true });
+    currentXlmPrice = 34.0;
+    await oracle.getRate("XLM", "USD", { forceRefresh: true });
 
     // Checkout without rate acceptance must be locked
-    const guardLocked = await oracle.evaluateCheckoutGuard("ZEC", "USD");
+    const guardLocked = await oracle.evaluateCheckoutGuard("XLM", "USD");
     assert.equal(guardLocked.allowed, false);
     if (guardLocked.allowed || guardLocked.status !== "VOLATILITY_LOCKED") {
       assert.fail("Expected VOLATILITY_LOCKED guard result");
@@ -196,16 +196,16 @@ describe("FxRateOracle - Flash Crash & Volatility Circuit Breaker", () => {
 
     // convertFiatToCrypto throws VolatilityLockError without token
     await assert.rejects(
-      () => oracle.convertFiatToCrypto(100, "ZEC", "USD"),
+      () => oracle.convertFiatToCrypto(100, "XLM", "USD"),
       (err: unknown) => err instanceof VolatilityLockError,
     );
 
     // Wrong acceptance token still blocked
-    const wrongTokenGuard = await oracle.evaluateCheckoutGuard("ZEC", "USD", "invalid-token");
+    const wrongTokenGuard = await oracle.evaluateCheckoutGuard("XLM", "USD", "invalid-token");
     assert.equal(wrongTokenGuard.allowed, false);
 
     // Valid updated rate acceptance token allows checkout at the new rate
-    const acceptedConversion = await oracle.convertFiatToCrypto(100, "ZEC", "USD", {
+    const acceptedConversion = await oracle.convertFiatToCrypto(100, "XLM", "USD", {
       acceptedRateToken: guardLocked.acceptanceToken,
     });
     assert.equal(acceptedConversion.rate, 34.0);
@@ -214,8 +214,8 @@ describe("FxRateOracle - Flash Crash & Volatility Circuit Breaker", () => {
 
     // After lock expires and 5-minute window passes, normal checkouts resume
     nowMs += 6 * 60 * 1000;
-    await oracle.getRate("ZEC", "USD", { forceRefresh: true });
-    const resumedGuard = await oracle.evaluateCheckoutGuard("ZEC", "USD");
+    await oracle.getRate("XLM", "USD", { forceRefresh: true });
+    const resumedGuard = await oracle.evaluateCheckoutGuard("XLM", "USD");
     assert.equal(resumedGuard.allowed, true);
   });
 });
@@ -289,7 +289,7 @@ describe("FxRateOracle - Redis TTL, Stale-While-Revalidate & 15-Minute Invalid D
       providers: [makeProvider("p1", 1, async () => 38.5)],
     });
 
-    const result = await oracle.getRate("ZEC", "USD");
+    const result = await oracle.getRate("XLM", "USD");
     assert.equal(result.rate, 38.5);
     assert.equal(result.freshness, "FRESH");
   });
@@ -320,7 +320,7 @@ describe("FX Oracle HTTP API Integration", () => {
     app.use("/api/v1/fx", createFxOracleRouter(() => oracle));
 
     // GET /rate
-    const rateRes = await request(app).get("/api/v1/fx/rate?asset=ZEC&fiat=USD");
+    const rateRes = await request(app).get("/api/v1/fx/rate?asset=XLM&fiat=USD");
     assert.equal(rateRes.status, 200);
     assert.equal(rateRes.body.data.rate, 50.0);
 
@@ -331,11 +331,11 @@ describe("FX Oracle HTTP API Integration", () => {
     // Flash crash -> POST /convert returns 409 with acceptanceToken
     nowMs += 30_000;
     price = 40.0; // -20%
-    await oracle.getRate("ZEC", "USD", { forceRefresh: true });
+    await oracle.getRate("XLM", "USD", { forceRefresh: true });
 
     const lockedRes = await request(app)
       .post("/api/v1/fx/convert")
-      .send({ fiatAmount: 100, asset: "ZEC", fiat: "USD" });
+      .send({ fiatAmount: 100, asset: "XLM", fiat: "USD" });
     assert.equal(lockedRes.status, 409);
     assert.equal(lockedRes.body.code, "FX_VOLATILITY_LOCKED");
     assert.equal(lockedRes.body.data.requiresRateAcceptance, true);
@@ -345,7 +345,7 @@ describe("FX Oracle HTTP API Integration", () => {
     // Retry with acceptedRateToken -> 200
     const unlockedRes = await request(app)
       .post("/api/v1/fx/convert")
-      .send({ fiatAmount: 100, asset: "ZEC", fiat: "USD", acceptedRateToken: token });
+      .send({ fiatAmount: 100, asset: "XLM", fiat: "USD", acceptedRateToken: token });
     assert.equal(unlockedRes.status, 200);
     assert.equal(unlockedRes.body.data.rateAccepted, true);
     assert.equal(unlockedRes.body.data.cryptoAmount, 2.5);
@@ -353,7 +353,7 @@ describe("FX Oracle HTTP API Integration", () => {
     // Stale > 15m -> 503
     online = false;
     nowMs += 16 * 60 * 1000;
-    const staleRes = await request(app).get("/api/v1/fx/rate?asset=ZEC&fiat=USD");
+    const staleRes = await request(app).get("/api/v1/fx/rate?asset=XLM&fiat=USD");
     assert.equal(staleRes.status, 503);
     assert.equal(staleRes.body.code, "FX_RATE_STALE_INVALID");
 

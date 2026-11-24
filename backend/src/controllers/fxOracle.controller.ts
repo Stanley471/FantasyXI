@@ -15,7 +15,7 @@ export function createFxOracleHandlers(oracleProvider: () => FxRateOracle = getF
     if (!isSupportedCryptoAsset(assetRaw)) {
       res.status(400).json({
         success: false,
-        message: `Unsupported crypto asset: ${assetRaw}. Supported assets: USDC, ZEC`,
+        message: `Unsupported crypto asset: ${assetRaw}. Supported assets: USDC, XLM`,
       });
       return;
     }
@@ -53,7 +53,7 @@ export function createFxOracleHandlers(oracleProvider: () => FxRateOracle = getF
     if (!isSupportedCryptoAsset(asset)) {
       res.status(400).json({
         success: false,
-        message: `Unsupported crypto asset: ${asset}. Supported assets: USDC, ZEC`,
+        message: `Unsupported crypto asset: ${asset}. Supported assets: USDC, XLM`,
       });
       return;
     }

@@ -188,11 +188,11 @@ export function LeagueInteractivePanel({
 
   // ── Invite code copy ──────────────────────────────────────────────────────
 
-  const copyInviteCode = () => {
+  const copyInviteCode = async () => {
     if (league.inviteCode) {
-      navigator.clipboard.writeText(league.inviteCode);
+      await navigator.clipboard.writeText(league.inviteCode);
       setCopiedCode(true);
-      toast.success("League invite code copied to clipboard!");
+      toast.success("Invite link copied to clipboard");
       setTimeout(() => setCopiedCode(false), 2000);
     }
   };
@@ -300,6 +300,7 @@ export function LeagueInteractivePanel({
             onClick={copyInviteCode}
             className="text-xs"
             title="Copy Invite Code"
+            aria-label="Copy Invite Code"
           >
             {copiedCode ? (
               <IconCheck className="w-3.5 h-3.5 text-emerald-400" />
@@ -318,6 +319,9 @@ export function LeagueInteractivePanel({
               </svg>
             )}
           </Button>
+          <span role="status" aria-live="polite" className="sr-only" data-testid="invite-code-copy-status">
+            {copiedCode ? "Invite link copied to clipboard" : ""}
+          </span>
         </div>
       )}
 

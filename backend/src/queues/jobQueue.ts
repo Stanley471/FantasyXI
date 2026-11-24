@@ -15,6 +15,11 @@ import { jwtKeyRotationService } from "../services/auth/jwtKeyRotationService.js
 import { auditLeaguesForCollusion } from "../jobs/leagueIntegrityAudit.js";
 import { anchorPayoutAuditRoot } from "../jobs/payoutAuditAnchor.js";
 import {
+  runSorobanTtlExtensionJob,
+  SOROBAN_TTL_EXTENSION_CRON,
+  SOROBAN_TTL_EXTENSION_JOB_NAME,
+} from "../jobs/sorobanTtlExtension.js";
+import {
   executeFplSyncTask,
   FPL_SYNC_DLQ_NAME,
   FPL_SYNC_QUEUE_NAME,
@@ -80,6 +85,12 @@ export const JOB_DEFINITIONS: JobDefinition[] = [
   { name: "jwt-key-rotation", cron: "*/15 * * * *", handler: () => jwtKeyRotationService.rotate() },
   // League integrity and collusion detection (issue #328)
   { name: "league-collusion-audit", cron: "0 */6 * * *", handler: () => auditLeaguesForCollusion() },
+  // Soroban contract storage TTL extension worker (issue #548)
+  {
+    name: SOROBAN_TTL_EXTENSION_JOB_NAME,
+    cron: SOROBAN_TTL_EXTENSION_CRON,
+    handler: () => runSorobanTtlExtensionJob(),
+  },
 ];
 
 const QUEUE_OPTIONS = {

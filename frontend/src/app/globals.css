@@ -165,6 +165,25 @@
   --pitch-grass-1: var(--fxi-pitch-grass-1);
   --pitch-grass-2: var(--fxi-pitch-grass-2);
   --pitch-line: var(--fxi-pitch-line);
+
+  /* Standardized Player Position Badge Design Tokens (Issue #481)
+     GKP (Amber), DEF (Blue), MID (Green), FWD (Red).
+     Meets WCAG AA contrast standards (>= 4.5:1) in light and dark views. */
+  --pos-gkp-bg: #b45309;
+  --pos-gkp-fg: #ffffff;
+  --pos-gkp-border: #92400e;
+
+  --pos-def-bg: #1d4ed8;
+  --pos-def-fg: #ffffff;
+  --pos-def-border: #1e40af;
+
+  --pos-mid-bg: #15803d;
+  --pos-mid-fg: #ffffff;
+  --pos-mid-border: #166534;
+
+  --pos-fwd-bg: #b91c1c;
+  --pos-fwd-fg: #ffffff;
+  --pos-fwd-border: #991b1b;
 }
 
 @theme inline {

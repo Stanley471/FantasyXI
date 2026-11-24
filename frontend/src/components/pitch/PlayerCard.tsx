@@ -2,7 +2,7 @@
 
 import React from "react";
 import { Player, Position } from "@/types";
-import { PositionBadge } from "@/components/ui/Badge";
+import { PositionBadge, getPositionColorToken } from "@/components/ui/PositionBadge";
 import { IconSwap } from "@/components/ui/Icons";
 import { useDraggable, useDroppable } from "@dnd-kit/core";
 import { validateSubstitution } from "@/lib/formation";
@@ -178,20 +178,10 @@ const PlayerCardComponent: React.FC<PlayerCardProps> = ({
     );
   }
 
-  // Position-specific jersey color gradients for rich authentic feel
+  // Position-specific jersey color gradients driven by standardized position tokens
   const getJerseyStyle = (pos: Position) => {
-    switch (pos) {
-      case Position.GKP:
-        return "from-amber-600 to-amber-700 border-amber-400 text-amber-100";
-      case Position.DEF:
-        return "from-sky-700 to-sky-900 border-sky-400 text-sky-100";
-      case Position.MID:
-        return "from-emerald-700 to-emerald-900 border-emerald-400 text-emerald-100";
-      case Position.FWD:
-        return "from-rose-700 to-rose-900 border-rose-400 text-rose-100";
-      default:
-        return "from-slate-700 to-slate-800 border-slate-400 text-slate-100";
-    }
+    const token = getPositionColorToken(pos);
+    return token ? token.jerseyClassName : "from-slate-700 to-slate-800 border-slate-400 text-slate-100";
   };
 
   const jerseyStyle = getJerseyStyle(player.position);

@@ -74,8 +74,6 @@ pub enum EscrowError {
     InsufficientStake = 38,
     DisputeNotExpired = 39,
     InvalidDisputeConfig = 40,
-    UpgradeNotProposed = 41,
-    InvalidFederationPeer = 42,
     BatchWindowNotElapsed = 43,
     InvalidBatchConfig = 44,
     AllocationMismatch = 45,
@@ -92,6 +90,9 @@ pub enum LeagueStatus {
     Active = 1,
     Settled = 2,
     Cancelled = 3,
+    Disputed = 4,
+    ArbitrationPending = 5,
+    Refunded = 6,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -160,6 +161,38 @@ pub struct PauseProposal {
     pub executed: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct DisputeConfig {
+    pub window_seconds: u64,
+    pub resolution_seconds: u64,
+    pub min_stake_bps: u32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct SettlementDispute {
+    pub challenger: Address,
+    pub stake: i128,
+    pub opened_at: u64,
+    pub resolve_by: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct MultisigRefundProposal {
+    pub id: u64,
+    pub league_id: u64,
+    pub proposer: Address,
+    pub participants: Vec<Address>,
+    pub reason_hash: BytesN<32>,
+    pub approvals: Vec<Address>,
+    pub threshold: u32,
+    pub created_at: u64,
+    pub timeout_at: u64,
+    pub executed: bool,
+}
+
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
@@ -183,6 +216,12 @@ pub enum DataKey {
     MerkleRoot(u64),
     Claimed(u64, Address),
     DisputeReason(u64),
+    DisputeConfig,
+    SettlementWinners(u64),
+    SettledAt(u64),
+    ActiveDispute(u64),
+    RefundProposal(u64),
+    NextRefundProposalId,
     BatcherConfig,
     NextPayoutId,
     NextBatchId,
@@ -1036,6 +1075,22 @@ impl FantasyXIEscrow {
             }
         }
 
+        let winners_key = DataKey::SettlementWinners(league_id);
+        env.storage().persistent().set(&winners_key, &winners);
+        env.storage().persistent().extend_ttl(
+            &winners_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        let settled_at_key = DataKey::SettledAt(league_id);
+        let now = env.ledger().timestamp();
+        env.storage().persistent().set(&settled_at_key, &now);
+        env.storage().persistent().extend_ttl(
+            &settled_at_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
         league.status = LeagueStatus::Settled;
         env.storage().persistent().set(&league_key, &league);
 
@@ -1499,6 +1554,8 @@ impl FantasyXIEscrow {
             return Err(EscrowError::ContractPaused);
         }
 
+        Self::check_settlement_claim_ready(&env, league_id)?;
+
         let claim_key = DataKey::ClaimablePrize(league_id, winner.clone());
         let amount: i128 = env
             .storage()
@@ -1811,6 +1868,623 @@ impl FantasyXIEscrow {
         Self::refund(env, admin, league_id, participants)
     }
 
+    fn check_settlement_claim_ready(env: &Env, league_id: u64) -> Result<(), EscrowError> {
+        let dispute_key = DataKey::ActiveDispute(league_id);
+        if let Some(dispute) = env
+            .storage()
+            .persistent()
+            .get::<_, SettlementDispute>(&dispute_key)
+        {
+            if env.ledger().timestamp() < dispute.resolve_by {
+                return Err(EscrowError::DisputeActive);
+            }
+            Self::slash_dispute_stake_internal(env, league_id, &dispute)?;
+        } else if let Some(cfg) = env
+            .storage()
+            .instance()
+            .get::<_, DisputeConfig>(&DataKey::DisputeConfig)
+        {
+            if cfg.window_seconds > 0 {
+                if let Some(settled_at) = env
+                    .storage()
+                    .persistent()
+                    .get::<_, u64>(&DataKey::SettledAt(league_id))
+                {
+                    if settled_at > 0
+                        && env.ledger().timestamp() < settled_at.saturating_add(cfg.window_seconds)
+                    {
+                        return Err(EscrowError::DisputeWindowOpen);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn slash_dispute_stake_internal(
+        env: &Env,
+        league_id: u64,
+        dispute: &SettlementDispute,
+    ) -> Result<(), EscrowError> {
+        let winners: Vec<WinnerPayout> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SettlementWinners(league_id))
+            .unwrap_or_else(|| Vec::new(env));
+
+        let mut total_prize: i128 = 0;
+        for w in winners.iter() {
+            if w.amount > 0 {
+                total_prize = total_prize.saturating_add(w.amount);
+            }
+        }
+
+        if total_prize > 0 {
+            let mut allocated: i128 = 0;
+            let mut shares: Vec<(Address, i128)> = Vec::new(env);
+            for w in winners.iter() {
+                if w.amount > 0 {
+                    let share = (dispute.stake * w.amount) / total_prize;
+                    allocated = allocated.saturating_add(share);
+                    shares.push_back((w.winner.clone(), share));
+                }
+            }
+            let remainder = dispute.stake - allocated;
+            for (idx, (winner_addr, share)) in shares.iter().enumerate() {
+                let extra = if idx == 0 { share + remainder } else { share };
+                if extra > 0 {
+                    let claim_key = DataKey::ClaimablePrize(league_id, winner_addr.clone());
+                    let current: i128 = env.storage().persistent().get(&claim_key).unwrap_or(0);
+                    let updated = current.saturating_add(extra);
+                    env.storage().persistent().set(&claim_key, &updated);
+                    env.storage().persistent().extend_ttl(
+                        &claim_key,
+                        PERSISTENT_LIFETIME_THRESHOLD,
+                        PERSISTENT_BUMP_AMOUNT,
+                    );
+                }
+            }
+        } else {
+            let league: LeagueState = env
+                .storage()
+                .persistent()
+                .get(&DataKey::League(league_id))
+                .ok_or(EscrowError::LeagueNotFound)?;
+            let admin: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::Admin)
+                .ok_or(EscrowError::NotInitialized)?;
+            if dispute.stake > 0 {
+                token::Client::new(env, &league.asset).transfer(
+                    &env.current_contract_address(),
+                    &admin,
+                    &dispute.stake,
+                );
+            }
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::ActiveDispute(league_id));
+        env.storage()
+            .persistent()
+            .set(&DataKey::SettledAt(league_id), &0_u64);
+        Ok(())
+    }
+
+    pub fn set_dispute_config(
+        env: Env,
+        approvals: Vec<Address>,
+        config: DisputeConfig,
+    ) -> Result<(), EscrowError> {
+        Self::authorize_signers(&env, &approvals)?;
+        const MAX_WINDOW_SECONDS: u64 = 30 * 24 * 60 * 60;
+        if config.window_seconds == 0 && config.resolution_seconds == 0 && config.min_stake_bps == 0
+        {
+            env.storage()
+                .instance()
+                .set(&DataKey::DisputeConfig, &config);
+            return Ok(());
+        }
+        if config.window_seconds == 0
+            || config.window_seconds > MAX_WINDOW_SECONDS
+            || config.resolution_seconds == 0
+            || config.min_stake_bps == 0
+            || config.min_stake_bps > 10_000
+        {
+            return Err(EscrowError::InvalidDisputeConfig);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::DisputeConfig, &config);
+        Ok(())
+    }
+
+    pub fn get_dispute(env: Env, league_id: u64) -> Option<SettlementDispute> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ActiveDispute(league_id))
+    }
+
+    pub fn open_dispute(
+        env: Env,
+        challenger: Address,
+        league_id: u64,
+        stake: i128,
+    ) -> Result<(), EscrowError> {
+        Self::ensure_operational(&env)?;
+        challenger.require_auth();
+
+        let cfg: DisputeConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::DisputeConfig)
+            .unwrap_or(DisputeConfig {
+                window_seconds: 0,
+                resolution_seconds: 0,
+                min_stake_bps: 0,
+            });
+        if cfg.window_seconds == 0 {
+            return Err(EscrowError::DisputeWindowClosed);
+        }
+
+        let league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&DataKey::League(league_id))
+            .ok_or(EscrowError::LeagueNotFound)?;
+        if league.status != LeagueStatus::Settled {
+            return Err(EscrowError::DisputeWindowClosed);
+        }
+
+        let dispute_key = DataKey::ActiveDispute(league_id);
+        if env.storage().persistent().has(&dispute_key) {
+            return Err(EscrowError::DisputeActive);
+        }
+
+        let settled_at: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SettledAt(league_id))
+            .unwrap_or(0);
+        let now = env.ledger().timestamp();
+        if settled_at == 0 || now >= settled_at.saturating_add(cfg.window_seconds) {
+            return Err(EscrowError::DisputeWindowClosed);
+        }
+
+        let min_stake = (league.total_deposited * (cfg.min_stake_bps as i128) + 9_999) / 10_000;
+        let required_stake = if min_stake > 0 { min_stake } else { 1 };
+        if stake < required_stake {
+            return Err(EscrowError::InsufficientStake);
+        }
+
+        token::Client::new(&env, &league.asset).transfer(
+            &challenger,
+            &env.current_contract_address(),
+            &stake,
+        );
+
+        let dispute = SettlementDispute {
+            challenger,
+            stake,
+            opened_at: now,
+            resolve_by: now.saturating_add(cfg.resolution_seconds),
+        };
+        env.storage().persistent().set(&dispute_key, &dispute);
+        env.storage().persistent().extend_ttl(
+            &dispute_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        Ok(())
+    }
+
+    pub fn resolve_dispute(
+        env: Env,
+        approvals: Vec<Address>,
+        league_id: u64,
+        upheld: bool,
+        corrected_winners: Vec<WinnerPayout>,
+    ) -> Result<(), EscrowError> {
+        Self::ensure_operational(&env)?;
+        Self::authorize_signers(&env, &approvals)?;
+
+        let dispute_key = DataKey::ActiveDispute(league_id);
+        let dispute: SettlementDispute = env
+            .storage()
+            .persistent()
+            .get(&dispute_key)
+            .ok_or(EscrowError::NoDispute)?;
+
+        if env.ledger().timestamp() >= dispute.resolve_by {
+            return Err(EscrowError::DisputeWindowClosed);
+        }
+
+        let league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&DataKey::League(league_id))
+            .ok_or(EscrowError::LeagueNotFound)?;
+
+        if upheld {
+            let old_winners: Vec<WinnerPayout> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::SettlementWinners(league_id))
+                .unwrap_or_else(|| Vec::new(&env));
+            let mut old_total: i128 = 0;
+            for w in old_winners.iter() {
+                old_total = old_total.saturating_add(w.amount);
+            }
+
+            if !corrected_winners.is_empty() {
+                let mut new_total: i128 = 0;
+                for w in corrected_winners.iter() {
+                    if w.amount < 0 {
+                        return Err(EscrowError::InvalidPrizeDistribution);
+                    }
+                    new_total = new_total.saturating_add(w.amount);
+                }
+                if new_total != old_total {
+                    return Err(EscrowError::InvalidPrizeDistribution);
+                }
+                for w in old_winners.iter() {
+                    env.storage()
+                        .persistent()
+                        .remove(&DataKey::ClaimablePrize(league_id, w.winner.clone()));
+                }
+                for w in corrected_winners.iter() {
+                    if w.amount > 0 {
+                        let claim_key = DataKey::ClaimablePrize(league_id, w.winner.clone());
+                        env.storage().persistent().set(&claim_key, &w.amount);
+                        env.storage().persistent().extend_ttl(
+                            &claim_key,
+                            PERSISTENT_LIFETIME_THRESHOLD,
+                            PERSISTENT_BUMP_AMOUNT,
+                        );
+                    }
+                }
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::SettlementWinners(league_id), &corrected_winners);
+            }
+
+            token::Client::new(&env, &league.asset).transfer(
+                &env.current_contract_address(),
+                &dispute.challenger,
+                &dispute.stake,
+            );
+            env.storage().persistent().remove(&dispute_key);
+            env.storage()
+                .persistent()
+                .set(&DataKey::SettledAt(league_id), &0_u64);
+        } else {
+            Self::slash_dispute_stake_internal(&env, league_id, &dispute)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn expire_dispute(env: Env, league_id: u64) -> Result<(), EscrowError> {
+        let dispute_key = DataKey::ActiveDispute(league_id);
+        let dispute: SettlementDispute = env
+            .storage()
+            .persistent()
+            .get(&dispute_key)
+            .ok_or(EscrowError::NoDispute)?;
+        if env.ledger().timestamp() < dispute.resolve_by {
+            return Err(EscrowError::DisputeNotExpired);
+        }
+        Self::slash_dispute_stake_internal(&env, league_id, &dispute)
+    }
+
+    /// Initiates a multi-signature refund proposal for a disputed or cancelled league.
+    /// Transitions LeagueStatus to Disputed (or ArbitrationPending if already disputed).
+    pub fn propose_multisig_refund(
+        env: Env,
+        proposer: Address,
+        league_id: u64,
+        participants: Vec<Address>,
+        reason_hash: BytesN<32>,
+        lock_window_seconds: u64,
+    ) -> Result<u64, EscrowError> {
+        proposer.require_auth();
+        let config: AdminConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminConfig)
+            .ok_or(EscrowError::NotInitialized)?;
+
+        let league_key = DataKey::League(league_id);
+        let mut league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&league_key)
+            .ok_or(EscrowError::LeagueNotFound)?;
+
+        let is_authorized_signer =
+            config.signers.iter().any(|s| s == proposer) || league.creator == proposer;
+        if !is_authorized_signer {
+            return Err(EscrowError::NotAuthorized);
+        }
+
+        if league.status == LeagueStatus::Settled || league.status == LeagueStatus::Refunded {
+            return Err(EscrowError::AlreadySettled);
+        }
+        if lock_window_seconds == 0 {
+            return Err(EscrowError::InvalidDisputeConfig);
+        }
+
+        let proposal_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextRefundProposalId)
+            .unwrap_or(1);
+        env.storage()
+            .instance()
+            .set(&DataKey::NextRefundProposalId, &(proposal_id + 1));
+
+        let now = env.ledger().timestamp();
+        let mut approvals = Vec::new(&env);
+        approvals.push_back(proposer.clone());
+
+        let proposal = MultisigRefundProposal {
+            id: proposal_id,
+            league_id,
+            proposer: proposer.clone(),
+            participants,
+            reason_hash: reason_hash.clone(),
+            approvals,
+            threshold: config.threshold,
+            created_at: now,
+            timeout_at: now.saturating_add(lock_window_seconds),
+            executed: false,
+        };
+
+        let proposal_key = DataKey::RefundProposal(proposal_id);
+        env.storage().persistent().set(&proposal_key, &proposal);
+        env.storage().persistent().extend_ttl(
+            &proposal_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        league.status = LeagueStatus::Disputed;
+        env.storage().persistent().set(&league_key, &league);
+        env.storage().persistent().extend_ttl(
+            &league_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::LeagueFrozen(league_id), &true);
+        env.storage()
+            .persistent()
+            .set(&DataKey::DisputeReason(league_id), &reason_hash);
+
+        env.events().publish(
+            (Symbol::new(&env, "RefundProposed"), league_id, proposal_id),
+            (proposer, reason_hash),
+        );
+
+        Ok(proposal_id)
+    }
+
+    /// Records an arbitrator or league admin approval on an active refund proposal.
+    /// Transitions LeagueStatus to ArbitrationPending.
+    pub fn approve_multisig_refund(
+        env: Env,
+        approver: Address,
+        proposal_id: u64,
+    ) -> Result<u32, EscrowError> {
+        approver.require_auth();
+        let config: AdminConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminConfig)
+            .ok_or(EscrowError::NotInitialized)?;
+
+        let proposal_key = DataKey::RefundProposal(proposal_id);
+        let mut proposal: MultisigRefundProposal = env
+            .storage()
+            .persistent()
+            .get(&proposal_key)
+            .ok_or(EscrowError::ProposalNotFound)?;
+
+        if proposal.executed {
+            return Err(EscrowError::ProposalExecuted);
+        }
+
+        let league_key = DataKey::League(proposal.league_id);
+        let mut league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&league_key)
+            .ok_or(EscrowError::LeagueNotFound)?;
+
+        let is_authorized_signer =
+            config.signers.iter().any(|s| s == approver) || league.creator == approver;
+        if !is_authorized_signer {
+            return Err(EscrowError::NotAuthorized);
+        }
+
+        if proposal.approvals.iter().any(|a| a == approver) {
+            return Err(EscrowError::AlreadyApproved);
+        }
+
+        proposal.approvals.push_back(approver.clone());
+        let count = proposal.approvals.len();
+
+        env.storage().persistent().set(&proposal_key, &proposal);
+        env.storage().persistent().extend_ttl(
+            &proposal_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        league.status = LeagueStatus::ArbitrationPending;
+        env.storage().persistent().set(&league_key, &league);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "RefundApproved"),
+                proposal.league_id,
+                proposal_id,
+            ),
+            (approver, count),
+        );
+
+        Ok(count)
+    }
+
+    /// Executes a multi-signature authorized refund across all specified participants.
+    /// Requires M-of-N threshold approvals (e.g. 2-of-3) verified via `authorize_signers`.
+    pub fn execute_multisig_refund(
+        env: Env,
+        approvals: Vec<Address>,
+        league_id: u64,
+        participants: Vec<Address>,
+    ) -> Result<(), EscrowError> {
+        Self::authorize_signers(&env, &approvals)?;
+
+        let league_key = DataKey::League(league_id);
+        let mut league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&league_key)
+            .ok_or(EscrowError::LeagueNotFound)?;
+
+        if league.status == LeagueStatus::Settled || league.status == LeagueStatus::Refunded {
+            return Err(EscrowError::AlreadySettled);
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::LeagueFrozen(league_id));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::DisputeReason(league_id));
+
+        let token_client = token::Client::new(&env, &league.asset);
+        let mut refunded_count: u32 = 0;
+
+        for participant in participants.iter() {
+            let dep_key = DataKey::Deposit(league_id, participant.clone());
+            if let Some(deposit_amount) = env.storage().persistent().get::<_, i128>(&dep_key) {
+                if deposit_amount > 0 {
+                    token_client.transfer(
+                        &env.current_contract_address(),
+                        &participant,
+                        &deposit_amount,
+                    );
+                    refunded_count += 1;
+                }
+                env.storage().persistent().remove(&dep_key);
+            }
+        }
+
+        league.status = LeagueStatus::Refunded;
+        env.storage().persistent().set(&league_key, &league);
+        env.storage().persistent().extend_ttl(
+            &league_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "MultisigRefund"), league_id),
+            (approvals.len(), refunded_count),
+        );
+
+        Ok(())
+    }
+
+    /// Automated dispute timeout: transitions an unreviewed dispute proposal to proportional
+    /// refund mode once the configurable lock window has elapsed.
+    pub fn execute_timeout_refund(
+        env: Env,
+        caller: Address,
+        league_id: u64,
+        proposal_id: u64,
+    ) -> Result<(), EscrowError> {
+        caller.require_auth();
+
+        let proposal_key = DataKey::RefundProposal(proposal_id);
+        let mut proposal: MultisigRefundProposal = env
+            .storage()
+            .persistent()
+            .get(&proposal_key)
+            .ok_or(EscrowError::ProposalNotFound)?;
+
+        if proposal.league_id != league_id {
+            return Err(EscrowError::LeagueNotFound);
+        }
+        if proposal.executed {
+            return Err(EscrowError::ProposalExecuted);
+        }
+        if env.ledger().timestamp() < proposal.timeout_at {
+            return Err(EscrowError::DisputeNotExpired);
+        }
+
+        let league_key = DataKey::League(league_id);
+        let mut league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&league_key)
+            .ok_or(EscrowError::LeagueNotFound)?;
+
+        if league.status == LeagueStatus::Settled || league.status == LeagueStatus::Refunded {
+            return Err(EscrowError::AlreadySettled);
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::LeagueFrozen(league_id));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::DisputeReason(league_id));
+
+        let token_client = token::Client::new(&env, &league.asset);
+        let mut refunded_count: u32 = 0;
+
+        for participant in proposal.participants.iter() {
+            let dep_key = DataKey::Deposit(league_id, participant.clone());
+            if let Some(deposit_amount) = env.storage().persistent().get::<_, i128>(&dep_key) {
+                if deposit_amount > 0 {
+                    token_client.transfer(
+                        &env.current_contract_address(),
+                        &participant,
+                        &deposit_amount,
+                    );
+                    refunded_count += 1;
+                }
+                env.storage().persistent().remove(&dep_key);
+            }
+        }
+
+        proposal.executed = true;
+        env.storage().persistent().set(&proposal_key, &proposal);
+
+        league.status = LeagueStatus::Refunded;
+        env.storage().persistent().set(&league_key, &league);
+
+        env.events().publish(
+            (Symbol::new(&env, "TimeoutRefund"), league_id, proposal_id),
+            (caller, refunded_count),
+        );
+
+        Ok(())
+    }
+
+    pub fn get_refund_proposal(env: Env, proposal_id: u64) -> Option<MultisigRefundProposal> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::RefundProposal(proposal_id))
+    }
+
     /// Admin / Public endpoint to manually extend TTL of a league and instance
     pub fn extend_league_ttl(
         env: Env,
@@ -2030,6 +2704,8 @@ impl FantasyXIEscrow {
         if env.ledger().sequence() < proposal.unlock_ledger {
             return Err(EscrowError::TimelockActive);
         }
+
+        Self::ensure_operational(&env)?;
 
         let required_threshold = if config.signers.len() >= 2 && config.threshold < 2 {
             2
@@ -2747,7 +3423,7 @@ mod test {
         assert_eq!(token_client.balance(&first), 50_000_000);
         assert_eq!(
             client.get_league(&301).unwrap().status,
-            LeagueStatus::Active
+            LeagueStatus::Upcoming
         );
         assert_eq!(client.get_league(&301).unwrap().participant_count, 1);
         assert_eq!(
