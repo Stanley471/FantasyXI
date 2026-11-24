@@ -408,11 +408,7 @@ impl FantasyXIEscrow {
 
     /// Configures default platform fee basis points.
     /// Invariant: Administrative attempts to exceed MAX_FEE_BPS (500 bps) strictly fail with FeeExceedsMaxCap.
-    pub fn set_platform_fee_bps(
-        env: Env,
-        admin: Address,
-        fee_bps: u32,
-    ) -> Result<(), EscrowError> {
+    pub fn set_platform_fee_bps(env: Env, admin: Address, fee_bps: u32) -> Result<(), EscrowError> {
         Self::require_admin(&env, &admin)?;
 
         if fee_bps > Self::MAX_FEE_BPS {
@@ -4689,7 +4685,7 @@ mod test {
 
         // Pause contract
         client.pause(&admin);
-        assert_eq!(client.is_paused_view(), true);
+        assert!(client.is_paused_view());
 
         // Deposits are blocked when paused
         let deposit_attempt = client.try_deposit(&user1, &league_id);
@@ -4697,7 +4693,7 @@ mod test {
 
         // Unpause contract
         client.unpause(&admin);
-        assert_eq!(client.is_paused_view(), false);
+        assert!(!client.is_paused_view());
 
         // Deposits succeed after unpausing
         client.deposit(&user1, &league_id);
@@ -4716,7 +4712,8 @@ mod test {
         let platform_fee = 2_500_000;
 
         // Settlement/distribution is blocked when paused
-        let settle_attempt = client.try_settle(&admin, &league_id, &winners, &treasury, &platform_fee);
+        let settle_attempt =
+            client.try_settle(&admin, &league_id, &winners, &treasury, &platform_fee);
         assert_eq!(settle_attempt, Err(Ok(EscrowError::ContractPaused)));
 
         // Emergency refund is permitted even during pause
