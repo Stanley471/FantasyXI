@@ -2,6 +2,7 @@
 
 import React, { useMemo, useState, useCallback } from "react";
 import { Position, Player } from "@/types";
+import { getPositionColorToken } from "@/components/ui/PositionBadge";
 import { useTeamStore, LocalSquadPlayer } from "@/store/teamStore";
 import {
   calculateSubstitutionPaths,
@@ -226,13 +227,8 @@ export const PitchVisualizer: React.FC<PitchVisualizerProps> = ({
           {/* Jersey / Token Avatar */}
           <div
             className={`w-11 h-11 sm:w-13 sm:h-13 rounded-full flex items-center justify-center font-bold text-xs shadow-md border-2 ${
-              player.player.position === Position.GKP
-                ? "bg-amber-600 border-amber-300 text-amber-50"
-                : player.player.position === Position.DEF
-                ? "bg-blue-600 border-blue-300 text-blue-50"
-                : player.player.position === Position.MID
-                ? "bg-emerald-600 border-emerald-300 text-emerald-50"
-                : "bg-rose-600 border-rose-300 text-rose-50"
+              getPositionColorToken(player.player.position)?.pitchTokenClassName ??
+              "bg-slate-600 border-slate-300 text-white"
             }`}
           >
             {player.player.position}

@@ -13,8 +13,13 @@ import adminRoutes from "./admin.routes.js";
 import analyticsRoutes from "./analytics.routes.js";
 import leaderboardRoutes from "./leaderboard.routes.js";
 import financialRoutes from "./financial.routes.js";
+import fxOracleRoutes from "./fxOracle.routes.js";
 import sep8Routes from "./sep8.routes.js";
 import webhookRoutes from "./webhook.routes.js";
+import fixtureReschedulingRoutes from "../controllers/fixture-rescheduling.controller.js";
+import auditRoutes from "./audit.routes.js";
+import auditAnchorRoutes from "./auditAnchor.routes.js";
+import telemetryRoutes from "./telemetry.routes.js";
 import { replicaReads } from "../middleware/readConsistency.js";
 import { getProofOfReserve } from "../controllers/financial.controller.js";
 import { fplDataFreshness } from "../middleware/fplDataFreshness.js";
@@ -29,6 +34,7 @@ const apiV1Router = Router();
 apiV1Router.use("/auth", authRoutes);
 apiV1Router.use("/admin/sync", syncRoutes);
 apiV1Router.use("/admin/ledger-audits", ledgerAuditRoutes);
+apiV1Router.use("/admin/fixtures-rescheduling", fixtureReschedulingRoutes);
 apiV1Router.use("/players", playerRoutes);
 apiV1Router.use("/teams", teamRoutes);
 apiV1Router.use("/gameweeks", gameweekRoutes);
@@ -38,9 +44,14 @@ apiV1Router.use("/admin/sync", fplDataFreshness, syncRoutes);
 apiV1Router.use("/admin", adminRoutes);
 apiV1Router.use("/sep8", sep8Routes);
 apiV1Router.use("/financial", financialRoutes);
+apiV1Router.use("/fx", fxOracleRoutes);
 // Public: latest proof-of-reserve roots and totals (no participant data)
 apiV1Router.get("/proof-of-reserve", getProofOfReserve);
 apiV1Router.use("/webhooks", webhookRoutes);
+apiV1Router.use("/audit", auditRoutes);
+// Public: on-chain audit anchors for settled gameweeks (digest and verification only)
+apiV1Router.use("/audit-anchors", auditAnchorRoutes);
+apiV1Router.use("/telemetry", telemetryRoutes);
 
 // Read-heavy public data: GET requests may be served by the nearest read replica.
 // All other routers (auth, squads, admin, sync) always use the primary database.

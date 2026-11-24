@@ -12,7 +12,12 @@ import { locateFromHeaders } from "../services/security/geoVelocity.js";
 import { ReferralService } from "../services/auth/referralService.js";
 import { jwtKeyRotationService } from "../services/auth/jwtKeyRotationService.js";
 import { webAuthnService, PasskeyError } from "../services/auth/webAuthnService.js";
+import { stellarAuthService, StellarAuthError } from "../services/auth/stellarAuthService.js";
 import { refreshTokenService, RefreshTokenUnauthorizedError } from "../services/auth/refreshTokenService.js";
+import {
+  passkeyRecoveryService,
+  PasskeyRecoveryError,
+} from "../services/auth/passkeyRecoveryService.js";
 
 /** POST /api/v1/auth/refresh body: { refreshToken } */
 export async function refresh(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -165,6 +170,41 @@ export async function verifyLoginChallenge(
   }
 }
 
+/** Answers a failed SEP-10 step with its status; anything else goes to the error handler. */
+function handleStellarAuthError(error: unknown, res: Response, next: NextFunction): void {
+  if (error instanceof StellarAuthError) {
+    res.status(error.statusCode).json({ success: false, message: error.message });
+    return;
+  }
+  if (error instanceof AuthUnauthorizedError) {
+    res.status(401).json({ success: false, message: error.message });
+    return;
+  }
+  next(error);
+}
+
+/** GET /api/v1/auth/stellar/challenge?account=G... (issue #562): SEP-10 challenge transaction */
+export async function getStellarChallenge(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const account = typeof req.query.account === "string" ? req.query.account : undefined;
+    const challenge = await stellarAuthService.createChallenge(account);
+    res.json({ success: true, data: challenge });
+  } catch (error) {
+    handleStellarAuthError(error, res, next);
+  }
+}
+
+/** POST /api/v1/auth/stellar/verify body: { transaction } (issue #562): signed SEP-10 challenge */
+export async function verifyStellarChallenge(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { account } = await stellarAuthService.verifyChallenge(req.body?.transaction);
+    const result = await authService.loginWithStellarAccount(account, requestContext(req));
+    res.json({ success: true, message: "Logged in successfully", data: result });
+  } catch (error) {
+    handleStellarAuthError(error, res, next);
+  }
+}
+
 /** Answers a failed passkey ceremony with its status; anything else goes to the error handler. */
 function handlePasskeyError(error: unknown, res: Response, next: NextFunction): void {
   if (error instanceof PasskeyError) {
@@ -268,83 +308,41 @@ export async function deletePasskey(
   }
 }
 
-/**
- * PATCH /api/v1/auth/me/privacy — flips the caller's own leaderboard
- * anonymization toggle (issue #511). The request body carries only the
- * boolean flag; the target account always comes from the token, so a caller
- * can never flip another manager's flag through this route.
- */
-export async function updatePrivacySettings(
-  req: Request,
-  res: Response,
-  next: NextFunction
-): Promise<void> {
-  try {
-    if (!req.user || !req.user.id) {
-      res.status(401).json({ success: false, message: "Unauthorized" });
-      return;
-    }
+function handleRecoveryError(error: unknown, res: Response, next: NextFunction): void {
+  if (error instanceof PasskeyRecoveryError) {
+    res.status(error.statusCode).json({ success: false, message: error.message });
+    return;
+  }
+  next(error);
+}
 
-    const user = await authService.updatePrivacySettings(
-      { id: req.user.id, role: req.user.role },
-      req.user.id,
-      req.body?.isAnonymous
-    );
-    res.json({ success: true, data: user });
+export async function configurePasskeyRecovery(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const data = await passkeyRecoveryService.configure(req.user!.id, req.body?.publicKey);
+    res.status(201).json({ success: true, message: "Recovery key configured", data });
   } catch (error) {
-    if (error instanceof AuthValidationError) {
-      res.status(400).json({ success: false, message: error.message });
-      return;
-    }
-    if (error instanceof AuthForbiddenError) {
-      res.status(403).json({ success: false, message: error.message });
-      return;
-    }
-    if (error instanceof AuthNotFoundError) {
-      res.status(404).json({ success: false, message: error.message });
-      return;
-    }
-    next(error);
+    handleRecoveryError(error, res, next);
   }
 }
 
-/**
- * PATCH /api/v1/auth/users/:userId/privacy — platform-admin route to flip
- * another manager's anonymization toggle (issue #511). Route-level
- * requireRole(ADMIN) gates it; the service re-checks the actor so the
- * rule holds even if the route guard changes.
- */
-export async function updatePrivacySettingsForUser(
-  req: Request,
-  res: Response,
-  next: NextFunction
-): Promise<void> {
+export async function beginPasskeyRecovery(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    if (!req.user || !req.user.id) {
-      res.status(401).json({ success: false, message: "Unauthorized" });
-      return;
-    }
-
-    const user = await authService.updatePrivacySettings(
-      { id: req.user.id, role: req.user.role },
-      String(req.params.userId),
-      req.body?.isAnonymous
-    );
-    res.json({ success: true, data: user });
+    const data = await passkeyRecoveryService.begin(req.body?.email);
+    res.json({ success: true, message: "If recovery is configured, the proof may now be submitted.", data });
   } catch (error) {
-    if (error instanceof AuthValidationError) {
-      res.status(400).json({ success: false, message: error.message });
-      return;
-    }
-    if (error instanceof AuthForbiddenError) {
-      res.status(403).json({ success: false, message: error.message });
-      return;
-    }
-    if (error instanceof AuthNotFoundError) {
-      res.status(404).json({ success: false, message: error.message });
-      return;
-    }
-    next(error);
+    handleRecoveryError(error, res, next);
+  }
+}
+
+export async function completePasskeyRecovery(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const data = await passkeyRecoveryService.complete(req.body ?? {}, {
+      ip: req.ip ?? req.socket.remoteAddress ?? "unknown",
+      userAgent: req.headers["user-agent"] ?? null,
+    });
+    res.json({ success: true, message: "Account recovered and prior sessions revoked", data });
+  } catch (error) {
+    handleRecoveryError(error, res, next);
   }
 }
 

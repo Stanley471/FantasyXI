@@ -89,7 +89,7 @@ export const Sidebar: React.FC = () => {
             Play. Compete. Win.
           </p>
           <p className="text-xs text-slate-200 leading-relaxed mb-3">
-            Join private leagues, deposit via Zcash or Pollar, and claim instant payouts.
+            Join private leagues with instant finality, low fees, and Soroban smart escrow.
           </p>
           <Link
             href="/leagues/create"

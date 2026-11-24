@@ -29,6 +29,7 @@ function renderWithProviders(
     isLoading: false,
     login: () => {},
     loginWithPasskey: async () => {},
+    loginWithStellar: async () => {},
     logout: () => {},
     setAuthToken: async () => {},
     refreshUser: async () => {},

@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/Button";
 import { SignInMethods } from "@/components/auth/SignInMethods";
 import { PrivacySettings } from "@/components/profile/PrivacySettings";
 import { ActiveSessionsManager } from "@/components/profile/ActiveSessionsManager";
+import { MultiChainWalletLinker } from "@/components/profile/MultiChainWalletLinker";
 import {
   IconUser,
   IconFootball,
@@ -230,8 +231,8 @@ export default function ProfilePage() {
       {/* Email/password and Google sign-in management */}
       <SignInMethods />
 
-      {/* Leaderboard anonymization toggle (Issue #511) */}
-      <PrivacySettings />
+      {/* Multi-chain crypto wallet account linker & session recovery (Issue #426) */}
+      <MultiChainWalletLinker />
 
       {/* Active multi-device sessions & remote invalidation (Issue #342) */}
       <ActiveSessionsManager />

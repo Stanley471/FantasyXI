@@ -3,10 +3,11 @@ import type { Duplex } from "node:stream";
 import { WebSocketServer } from "ws";
 import { verifyAccessToken } from "../config/jwt.js";
 import { eventFanout, type EventFanout } from "../services/live/eventFanout.js";
+import { sequenceTracker, type SequenceTaggedEvent } from "../services/live/sequenceTracker.js";
 import { BoundedSocketSender } from "./boundedSocket.js";
 
 export const LIVE_SOCKET_PATH = /^\/api(?:\/v1)?\/live\/(\d+)\/ws$/;
-/** Initial state/reconnect repair uses the HTTP snapshot endpoint; frames carry absolute deltas. */
+
 export function attachLiveSocketServer(server: Server, fanout: EventFanout = eventFanout) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 4096 });
   const upgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
@@ -30,14 +31,26 @@ export function attachLiveSocketServer(server: Server, fanout: EventFanout = eve
     }, 30_000);
     heartbeat.unref();
     socket.on("pong", () => { alive = true; });
-    socket.on("message", raw => {
+    socket.on("message", async (raw) => {
       if (unsubscribe) return;
       try {
         const frame = JSON.parse(raw.toString());
-        if (frame.type !== "auth" || !verifyAccessToken(frame.token).userId) throw new Error("Unauthorized");
-        clearTimeout(authTimer);
-        unsubscribe = fanout.subscribe(`matchday:${gameweekId}`, frame => sender.send(frame));
-        sender.send({ type: "ready", gameweekId: Number(gameweekId), resyncRequired: true });
+        if (frame.type === "auth") {
+          if (!verifyAccessToken(frame.token).userId) throw new Error("Unauthorized");
+          clearTimeout(authTimer);
+          unsubscribe = fanout.subscribe(`matchday:${gameweekId}`, (deltaFrame) => sender.send(deltaFrame));
+
+          const channel = `matchday:${gameweekId}`;
+          const lastSeq = frame.lastSeenSequenceNumber ?? 0;
+          const backfill = await sequenceTracker.getBackfillWindow(channel, lastSeq);
+
+          if (backfill.length > 0) {
+            sender.send({ type: "backfill", events: backfill });
+          }
+
+          const currentSeq = await sequenceTracker.getLastSequenceNumber(channel);
+          sender.send({ type: "ready", gameweekId: Number(gameweekId), currentSequence: currentSeq });
+        }
       } catch { socket.close(4401, "Unauthorized"); }
     });
     socket.on("close", () => { clearTimeout(authTimer); clearInterval(heartbeat); unsubscribe?.(); });

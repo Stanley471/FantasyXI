@@ -2,8 +2,9 @@ import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import apiV1Router from "./routes/index.js";
-import { docsRouter, isDocsEnabled } from "./routes/docs.routes.js";
+import devRoutes from "./routes/dev.routes.js";
 import { apiRateLimiter } from "./middleware/rateLimiter.js";
+import { requestSigning } from "./middleware/requestSigning.js";
 import { errorHandler } from "./middleware/error.middleware.js";
 import { getJwks } from "./controllers/auth.controller.js";
 
@@ -51,7 +52,15 @@ app.use(
   })
 );
 app.use(express.json());
+// Rate limiting runs before signature verification so unauthenticated
+// clients cannot use the HMAC check as an unthrottled oracle.
+// HMAC request signing for public read endpoints (issue #455). Pass-through
+// while API_REQUEST_SIGNING_ENABLED is not "true"; when enabled it enforces
+// X-Signature / X-Timestamp / X-Nonce on GETs to the public prefixes only
+// (players, teams, gameweeks, fixtures, leaderboard, live, analytics,
+// proof-of-reserve). Auth flows, mutations and private routes are untouched.
 app.use(apiRateLimiter);
+app.use(requestSigning);
 app.use(requestReadConsistency);
 
 // ================================================================
@@ -217,6 +226,8 @@ if (isDocsEnabled()) {
 }
 
 // API v1 Routes
+// Development-only helpers; every route returns 404 in production (issue #558)
+app.use("/api/dev", devRoutes);
 app.use("/api/v1", apiV1Router);
 app.use("/api", apiV1Router);
 

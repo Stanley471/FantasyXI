@@ -7,8 +7,11 @@ import {
 
 import React, { createContext, useContext, useState, useEffect } from "react";
 import { User, AuthResponse, ApiSuccessResponse } from "@/types";
-import { api } from "@/lib/api";
+import { api, API_BASE_URL } from "@/lib/api";
+import { getRealtimeBus } from "@/lib/realtime/realtimeBus";
 import { authenticateWithPasskey, type PublicKeyCredentialRequestOptionsJSON } from "@/lib/passkeys";
+import { authenticateWithStellar } from "@/lib/stellarAuth";
+import type { WalletTransactionSigner } from "@/lib/stellar/sorobanDeposit";
 import {
   clearOfflineData,
   isOfflineError,
@@ -24,6 +27,8 @@ interface AuthContextType {
   login: (token: string, user: User) => void;
   /** Passkey sign-in; pass the options of a WEBAUTHN login challenge to complete a step-up (issue #273) */
   loginWithPasskey: (stepUpOptions?: PublicKeyCredentialRequestOptionsJSON) => Promise<void>;
+  /** SEP-0010 sign-in with a connected Stellar wallet (issue #562) */
+  loginWithStellar: (address: string, signTransaction: WalletTransactionSigner) => Promise<void>;
   logout: () => void;
   setAuthToken: (token: string) => Promise<void>;
   refreshUser: () => Promise<void>;
@@ -87,6 +92,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     login(session.token, session.user);
   };
 
+  const loginWithStellar = async (address: string, signTransaction: WalletTransactionSigner) => {
+    const session = await authenticateWithStellar(address, signTransaction);
+    login(session.token, session.user);
+  };
+
   const logout = () => {
     if (typeof window !== "undefined") {
       localStorage.removeItem("token");
@@ -95,10 +105,39 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         type: "LOGOUT",
         timestamp: Date.now(),
       });
+      // Fan the logout through the realtime bus as well (issue #459): the
+      // SharedWorker closes every socket and tells every other tab to sign
+      // out now. The session-sync broadcast above stays as the fallback.
+      try {
+        getRealtimeBus(API_BASE_URL, () => localStorage.getItem("token")).notifyLogout();
+      } catch {
+        // session-sync broadcast already covers the other tabs
+      }
     }
     setToken(null);
     setUser(null);
   };
+
+  // Realtime bus (SharedWorker) auth fan-out: a logout in any tab arrives
+  // here via the worker and signs this tab out instantly, no reload.
+  // The storage/BroadcastChannel listener above stays as the fallback.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const bus = getRealtimeBus(API_BASE_URL, () => localStorage.getItem("token"));
+    bus.connect();
+    const unsubscribe = bus.onAuthLogout(() => {
+      if (typeof window !== "undefined") {
+        localStorage.removeItem("token");
+        clearOfflineData();
+      }
+      setToken(null);
+      setUser(null);
+    });
+    return () => {
+      unsubscribe();
+      bus.disconnect();
+    };
+  }, []);
 
   // Cross-tab & multi-device remote invalidation listener
   useCrossTabSessionSync({
@@ -136,6 +175,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isAuthenticated: !!user && !!token,
         login,
         loginWithPasskey,
+        loginWithStellar,
         logout,
         setAuthToken,
         refreshUser,

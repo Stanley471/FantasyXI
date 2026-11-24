@@ -2,15 +2,23 @@
 
 import React, { useState } from "react";
 import Link from "next/link";
+import { useWallet } from "@/context/WalletContext";
 import { Sidebar } from "./Sidebar";
 import { MobileNav } from "./MobileNav";
 import { OfflineIndicator } from "./OfflineIndicator";
 import { PushNotificationPrompt } from "./PushNotificationPrompt";
+import {
+  StellarNetworkBadge,
+  StellarNetworkBanner,
+  useStellarNetworkStatus,
+} from "@/components/stellar/StellarNetworkStatus";
 import { FantasyXILogo } from "@/components/ui/FantasyXILogo";
 import { IconSearch, IconBell, IconSun, IconWallet } from "@/components/ui/Icons";
 
 export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [searchQuery, setSearchQuery] = useState("");
+  const networkStatus = useStellarNetworkStatus();
+  const { publicKey, openConnectModal } = useWallet();
 
   return (
     <div className="flex min-h-screen bg-[#f8fafc] text-slate-800 font-sans">
@@ -48,6 +56,8 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
 
           {/* Top Right Quick Actions & Connect Wallet */}
           <div className="flex items-center gap-3">
+            <StellarNetworkBadge snapshot={networkStatus} />
+
             {/* Notification Bell */}
             <button
               title="Notifications"
@@ -58,15 +68,18 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
             </button>
 
             {/* Connect Wallet Button */}
-            <Link
-              href="/profile"
+            <button
+              type="button"
+              onClick={openConnectModal}
               className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold bg-[#37003c] text-white hover:bg-[#28002c] shadow-sm transition-all"
             >
               <IconWallet className="w-3.5 h-3.5 text-[#00ff87]" />
-              <span>Connect Wallet</span>
-            </Link>
+              <span>{publicKey ? `${publicKey.slice(0, 4)}...${publicKey.slice(-4)}` : "Connect Wallet"}</span>
+            </button>
           </div>
         </header>
+
+        <StellarNetworkBanner snapshot={networkStatus} />
 
         {/* Page Content Container */}
         <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto">
