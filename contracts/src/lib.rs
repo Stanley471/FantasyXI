@@ -1451,7 +1451,7 @@ impl FantasyXIEscrow {
             .ok_or(EscrowError::LeagueNotFound)?;
 
         let admin: Option<Address> = env.storage().instance().get(&DataKey::Admin);
-        let is_admin = admin.as_ref().map_or(false, |a| a == &caller);
+        let is_admin = admin.as_ref() == Some(&caller);
         let is_creator = league.creator == caller;
 
         if !is_admin && !is_creator {
@@ -1520,7 +1520,10 @@ impl FantasyXIEscrow {
             return Err(EscrowError::DeadlineNotPassed);
         }
 
-        if min_parts > 0 && league.participant_count >= min_parts && league.status != LeagueStatus::Cancelled {
+        if min_parts > 0
+            && league.participant_count >= min_parts
+            && league.status != LeagueStatus::Cancelled
+        {
             return Err(EscrowError::LeagueAlreadyActive);
         }
 
@@ -4788,7 +4791,10 @@ mod test {
         let min_participants = 5;
         client.set_league_deadline(&admin, &league_id, &deadline, &min_participants);
 
-        assert_eq!(client.get_league_deadline(&league_id), Some((deadline, min_participants)));
+        assert_eq!(
+            client.get_league_deadline(&league_id),
+            Some((deadline, min_participants))
+        );
 
         client.deposit(&user1, &league_id);
         client.deposit(&user2, &league_id);
