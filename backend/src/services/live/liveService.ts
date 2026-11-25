@@ -4,6 +4,11 @@ import { getRedisClient, type IRedisCacheClient } from "../../config/redis.js";
 import { MembershipStatus, Position } from "../../types/index.js";
 import { ScoringService, PlayerScoreDetail } from "../scoring/scoringService.js";
 import { allocateProvisionalBonus } from "../scoring/provisionalBps.js";
+import {
+  displayUsername,
+  normalizeViewer,
+  type PrivacyViewer,
+} from "../privacy/displayName.js";
 export {
   LiveProvisionalLeaderboardService,
   liveProvisionalLeaderboardService,
@@ -31,6 +36,8 @@ export interface LiveStandingsEntry {
   rank: number;
   userId: string;
   username: string;
+  /** True when the manager hides behind a "Manager #XXXX" alias (issue #511). */
+  isAnonymous?: boolean;
   squadId: string;
   squadName: string;
   membershipStatus: MembershipStatus;
@@ -88,6 +95,29 @@ export function rankLiveStandings(
     .map(({ joinedAt: _joinedAt, ...entry }, idx) => ({ rank: idx + 1, ...entry }));
 }
 
+/**
+ * Masks anonymous managers in a snapshot for a viewer (issue #511). The
+ * snapshot itself always carries real usernames plus the isAnonymous flag,
+ * so the Redis cache stays viewer-neutral and each viewer gets their own
+ * masked copy; the cached object is never mutated.
+ */
+export function maskLiveSnapshotForViewer(
+  snapshot: LiveSnapshot,
+  viewerOrId?: string | PrivacyViewer | null
+): LiveSnapshot {
+  const viewer = normalizeViewer(viewerOrId);
+  return {
+    ...snapshot,
+    standings: snapshot.standings.map((entry) => ({
+      ...entry,
+      username: displayUsername(
+        { id: entry.userId, username: entry.username, isAnonymous: entry.isAnonymous },
+        viewer
+      ),
+    })),
+  };
+}
+
 export class LiveService {
   /** Called only after the corresponding stats transaction commits. */
   public publishPlayerDelta(gameweekId: number, playerId: number, fixtureId: number, data: Record<string, unknown>): boolean {
@@ -100,12 +130,15 @@ export class LiveService {
     private readonly redis: IRedisCacheClient | null = db === prisma ? getRedisClient() : null
   ) {}
 
-  public async getLeagueSnapshot(leagueId: string): Promise<LiveSnapshot | null> {
+  public async getLeagueSnapshot(
+    leagueId: string,
+    viewerOrId?: string | PrivacyViewer
+  ): Promise<LiveSnapshot | null> {
     const cacheKey = `live:bps:snapshot:${leagueId}`;
     if (this.redis) {
       try {
         const cached = await this.redis.get(cacheKey);
-        if (cached) return JSON.parse(cached) as LiveSnapshot;
+        if (cached) return maskLiveSnapshotForViewer(JSON.parse(cached) as LiveSnapshot, viewerOrId);
       } catch {
         // Redis is an optimization; compute the snapshot directly when unavailable.
       }
@@ -115,7 +148,7 @@ export class LiveService {
       include: {
         members: {
           include: {
-            user: { select: { username: true } },
+            user: { select: { username: true, isAnonymous: true } },
             squad: {
               include: {
                 players: { include: { player: { include: { team: true } } } },
@@ -214,6 +247,7 @@ export class LiveService {
       return {
         userId: m.userId,
         username: m.user.username,
+        isAnonymous: Boolean(m.user.isAnonymous),
         squadId: m.squadId,
         squadName: m.squad.name,
         membershipStatus: m.status,
@@ -271,7 +305,8 @@ export class LiveService {
         // A cache write failure must not interrupt live updates.
       }
     }
-    return snapshot;
+    // The cache stores the raw snapshot; each viewer gets a masked copy.
+    return maskLiveSnapshotForViewer(snapshot, viewerOrId);
   }
 }
 

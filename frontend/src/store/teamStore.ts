@@ -4,6 +4,7 @@ import { emitToast } from "@/context/ToastContext";
 import { validateCompleteSquad, validateSubstitution } from "@/lib/formation";
 import { enqueueSquadMutation, QueuedSquadMutation, SquadMutationPayload } from "@/lib/offlineQueue";
 import { saveSquadSnapshot } from "@/lib/offlineStore";
+import { api } from "@/lib/api";
 import {
   appendJournalEntry,
   ensureJournalBase,
@@ -24,6 +25,16 @@ export interface LocalSquadPlayer {
 export interface SubstitutionFeedback {
   type: "success" | "error";
   message: string;
+}
+
+/**
+ * Tracks state for optimistic mutations. When a mutation is in-flight,
+ * the local state is considered "optimistic" until the server responds.
+ */
+export interface OptimisticMutationState {
+  isOptimistic: boolean;
+  mutationId: string | null;
+  previousState: LocalSquadPlayer[] | null;
 }
 
 /** Body of a squad create/replace request; positionOrder follows the local list order. */
@@ -81,6 +92,9 @@ interface TeamState {
   };
   setActiveModalState: (state: { isOpen: boolean; requiredPosition: Position | null; replacingPlayer: Player | null }) => void;
   
+  // Optimistic mutation state tracking
+  optimisticState: OptimisticMutationState;
+  
   // Actions
   /** Replaces local state with a squad loaded from the server or the offline snapshot. */
   hydrateFromSquad: (squad: Squad) => void;
@@ -90,6 +104,22 @@ interface TeamState {
    * the lineup is incomplete or invalid, since the server would reject it.
    */
   persistLineupOffline: () => Promise<QueuedSquadMutation | null>;
+  /**
+   * Optimistically swaps two players and sends the mutation to the server.
+   * If the server rejects the mutation, automatically rolls back the swap.
+   * Returns true if swap was successful, false otherwise.
+   */
+  handleSwapOptimistic: (playerAId: number, playerBId: number, squadId?: string, squadRevision?: string) => Promise<boolean>;
+  /**
+   * Optimistically sets captain and sends mutation to server.
+   * Rolls back on server error.
+   */
+  handleSetCaptainOptimistic: (playerId: number, squadId?: string, squadRevision?: string) => Promise<boolean>;
+  /**
+   * Optimistically sets vice-captain and sends mutation to server.
+   * Rolls back on server error.
+   */
+  handleSetViceCaptainOptimistic: (playerId: number, squadId?: string, squadRevision?: string) => Promise<boolean>;
   handleSwap: (playerAId: number, playerBId: number) => boolean;
   handleSetCaptain: (playerId: number) => void;
   handleSetViceCaptain: (playerId: number) => void;
@@ -139,6 +169,12 @@ export const useTeamStore = create<TeamState>((set, get) => ({
     replacingPlayer: null,
   },
   setActiveModalState: (modalState) => set({ activeModalState: modalState }),
+
+  optimisticState: {
+    isOptimistic: false,
+    mutationId: null,
+    previousState: null,
+  },
 
   hydrateFromSquad: (squad) => {
     set({ squadId: squad.id, squadName: squad.name });
@@ -212,6 +248,252 @@ export const useTeamStore = create<TeamState>((set, get) => ({
     }
 
     state.setSelectedPlayerId(state.selectedPlayerId === clickedPlayer.id ? null : clickedPlayer.id);
+  },
+
+  /**
+   * Optimistically swaps two players and syncs with the server.
+   * On server error, automatically rolls back the swap.
+   */
+  handleSwapOptimistic: async (playerAId, playerBId, squadId, squadRevision) => {
+    const state = get();
+    const prev = state.players;
+    const idxA = prev.findIndex((p) => p.playerId === playerAId);
+    const idxB = prev.findIndex((p) => p.playerId === playerBId);
+    if (idxA === -1 || idxB === -1) return false;
+
+    const a = prev[idxA];
+    const b = prev[idxB];
+
+    // Validate substitution
+    const validation = validateSubstitution(a, b, prev);
+    if (!validation.valid) {
+      const message = validation.reason || "Invalid substitution move.";
+      emitToast.warning(message);
+      set({
+        substitutionFeedback: {
+          type: "error",
+          message,
+        },
+      });
+      return false;
+    }
+
+    // Create the swapped state
+    const clone = [...prev];
+    const newA = { ...a };
+    const newB = { ...b };
+
+    const tempStarter = newA.isStarter;
+    const tempOrder = newA.positionOrder;
+
+    newA.isStarter = newB.isStarter;
+    newA.positionOrder = newB.positionOrder;
+
+    newB.isStarter = tempStarter;
+    newB.positionOrder = tempOrder;
+
+    // Preserve captain / vice-captain validity
+    if (!newA.isStarter && newA.isCaptain) {
+      newA.isCaptain = false;
+      newB.isCaptain = true;
+    }
+    if (!newA.isStarter && newA.isViceCaptain) {
+      newA.isViceCaptain = false;
+      newB.isViceCaptain = true;
+    }
+    if (!newB.isStarter && newB.isCaptain) {
+      newB.isCaptain = false;
+      newA.isCaptain = true;
+    }
+    if (!newB.isStarter && newB.isViceCaptain) {
+      newB.isViceCaptain = false;
+      newA.isViceCaptain = true;
+    }
+
+    clone[idxA] = newA;
+    clone[idxB] = newB;
+
+    // Apply optimistically to local state
+    set({
+      players: clone,
+      optimisticState: {
+        isOptimistic: true,
+        mutationId: `swap_${Date.now()}`,
+        previousState: prev,
+      },
+    });
+
+    const successMessage = `Successfully substituted ${a.player.displayName || a.player.lastName} with ${b.player.displayName || b.player.lastName}.`;
+    set({
+      substitutionFeedback: {
+        type: "success",
+        message: successMessage,
+      },
+    });
+
+    // Sync with server if online and we have a squadId
+    if (squadId && typeof window !== "undefined" && navigator.onLine) {
+      try {
+        const payload = buildSquadPayload(state.squadName, clone);
+        await api.put(`/api/v1/squads/${squadId}`, {
+          ...payload,
+          expectedUpdatedAt: squadRevision,
+        });
+        // Clear optimistic state on success
+        set({
+          optimisticState: {
+            isOptimistic: false,
+            mutationId: null,
+            previousState: null,
+          },
+        });
+        emitToast.success(successMessage);
+      } catch (err) {
+        // Rollback on server error
+        set({
+          players: prev,
+          optimisticState: {
+            isOptimistic: false,
+            mutationId: null,
+            previousState: null,
+          },
+        });
+        const errorMsg = err instanceof Error ? err.message : "Failed to save squad changes.";
+        emitToast.error(errorMsg);
+        return false;
+      }
+    } else if (!squadId) {
+      // Queue for offline sync if not online
+      persistIfOffline();
+    }
+
+    return true;
+  },
+
+  /**
+   * Optimistically sets captain and syncs with the server.
+   * On server error, automatically rolls back.
+   */
+  handleSetCaptainOptimistic: async (playerId, squadId, squadRevision) => {
+    const state = get();
+    const prev = state.players.map((p) => ({ ...p }));
+
+    // Apply optimistically
+    set({
+      players: state.players.map((p) => ({
+        ...p,
+        isCaptain: p.playerId === playerId,
+        isViceCaptain: p.playerId === playerId ? false : p.isViceCaptain,
+      })),
+      optimisticState: {
+        isOptimistic: true,
+        mutationId: `captain_${Date.now()}`,
+        previousState: prev,
+      },
+    });
+
+    emitToast.success("Captain updated");
+
+    // Sync with server if online and we have a squadId
+    if (squadId && typeof window !== "undefined" && navigator.onLine) {
+      try {
+        const newState = get();
+        const payload = buildSquadPayload(newState.squadName, newState.players);
+        await api.put(`/api/v1/squads/${squadId}`, {
+          ...payload,
+          expectedUpdatedAt: squadRevision,
+        });
+        // Clear optimistic state on success
+        set({
+          optimisticState: {
+            isOptimistic: false,
+            mutationId: null,
+            previousState: null,
+          },
+        });
+      } catch (err) {
+        // Rollback on server error
+        set({
+          players: prev,
+          optimisticState: {
+            isOptimistic: false,
+            mutationId: null,
+            previousState: null,
+          },
+        });
+        const errorMsg = err instanceof Error ? err.message : "Failed to save captain selection.";
+        emitToast.error(errorMsg);
+        return false;
+      }
+    } else if (!squadId) {
+      // Queue for offline sync if not online
+      persistIfOffline();
+    }
+
+    return true;
+  },
+
+  /**
+   * Optimistically sets vice-captain and syncs with the server.
+   * On server error, automatically rolls back.
+   */
+  handleSetViceCaptainOptimistic: async (playerId, squadId, squadRevision) => {
+    const state = get();
+    const prev = state.players.map((p) => ({ ...p }));
+
+    // Apply optimistically
+    set({
+      players: state.players.map((p) => ({
+        ...p,
+        isViceCaptain: p.playerId === playerId,
+        isCaptain: p.playerId === playerId ? false : p.isCaptain,
+      })),
+      optimisticState: {
+        isOptimistic: true,
+        mutationId: `vicecaptain_${Date.now()}`,
+        previousState: prev,
+      },
+    });
+
+    emitToast.success("Vice-captain updated");
+
+    // Sync with server if online and we have a squadId
+    if (squadId && typeof window !== "undefined" && navigator.onLine) {
+      try {
+        const newState = get();
+        const payload = buildSquadPayload(newState.squadName, newState.players);
+        await api.put(`/api/v1/squads/${squadId}`, {
+          ...payload,
+          expectedUpdatedAt: squadRevision,
+        });
+        // Clear optimistic state on success
+        set({
+          optimisticState: {
+            isOptimistic: false,
+            mutationId: null,
+            previousState: null,
+          },
+        });
+      } catch (err) {
+        // Rollback on server error
+        set({
+          players: prev,
+          optimisticState: {
+            isOptimistic: false,
+            mutationId: null,
+            previousState: null,
+          },
+        });
+        const errorMsg = err instanceof Error ? err.message : "Failed to save vice-captain selection.";
+        emitToast.error(errorMsg);
+        return false;
+      }
+    } else if (!squadId) {
+      // Queue for offline sync if not online
+      persistIfOffline();
+    }
+
+    return true;
   },
 
   handleSwap: (playerAId, playerBId) => {

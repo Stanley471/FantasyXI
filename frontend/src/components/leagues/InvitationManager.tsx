@@ -174,7 +174,12 @@ export const InvitationManager: React.FC<{ leagueId: string }> = ({ leagueId }) 
               aria-label="Invitation link"
               className="flex-1 min-w-0 px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-slate-200 font-mono text-[11px]"
             />
-            <CopyButton value={inviteUrl(created.token)} ariaLabel="Copy invitation link" />
+            <CopyButton
+              value={inviteUrl(created.token)}
+              ariaLabel="Copy invitation link"
+              toastMessage="Invite link copied to clipboard"
+              statusMessage="Invite link copied to clipboard"
+            />
           </div>
         </div>
       )}

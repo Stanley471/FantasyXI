@@ -13,6 +13,7 @@
  */
 
 export enum SecurityAnomalyType {
+  PERMISSION_DENIED = "PERMISSION_DENIED",
   FAILED_LOGIN_SPIKE = "FAILED_LOGIN_SPIKE",
   NEW_DEVICE_LOGIN = "NEW_DEVICE_LOGIN",
   /** Successive logins further apart than any traveller could cover (issue #331) */
@@ -83,6 +84,9 @@ export class SecurityAnomalyLog {
   /** Test/ops helper. */
   public clear(): void {
     this.entries = [];
+  }
+  public eraseUser(userId: string): void {
+    this.entries = this.entries.filter(entry => entry.userId !== userId);
   }
 }
 

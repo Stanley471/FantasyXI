@@ -334,3 +334,92 @@ describe("SorobanEventIngestionService daemon (#230)", () => {
     assert.equal(store.events.get(bad.id)?.eventName, "undecodable");
   });
 });
+
+describe("SorobanEventIngestionService ledger gap catch-up (#556)", () => {
+  const quiet = { info: () => {}, warn: () => {}, error: () => {} };
+  /** One event per ledger for ledgers (from, to]. */
+  const ledgerEvents = (from: number, to: number) =>
+    Array.from({ length: to - from }, (_, i) =>
+      rpcEvent([sym("deposit"), u64(from + i)], tuple(addr(PLAYER), i128(1n)), from + i + 1)
+    );
+
+  it("backfills 100 missed ledgers without skipping or duplicating any", async () => {
+    const all = ledgerEvents(1000, 1100);
+    const store = new MemorySorobanEventStore();
+    // Service was healthy up to ledger 1000, then went down.
+    const before = new FakeRpc(all.slice(0, 0), 1000);
+    await new SorobanEventIngestionService({
+      source: before, store, contractId: CONTRACT_ID, startLedger: 1000, batchSize: 30, logger: quiet,
+    }).pollOnce();
+    assert.equal(store.checkpoints.get(SOROBAN_INGESTION_CHECKPOINT_ID)?.lastLedger, 1000);
+
+    const warnings: string[] = [];
+    const restarted = new SorobanEventIngestionService({
+      source: new FakeRpc(all, 1100), store, contractId: CONTRACT_ID, batchSize: 30,
+      logger: { ...quiet, warn: (m: string) => void warnings.push(m) },
+    });
+    const result = await restarted.catchUp();
+
+    assert.equal(result.gapLedgers, 100);
+    assert.equal(result.events, 100);
+    assert.equal(result.pages, 4);
+    assert.equal(store.events.size, 100);
+    assert.deepEqual(
+      [...store.events.values()].map((e) => e.ledgerSeq).sort((a, b) => a - b),
+      Array.from({ length: 100 }, (_, i) => 1001 + i)
+    );
+    assert.match(warnings[0], /Gap detected.*100 ledger/);
+    assert.equal(store.checkpoints.get(SOROBAN_INGESTION_CHECKPOINT_ID)?.lastLedger, 1100);
+  });
+
+  it("does not create duplicate records when previously seen events are replayed", async () => {
+    const all = ledgerEvents(1000, 1050);
+    const store = new MemorySorobanEventStore();
+    const run = () =>
+      new SorobanEventIngestionService({
+        source: new FakeRpc(all, 1050), store, contractId: CONTRACT_ID, startLedger: 1001, batchSize: 20,
+        logger: quiet,
+      });
+    await run().catchUp();
+    assert.equal(store.events.size, 50);
+    // Lose the checkpoint entirely so every event is fetched again.
+    store.checkpoints.clear();
+    await run().catchUp();
+    assert.equal(store.events.size, 50);
+  });
+
+  it("keeps the checkpoint at the last persisted page when catch-up fails midway, then resumes", async () => {
+    const all = ledgerEvents(1000, 1100);
+    const store = new MemorySorobanEventStore();
+    store.checkpoints.set(SOROBAN_INGESTION_CHECKPOINT_ID, { lastLedger: 1000, cursor: null });
+    const source = new FakeRpc(all, 1100);
+    const service = new SorobanEventIngestionService({
+      source, store, contractId: CONTRACT_ID, batchSize: 40, logger: quiet,
+    });
+    // Second page request fails.
+    const original = source.getEvents.bind(source);
+    let calls = 0;
+    source.getEvents = async (req) => {
+      if (++calls === 2) throw new Error("rpc unavailable");
+      return original(req);
+    };
+    await assert.rejects(() => service.catchUp(), /rpc unavailable/);
+    assert.equal(store.events.size, 40);
+    assert.equal(store.checkpoints.get(SOROBAN_INGESTION_CHECKPOINT_ID)?.lastLedger, 1039);
+
+    await service.catchUp();
+    assert.equal(store.events.size, 100);
+  });
+
+  it("logs ledger progress and event counts", async () => {
+    const infos: string[] = [];
+    const store = new MemorySorobanEventStore();
+    const service = new SorobanEventIngestionService({
+      source: new FakeRpc(ledgerEvents(1000, 1010), 1010), store, contractId: CONTRACT_ID, startLedger: 1001,
+      logger: { ...quiet, info: (m: string) => void infos.push(m) },
+    });
+    await service.catchUp();
+    assert.ok(infos.some((m) => /Ledger progress: .* stored 10 event/.test(m)));
+    assert.ok(infos.some((m) => /Catch-up complete: .*10 event\(s\) in 1 page/.test(m)));
+  });
+});

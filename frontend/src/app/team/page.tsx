@@ -24,12 +24,18 @@ import {
 } from "@/lib/offlineQueue";
 import { registerServiceWorker } from "@/lib/pushNotifications";
 import { useOnlineStatus } from "@/lib/useOnlineStatus";
-import { Squad, Player, Position, SQUAD_RULES, ChipType, SquadChipUsage } from "@/types";
+import { Squad, Player, Position, SQUAD_RULES, SQUAD_NAME_MAX_LENGTH, ChipType, SquadChipUsage, Fixture, Gameweek, PlayerGameweekStats } from "@/types";
 import { Pitch } from "@/components/pitch/Pitch";
 import { Bench } from "@/components/pitch/Bench";
 import { FormationBuilder } from "@/components/pitch/FormationBuilder";
 import { BudgetBar } from "@/components/team/BudgetBar";
 import { CountdownTimer } from "@/components/team/CountdownTimer";
+import { PlayerFormSparkline } from "@/components/team/PlayerFormSparkline";
+import {
+  opponentByGameweekId,
+  toFormTrendPoints,
+  type FormTrendPoint,
+} from "@/lib/sparkline";
 import { PlayerPickerModal } from "@/components/team/PlayerPickerModal";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { validateCompleteSquad, detectFormation } from "@/lib/formation";
@@ -55,6 +61,7 @@ import {
 
 import { useTeamStore, LocalSquadPlayer, buildSquadPayload } from "@/store/teamStore";
 import { PlayerCard } from "@/components/pitch/PlayerCard";
+import { SquadShareExporter } from "@/components/team/SquadShareExporter";
 
 export default function TeamPage() {
   const router = useRouter();
@@ -302,6 +309,53 @@ export default function TeamPage() {
 
   // Selected player object
   const selectedPlayer = players.find((p) => p.playerId === selectedPlayerId);
+
+  // Form trend for the Player Details modal: last-5-gameweeks points plus the
+  // opponent faced each gameweek, from the player detail and fixtures APIs.
+  // Each fetch degrades independently so a fixtures failure still shows points.
+  // No state is set synchronously here: `formPlayerId` records which player
+  // the shown trend belongs to (async callbacks only), and loading is derived
+  // from whether it matches the selected player, so switching players shows
+  // the skeleton instead of the previous player's trend.
+  const [playerFormTrend, setPlayerFormTrend] = useState<FormTrendPoint[]>([]);
+  const [formPlayerId, setFormPlayerId] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!selectedPlayer) return;
+    let cancelled = false;
+    const playerId = selectedPlayer.playerId;
+    const teamId = selectedPlayer.player.teamId;
+    const playerRequest = api
+      .get<{
+        success: boolean;
+        data: Player & {
+          gameweekStats?: Array<PlayerGameweekStats & { gameweek?: Gameweek }>;
+        };
+      }>(`/api/v1/players/${playerId}`)
+      .catch(() => null);
+    const fixturesRequest = api
+      .get<{ success: boolean; data: Fixture[] }>(
+        `/api/v1/fixtures?teamId=${teamId}`
+      )
+      .catch(() => null);
+    Promise.all([playerRequest, fixturesRequest]).then(
+      ([playerRes, fixtureRes]) => {
+        if (cancelled) return;
+        const stats = playerRes?.data?.gameweekStats ?? [];
+        const fixtures = Array.isArray(fixtureRes?.data) ? fixtureRes.data : [];
+        setPlayerFormTrend(
+          toFormTrendPoints(stats, opponentByGameweekId(fixtures, teamId))
+        );
+        setFormPlayerId(playerId);
+      }
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedPlayer]);
+
+  const isPlayerFormLoading =
+    selectedPlayer !== undefined && formPlayerId !== selectedPlayer.playerId;
 
   // DND Handlers
   // PointerSensor (#462) unifies mouse and touch through pointer events so
@@ -767,10 +821,20 @@ export default function TeamPage() {
               <input
                 type="text"
                 value={squadName}
-                onChange={(e) => setSquadName(e.target.value)}
+                onChange={(e) => setSquadName(e.target.value.slice(0, SQUAD_NAME_MAX_LENGTH))}
+                maxLength={SQUAD_NAME_MAX_LENGTH}
                 placeholder="My Fantasy XI"
+                aria-describedby="squad-name-counter"
                 className="text-xl sm:text-2xl font-black text-slate-900 bg-transparent border-b border-dashed border-slate-300 hover:border-emerald-600 focus:border-emerald-600 focus:outline-none uppercase tracking-tight"
               />
+              <span
+                id="squad-name-counter"
+                className={`text-[11px] font-mono shrink-0 ${
+                  squadName.length >= SQUAD_NAME_MAX_LENGTH ? "text-rose-500 font-bold" : "text-slate-400"
+                }`}
+              >
+                {squadName.length}/{SQUAD_NAME_MAX_LENGTH}
+              </span>
             </div>
           </div>
 
@@ -811,6 +875,14 @@ export default function TeamPage() {
               </div>
             )}
           </div>
+        </div>
+
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white border border-slate-200/80 px-5 py-4 rounded-2xl shadow-sm">
+          <div>
+            <h2 className="text-sm font-black uppercase text-slate-900">Share squad</h2>
+            <p className="text-[11px] text-slate-500">Export your active formation as a high-resolution graphic</p>
+          </div>
+          <SquadShareExporter players={players} squadName={squadName} managerHandle={user?.username ?? "manager"} />
         </div>
 
         {/* Offline Queue Status Banner */}
@@ -979,6 +1051,9 @@ export default function TeamPage() {
                     {selectedPlayer.player.team?.shortName || "PL"} &bull; £{(selectedPlayer.player.price / 10).toFixed(1)}m &bull; {selectedPlayer.player.totalPoints} pts
                   </div>
                 </div>
+              </div>
+              <div className="px-5 pt-4">
+                <PlayerFormSparkline points={playerFormTrend} loading={isPlayerFormLoading} />
               </div>
               <div className="p-5 grid gap-2.5">
                 {selectedPlayer.isStarter && (

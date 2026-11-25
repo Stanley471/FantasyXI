@@ -1,50 +1,204 @@
 @import "tailwindcss";
 
+/**
+ * CSS Custom Properties for Dynamic Theme Switching
+ *
+ * Default Light SaaS theme. Other themes (dark, high-contrast) are
+ * applied via JavaScript based on user preference and persisted in
+ * localStorage. CSS variables are injected during server-side rendering
+ * to prevent flash of unstyled content (FOUC).
+ */
+
+:root,
+:root[data-theme="light"] {
+  /* Backgrounds */
+  --fxi-background: #f8fafc;
+  --fxi-surface: #ffffff;
+  --fxi-surface-hover: #f1f5f9;
+  --fxi-surface-active: #e2e8f0;
+  --fxi-surface-card: #ffffff;
+
+  /* Text/Foreground */
+  --fxi-foreground: #1e1338;
+  --fxi-foreground-secondary: #475569;
+  --fxi-foreground-tertiary: #94a3b8;
+
+  /* Borders */
+  --fxi-border: #e2e8f0;
+  --fxi-border-subtle: #f1f5f9;
+
+  /* Brand Colors */
+  --fxi-primary: #37003c;
+  --fxi-primary-hover: #26002b;
+  --fxi-primary-subtle: rgba(55, 0, 60, 0.08);
+  --fxi-primary-glow: rgba(55, 0, 60, 0.15);
+
+  --fxi-secondary: #00ff87;
+  --fxi-secondary-hover: #00e074;
+  --fxi-secondary-subtle: rgba(0, 255, 135, 0.14);
+  --fxi-secondary-border: rgba(0, 255, 135, 0.35);
+
+  /* Accent Colors */
+  --fxi-accent-purple: #48126e;
+  --fxi-accent-blue: #0284c7;
+  --fxi-accent-amber: #f59e0b;
+
+  /* Football Pitch */
+  --fxi-pitch-grass-1: #065f46;
+  --fxi-pitch-grass-2: #047857;
+  --fxi-pitch-line: rgba(255, 255, 255, 0.28);
+
+  /* Semantic Colors */
+  --fxi-success: #10b981;
+  --fxi-warning: #f59e0b;
+  --fxi-error: #ef4444;
+  --fxi-info: #0284c7;
+
+  /* Focus Indicators */
+  --fxi-focus: #37003c;
+  --fxi-focus-ring: rgba(55, 0, 60, 0.5);
+}
+
+:root[data-theme="dark"] {
+  --fxi-background: #0f172a;
+  --fxi-surface: #1e293b;
+  --fxi-surface-hover: #334155;
+  --fxi-surface-active: #475569;
+  --fxi-surface-card: #1e293b;
+
+  --fxi-foreground: #f1f5f9;
+  --fxi-foreground-secondary: #cbd5e1;
+  --fxi-foreground-tertiary: #94a3b8;
+
+  --fxi-border: #334155;
+  --fxi-border-subtle: #1e293b;
+
+  --fxi-primary: #37003c;
+  --fxi-primary-hover: #4a1261;
+  --fxi-primary-subtle: rgba(55, 0, 60, 0.2);
+  --fxi-primary-glow: rgba(55, 0, 60, 0.3);
+
+  --fxi-secondary: #00ff87;
+  --fxi-secondary-hover: #00e074;
+  --fxi-secondary-subtle: rgba(0, 255, 135, 0.2);
+  --fxi-secondary-border: rgba(0, 255, 135, 0.4);
+
+  --fxi-accent-purple: #a78bfa;
+  --fxi-accent-blue: #38bdf8;
+  --fxi-accent-amber: #fbbf24;
+
+  --fxi-pitch-grass-1: #064e3b;
+  --fxi-pitch-grass-2: #065f46;
+  --fxi-pitch-line: rgba(255, 255, 255, 0.2);
+
+  --fxi-success: #34d399;
+  --fxi-warning: #fcd34d;
+  --fxi-error: #f87171;
+  --fxi-info: #38bdf8;
+
+  --fxi-focus: #00ff87;
+  --fxi-focus-ring: rgba(0, 255, 135, 0.5);
+}
+
+:root[data-theme="high-contrast"] {
+  --fxi-background: #ffffff;
+  --fxi-surface: #ffffff;
+  --fxi-surface-hover: #f5f5f5;
+  --fxi-surface-active: #e0e0e0;
+  --fxi-surface-card: #ffffff;
+
+  --fxi-foreground: #000000;
+  --fxi-foreground-secondary: #1a1a1a;
+  --fxi-foreground-tertiary: #404040;
+
+  --fxi-border: #000000;
+  --fxi-border-subtle: #404040;
+
+  --fxi-primary: #000000;
+  --fxi-primary-hover: #1a1a1a;
+  --fxi-primary-subtle: #f0f0f0;
+  --fxi-primary-glow: #e0e0e0;
+
+  --fxi-secondary: #0066cc;
+  --fxi-secondary-hover: #0052a3;
+  --fxi-secondary-subtle: #f0f5ff;
+  --fxi-secondary-border: #0066cc;
+
+  --fxi-accent-purple: #000080;
+  --fxi-accent-blue: #0000ff;
+  --fxi-accent-amber: #cc6600;
+
+  --fxi-pitch-grass-1: #003300;
+  --fxi-pitch-grass-2: #004400;
+  --fxi-pitch-line: #000000;
+
+  --fxi-success: #008000;
+  --fxi-warning: #cc6600;
+  --fxi-error: #cc0000;
+  --fxi-info: #0066cc;
+
+  --fxi-focus: #0066cc;
+  --fxi-focus-ring: #0000ff;
+}
+
+/* Legacy theme variables for backward compatibility */
 :root {
-  /* Primary Theme Palette — Light SaaS / Football Hybrid */
-  --background: #f8fafc;
-  --foreground: #1e1338;
-  --surface: #ffffff;
-  --surface-hover: #f1f5f9;
-  --surface-active: #e2e8f0;
-  --surface-card: #ffffff;
-  --border: #e2e8f0;
-  --border-subtle: #f1f5f9;
+  --background: var(--fxi-background);
+  --foreground: var(--fxi-foreground);
+  --surface: var(--fxi-surface);
+  --surface-hover: var(--fxi-surface-hover);
+  --surface-active: var(--fxi-surface-active);
+  --surface-card: var(--fxi-surface-card);
+  --border: var(--fxi-border);
+  --border-subtle: var(--fxi-border-subtle);
+  --primary: var(--fxi-primary);
+  --primary-hover: var(--fxi-primary-hover);
+  --primary-subtle: var(--fxi-primary-subtle);
+  --primary-glow: var(--fxi-primary-glow);
+  --secondary: var(--fxi-secondary);
+  --secondary-hover: var(--fxi-secondary-hover);
+  --secondary-subtle: var(--fxi-secondary-subtle);
+  --secondary-border: var(--fxi-secondary-border);
+  --accent-purple: var(--fxi-accent-purple);
+  --accent-blue: var(--fxi-accent-blue);
+  --accent-amber: var(--fxi-accent-amber);
+  --pitch-grass-1: var(--fxi-pitch-grass-1);
+  --pitch-grass-2: var(--fxi-pitch-grass-2);
+  --pitch-line: var(--fxi-pitch-line);
 
-  /* FantasyXI Brand Colors */
-  --primary: #37003c; /* Premier League / FantasyXI Royal Purple */
-  --primary-hover: #26002b;
-  --primary-subtle: rgba(55, 0, 60, 0.08);
-  --primary-glow: rgba(55, 0, 60, 0.15);
+  /* Standardized Player Position Badge Design Tokens (Issue #481)
+     GKP (Amber), DEF (Blue), MID (Green), FWD (Red).
+     Meets WCAG AA contrast standards (>= 4.5:1) in light and dark views. */
+  --pos-gkp-bg: #b45309;
+  --pos-gkp-fg: #ffffff;
+  --pos-gkp-border: #92400e;
 
-  --secondary: #00ff87; /* Vibrant Football Pitch Neon Green */
-  --secondary-hover: #00e074;
-  --secondary-subtle: rgba(0, 255, 135, 0.14);
-  --secondary-border: rgba(0, 255, 135, 0.35);
+  --pos-def-bg: #1d4ed8;
+  --pos-def-fg: #ffffff;
+  --pos-def-border: #1e40af;
 
-  --accent-purple: #48126e;
-  --accent-blue: #0284c7;
-  --accent-amber: #f59e0b;
+  --pos-mid-bg: #15803d;
+  --pos-mid-fg: #ffffff;
+  --pos-mid-border: #166534;
 
-  /* Football pitch colors */
-  --pitch-grass-1: #065f46;
-  --pitch-grass-2: #047857;
-  --pitch-line: rgba(255, 255, 255, 0.28);
+  --pos-fwd-bg: #b91c1c;
+  --pos-fwd-fg: #ffffff;
+  --pos-fwd-border: #991b1b;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-surface: var(--surface);
-  --color-surface-hover: var(--surface-hover);
-  --color-surface-active: var(--surface-active);
-  --color-border-custom: var(--border);
-  --color-border-subtle: var(--border-subtle);
-  --color-primary-custom: var(--primary);
-  --color-primary-hover: var(--primary-hover);
-  --color-primary-subtle: var(--primary-subtle);
-  --color-secondary-custom: var(--secondary);
-  --color-secondary-hover: var(--secondary-hover);
+  --color-background: var(--fxi-background);
+  --color-foreground: var(--fxi-foreground);
+  --color-surface: var(--fxi-surface);
+  --color-surface-hover: var(--fxi-surface-hover);
+  --color-surface-active: var(--fxi-surface-active);
+  --color-border-custom: var(--fxi-border);
+  --color-border-subtle: var(--fxi-border-subtle);
+  --color-primary-custom: var(--fxi-primary);
+  --color-primary-hover: var(--fxi-primary-hover);
+  --color-primary-subtle: var(--fxi-primary-subtle);
+  --color-secondary-custom: var(--fxi-secondary);
+  --color-secondary-hover: var(--fxi-secondary-hover);
   --color-font-sans: var(--font-geist-sans), -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --color-font-mono: var(--font-geist-mono), monospace;
 
@@ -61,14 +215,53 @@
   100% { transform: translateX(0); }
 }
 
+/**
+ * FOUC Prevention
+ *
+ * Prevent flash of unstyled content by setting background on html
+ * immediately, before JavaScript theme initialization
+ */
+html {
+  background-color: var(--fxi-background, #f8fafc);
+  color: var(--fxi-foreground, #1e1338);
+}
+
 body {
-  background-color: var(--background);
-  color: var(--foreground);
+  background-color: var(--fxi-background);
+  color: var(--fxi-foreground);
   font-family: var(--font-geist-sans), -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   min-height: 100vh;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/**
+ * Accessible Focus Indicators
+ *
+ * Enhanced focus styles for keyboard navigation
+ * Visible in all themes, especially high-contrast
+ */
+:focus-visible {
+  outline: 3px solid var(--fxi-focus);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid var(--fxi-focus);
+  outline-offset: 2px;
+}
+
+/* High contrast mode: enhance focus ring visibility */
+:root[data-theme="high-contrast"] :focus-visible {
+  outline: 4px solid var(--fxi-focus-ring);
+  outline-offset: 3px;
+  box-shadow: 0 0 0 4px var(--fxi-focus);
 }
 
 /* Tabular figures for points, prices, countdowns, and rankings */

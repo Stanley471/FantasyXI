@@ -158,7 +158,7 @@ describe("Google OAuth 2.0 / OpenID Connect Authentication", () => {
     // User initially registered with email and password
     const emailSignup = await service.register({
       email: "stanley@example.com",
-      password: "existing_secure_password_123",
+      password: "Existing_secure_password_123",
       name: "Stanley",
     });
 
@@ -188,7 +188,7 @@ describe("Google OAuth 2.0 / OpenID Connect Authentication", () => {
     // 4. User can still log in using their original password
     const pwdLogin = await service.login({
       email: "stanley@example.com",
-      password: "existing_secure_password_123",
+      password: "Existing_secure_password_123",
     });
     assert.equal(pwdLogin.user.id, emailSignup.user.id);
   });

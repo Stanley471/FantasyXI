@@ -5,6 +5,7 @@ import { createResolvers } from "../graphql/resolvers.js";
 test("GraphQL league resolver requests nested members, users, and squads together", async () => {
   let query: Record<string, unknown> | undefined;
   const league = {
+    isPrivate: false,
     id: "league-1",
     name: "Premier League",
     members: [{ id: "member-1", user: { id: "user-1" }, squad: { id: "squad-1" } }],

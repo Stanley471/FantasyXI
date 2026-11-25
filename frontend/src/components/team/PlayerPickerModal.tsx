@@ -1,12 +1,19 @@
 "use client";
 
 import React, { useState, useEffect, useRef } from "react";
-import { Player, Position, SQUAD_RULES } from "@/types";
+import { Player, Position, Team, SQUAD_RULES } from "@/types";
 import { api } from "@/lib/api";
 import { PositionBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { IconSearch, IconClose, IconCheck, IconAlertCircle } from "@/components/ui/Icons";
 import { useVirtualList } from "@/hooks/useVirtualList";
+
+/**
+ * Slider ceiling in £m, matching the top end of real FPL player prices.
+ * This is the same unit the `/api/v1/players?maxPrice=` filter compares
+ * against server-side, so no conversion is needed when building the query.
+ */
+const MAX_PRICE_CEILING_M = 15;
 
 export interface PlayerPickerModalProps {
   isOpen: boolean;
@@ -30,8 +37,11 @@ export const PlayerPickerModal: React.FC<PlayerPickerModalProps> = ({
   onSelectPlayer,
 }) => {
   const [players, setPlayers] = useState<Player[]>([]);
+  const [teams, setTeams] = useState<Team[]>([]);
   const [search, setSearch] = useState("");
   const [selectedPosition, setSelectedPosition] = useState<string>(requiredPosition || "ALL");
+  const [selectedTeamId, setSelectedTeamId] = useState<string>("ALL");
+  const [maxPriceM, setMaxPriceM] = useState<number>(MAX_PRICE_CEILING_M);
   const [sortBy, setSortBy] = useState<string>("totalPoints");
   const [isLoading, setIsLoading] = useState<boolean>(false);
 
@@ -50,7 +60,22 @@ export const PlayerPickerModal: React.FC<PlayerPickerModalProps> = ({
     }
   }, [requiredPosition, isOpen]);
 
-  // Fetch players with debounced search
+  // Fetch clubs once for the club filter dropdown
+  useEffect(() => {
+    async function loadTeams() {
+      try {
+        const res = await api.get<{ success: boolean; data: Team[] }>("/api/v1/teams");
+        if (res?.data) setTeams(res.data);
+      } catch (err) {
+        console.error("Failed to load clubs for picker:", err);
+      }
+    }
+    loadTeams();
+  }, []);
+
+  // Fetch players with debounced search — all filters (search, position, club,
+  // max price) combine into one request so e.g. DEF + Arsenal + Max £6.0m
+  // apply together.
   useEffect(() => {
     if (!isOpen) return;
 
@@ -60,6 +85,8 @@ export const PlayerPickerModal: React.FC<PlayerPickerModalProps> = ({
         const params = new URLSearchParams();
         if (search.trim()) params.set("search", search.trim());
         if (selectedPosition !== "ALL") params.set("position", selectedPosition);
+        if (selectedTeamId !== "ALL") params.set("teamId", selectedTeamId);
+        if (maxPriceM < MAX_PRICE_CEILING_M) params.set("maxPrice", String(maxPriceM));
         params.set("sortBy", sortBy);
         params.set("sortOrder", "desc");
         params.set("limit", "40");
@@ -81,7 +108,7 @@ export const PlayerPickerModal: React.FC<PlayerPickerModalProps> = ({
     }, 250);
 
     return () => clearTimeout(timer);
-  }, [isOpen, search, selectedPosition, sortBy]);
+  }, [isOpen, search, selectedPosition, selectedTeamId, maxPriceM, sortBy]);
 
   if (!isOpen) return null;
 
@@ -164,6 +191,46 @@ export const PlayerPickerModal: React.FC<PlayerPickerModalProps> = ({
                 <option value="assists">Assists</option>
                 <option value="form">Recent Form</option>
               </select>
+            </div>
+          </div>
+
+          {/* Club & Max Price Filter Bar */}
+          <div className="flex flex-wrap items-center gap-3 sm:gap-4">
+            {/* Club Dropdown */}
+            <div className="flex items-center gap-2 text-xs text-slate-500 min-w-0">
+              <span className="font-bold uppercase tracking-wider text-[10px] shrink-0">Club:</span>
+              <select
+                value={selectedTeamId}
+                onChange={(e) => setSelectedTeamId(e.target.value)}
+                className="min-w-0 flex-1 sm:flex-none bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1 text-slate-800 text-xs focus:outline-none focus:border-[#37003c]"
+              >
+                <option value="ALL">All Clubs</option>
+                {teams.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Max Price Slider */}
+            <div className="flex items-center gap-2 text-xs text-slate-500 min-w-0 flex-1 sm:flex-none">
+              <span className="font-bold uppercase tracking-wider text-[10px] shrink-0">
+                Max Price:
+              </span>
+              <input
+                type="range"
+                min={4}
+                max={MAX_PRICE_CEILING_M}
+                step={0.5}
+                value={maxPriceM}
+                onChange={(e) => setMaxPriceM(Number(e.target.value))}
+                aria-label="Maximum player price"
+                className="flex-1 min-w-[100px] accent-[#37003c] cursor-pointer"
+              />
+              <span className="font-mono font-bold text-slate-800 shrink-0 w-14 text-right">
+                {maxPriceM >= MAX_PRICE_CEILING_M ? "No limit" : `£${maxPriceM.toFixed(1)}m`}
+              </span>
             </div>
           </div>
         </div>

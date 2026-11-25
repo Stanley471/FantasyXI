@@ -1,5 +1,10 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { prisma } from "../../config/db.js";
+import {
+  displayUsername,
+  normalizeViewer,
+  type PrivacyViewer,
+} from "../privacy/displayName.js";
 export {
   LiveProvisionalLeaderboardService,
   liveProvisionalLeaderboardService,
@@ -141,10 +146,19 @@ export class LeaderboardService {
     return { page, pageSize, search, gameweekId: parsePositiveInt(raw.gameweekId, "gameweekId") };
   }
 
-  public async getLeaderboard(query: LeaderboardQuery, viewerId?: string): Promise<LeaderboardResult> {
+  /**
+   * Viewer is a bare user id (legacy callers) or a { id, role } object; the
+   * role is what lets platform admins see real names of anonymous managers.
+   * Anonymous managers are shown as "Manager #XXXX" to everyone else.
+   */
+  public async getLeaderboard(
+    query: LeaderboardQuery,
+    viewerOrId?: string | PrivacyViewer
+  ): Promise<LeaderboardResult> {
+    const viewer = normalizeViewer(viewerOrId);
     return query.gameweekId === undefined
-      ? this.getOverallLeaderboard(query, viewerId)
-      : this.getGameweekLeaderboard(query, query.gameweekId, viewerId);
+      ? this.getOverallLeaderboard(query, viewer)
+      : this.getGameweekLeaderboard(query, query.gameweekId, viewer);
   }
 
   private static squadSearch(search?: string): Prisma.SquadWhereInput {
@@ -157,7 +171,8 @@ export class LeaderboardService {
     };
   }
 
-  private async getOverallLeaderboard(query: LeaderboardQuery, viewerId?: string): Promise<LeaderboardResult> {
+  private async getOverallLeaderboard(query: LeaderboardQuery, viewerCtx?: PrivacyViewer): Promise<LeaderboardResult> {
+    const viewerId = viewerCtx?.id;
     const where = LeaderboardService.squadSearch(query.search);
     const skip = (query.page - 1) * query.pageSize;
 
@@ -167,7 +182,7 @@ export class LeaderboardService {
         orderBy: [{ totalPoints: "desc" }, { createdAt: "asc" }, { id: "asc" }],
         skip,
         take: query.pageSize,
-        select: { id: true, name: true, totalPoints: true, userId: true, user: { select: { username: true } } },
+        select: { id: true, name: true, totalPoints: true, userId: true, user: { select: { username: true, isAnonymous: true } } },
       }),
       this.db.squad.count({ where }),
     ]);
@@ -216,7 +231,7 @@ export class LeaderboardService {
         squadId: r.id,
         squadName: r.name,
         userId: r.userId,
-        username: r.user.username,
+        username: displayUsername({ id: r.userId, username: r.user.username, isAnonymous: r.user.isAnonymous }, viewerCtx),
         points: r.totalPoints,
         isCurrentUser: viewerId !== undefined && r.userId === viewerId,
       })),
@@ -231,8 +246,9 @@ export class LeaderboardService {
   private async getGameweekLeaderboard(
     query: LeaderboardQuery,
     gameweekId: number,
-    viewerId?: string
+    viewerCtx?: PrivacyViewer
   ): Promise<LeaderboardResult> {
+    const viewerId = viewerCtx?.id;
     const gameweek = await this.db.gameweek.findUnique({
       where: { id: gameweekId },
       select: { id: true, name: true },
@@ -254,7 +270,7 @@ export class LeaderboardService {
         take: query.pageSize,
         select: {
           points: true,
-          squad: { select: { id: true, name: true, userId: true, user: { select: { username: true } } } },
+          squad: { select: { id: true, name: true, userId: true, user: { select: { username: true, isAnonymous: true } } } },
         },
       }),
       this.db.squadGameweekScore.count({ where }),
@@ -304,7 +320,10 @@ export class LeaderboardService {
         squadId: r.squad.id,
         squadName: r.squad.name,
         userId: r.squad.userId,
-        username: r.squad.user.username,
+        username: displayUsername(
+          { id: r.squad.userId, username: r.squad.user.username, isAnonymous: r.squad.user.isAnonymous },
+          viewerCtx
+        ),
         points: r.points,
         isCurrentUser: viewerId !== undefined && r.squad.userId === viewerId,
       })),

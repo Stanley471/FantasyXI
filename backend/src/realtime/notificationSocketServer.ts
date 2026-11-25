@@ -2,6 +2,7 @@ import type { IncomingMessage, Server } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket, RawData } from "ws";
 import { verifyAccessToken } from "../config/jwt.js";
+import { accountErased } from "../services/privacy/accountStatus.js";
 import {
   userNotificationHub as defaultHub,
   UserNotificationHub,
@@ -97,7 +98,7 @@ export function attachNotificationSocketServer(
       socket.close(NotificationCloseCode.UNAUTHORIZED, reason);
     };
 
-    socket.on("message", (data) => {
+    socket.on("message", async (data) => {
       const frame = parseFrame(data);
       if (!frame) {
         send(socket, { type: "error", code: "bad_request", message: "Frames must be JSON objects" });
@@ -116,13 +117,19 @@ export function attachNotificationSocketServer(
         const payload = verifyAccessToken(frame.token);
         if (!payload.userId) throw new Error("missing userId");
         userId = payload.userId;
+        if (await accountErased(userId)) throw new Error("Account erased");
       } catch {
         fail("unauthorized");
         return;
       }
 
       clearTimeout(authTimer);
-      unsubscribe = hub.subscribe(userId, (notification) => send(socket, { type: "notification", notification }));
+      unsubscribe = hub.subscribe(userId, (notification) => {
+        void Promise.resolve(accountErased(userId!)).then(erased => {
+          if (erased) fail("unauthorized");
+          else send(socket,{ type:"notification",notification });
+        }).catch(() => fail("security_check_failed"));
+      });
       send(socket, { type: "ready", userId });
     });
 

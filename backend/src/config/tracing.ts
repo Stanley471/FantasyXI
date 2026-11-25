@@ -1,11 +1,15 @@
 import crypto from "crypto";
 import { Request, Response, NextFunction } from "express";
 import { AsyncLocalStorage } from "async_hooks";
+import { dbQueryDuration, dbQueryTotal } from "./metrics.js";
 
 /**
  * OpenTelemetry W3C Distributed Tracing Infrastructure (Issue 159)
  * Specification: W3C Trace Context (traceparent header)
  * Format: 00-${traceId}-${spanId}-${traceFlags}
+ * 
+ * Metrics Integration: Database queries are tracked in both tracing
+ * (for distributed trace visualization) and metrics (for Prometheus collection).
  */
 
 export interface Span {
@@ -160,6 +164,7 @@ export function tracingMiddleware(req: Request, res: Response, next: NextFunctio
 
 /**
  * Instrument DB operations linking to current active trace context.
+ * Also records metrics for Prometheus collection.
  */
 export async function traceDbQuery<T>(
   model: string,
@@ -177,6 +182,7 @@ export async function traceDbQuery<T>(
     const result = await queryFn();
     const durationMs = Date.now() - startTime;
 
+    // Record tracing span
     traceCollector.emitSpan({
       name: `DB ${model}.${operation}`,
       traceId,
@@ -193,10 +199,15 @@ export async function traceDbQuery<T>(
       status: "OK",
     });
 
+    // Record metrics for Prometheus
+    dbQueryDuration.labels(model, operation).observe(durationMs);
+    dbQueryTotal.labels(model, operation, "success").inc();
+
     return result;
   } catch (error: any) {
     const durationMs = Date.now() - startTime;
 
+    // Record tracing span
     traceCollector.emitSpan({
       name: `DB ${model}.${operation}`,
       traceId,
@@ -213,6 +224,10 @@ export async function traceDbQuery<T>(
       status: "ERROR",
       error: error.message,
     });
+
+    // Record metrics for Prometheus
+    dbQueryDuration.labels(model, operation).observe(durationMs);
+    dbQueryTotal.labels(model, operation, "error").inc();
 
     throw error;
   }

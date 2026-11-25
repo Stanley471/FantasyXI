@@ -1,3 +1,5 @@
+import { setAccountStatusResolver } from "../services/privacy/accountStatus.js";
+setAccountStatusResolver(() => false); // Active-account fixture for this isolated unit suite.
 import { describe, it, before, after, mock } from "node:test";
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
@@ -322,7 +324,7 @@ describe("GET /api/v1/leaderboard", () => {
     const body = await res.json();
 
     assert.equal(body.data.viewer.rank, 6);
-    assert.equal(spy.mock.calls[0].arguments[1], "user-frank");
+    assert.deepEqual(spy.mock.calls[0].arguments[1], { id: "user-frank", role: "USER" });
     spy.mock.restore();
   });
 

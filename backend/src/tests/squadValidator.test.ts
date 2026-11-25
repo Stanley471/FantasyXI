@@ -5,6 +5,7 @@ import {
   SquadValidationError,
   SquadLockedError,
   PlayerForValidation,
+  MAX_SQUAD_NAME_LENGTH,
 } from "../services/squad/squadValidator.js";
 import { Position, SquadPlayerSelection } from "../types/index.js";
 
@@ -251,5 +252,26 @@ describe("SquadValidator.sanitizeSquadName", () => {
       );
     }
     assert.equal(SquadValidator.sanitizeSquadName(" abc "), "abc");
+  });
+
+  it("accepts a name at exactly the 30-character limit", () => {
+    const name = "A".repeat(MAX_SQUAD_NAME_LENGTH);
+    assert.equal(SquadValidator.sanitizeSquadName(name), name);
+  });
+
+  it("rejects names exceeding 30 characters", () => {
+    const tooLong = "A".repeat(MAX_SQUAD_NAME_LENGTH + 1);
+    assert.throws(
+      () => SquadValidator.sanitizeSquadName(tooLong),
+      (err: unknown) =>
+        err instanceof SquadValidationError &&
+        err.message === `Squad name must not exceed ${MAX_SQUAD_NAME_LENGTH} characters`
+    );
+  });
+
+  it("rejects an over-length name even after whitespace collapses", () => {
+    // 29 "A"s + collapsed space + 2 "B"s = 32 chars after sanitizing — still over the limit.
+    const tooLong = `${"A".repeat(29)}   ${"B".repeat(2)}`;
+    assert.throws(() => SquadValidator.sanitizeSquadName(tooLong), SquadValidationError);
   });
 });
