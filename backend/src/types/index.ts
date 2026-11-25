@@ -108,6 +108,10 @@ export interface SafeUser {
   username: string;
   name?: string | null;
   role: UserRole;
+  /** True when the manager hides behind a "Manager #XXXX" alias in public standings (issue #511). */
+  isAnonymous: boolean;
+  /** Deterministic public alias shown for this manager when isAnonymous is true. */
+  anonymousAlias: string;
   /** Sign-in methods available to the account (email/password and/or Google) */
   authProviders: {
     password: boolean;
@@ -345,6 +349,8 @@ export interface LeagueStandingsEntry {
     points: number;
   }>;
   joinedAt: Date;
+  /** Which official rule (if any) broke a tie on totalPoints with another squad. */
+  tieBreak?: "transfers" | "goalsScored" | "goalsConceded" | null;
 }
 
 export interface H2HStandingsEntry {

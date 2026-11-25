@@ -159,25 +159,25 @@ export default function HomePage() {
               </div>
             </div>
 
-            {/* Payment Options (Polar & Zcash) */}
+            {/* Payment Options (Stellar SAC Tokens) */}
             <div className="grid grid-cols-2 gap-3 pt-3 border-t border-slate-100">
               <div className="flex items-center gap-2.5 p-2.5 rounded-xl bg-slate-50 hover:bg-slate-100 transition-colors border border-slate-200/60">
-                <div className="w-7 h-7 rounded-lg bg-sky-500 text-white flex items-center justify-center font-black text-xs">
-                  P
+                <div className="w-7 h-7 rounded-lg bg-emerald-600 text-white flex items-center justify-center font-black text-xs">
+                  S
                 </div>
                 <div>
-                  <div className="text-xs font-bold text-slate-800">Pollar</div>
-                  <div className="text-[10px] text-slate-400 font-medium">USDC</div>
+                  <div className="text-xs font-bold text-slate-800">Stellar USDC</div>
+                  <div className="text-[10px] text-slate-400 font-medium">Soroban SAC</div>
                 </div>
               </div>
 
               <div className="flex items-center gap-2.5 p-2.5 rounded-xl bg-slate-50 hover:bg-slate-100 transition-colors border border-slate-200/60">
-                <div className="w-7 h-7 rounded-lg bg-amber-500 text-white flex items-center justify-center font-black text-xs">
-                  Z
+                <div className="w-7 h-7 rounded-lg bg-purple-600 text-white flex items-center justify-center font-black text-xs">
+                  X
                 </div>
                 <div>
-                  <div className="text-xs font-bold text-slate-800">Zcash</div>
-                  <div className="text-[10px] text-slate-400 font-medium">Shielded ZEC</div>
+                  <div className="text-xs font-bold text-slate-800">Native XLM</div>
+                  <div className="text-[10px] text-slate-400 font-medium">Gas & Escrow</div>
                 </div>
               </div>
             </div>
@@ -373,7 +373,7 @@ export default function HomePage() {
                   Secure & Private Payments
                 </h3>
                 <p className="text-xs text-slate-200">
-                  Fund entry fees with Pollar (USDC) or Zcash (ZEC). Fast, secure, and privacy-first.
+                  Fund entry fees with Stellar USDC or XLM. Fast, low-fee, and secured by Soroban smart contracts.
                 </p>
               </div>
             </div>

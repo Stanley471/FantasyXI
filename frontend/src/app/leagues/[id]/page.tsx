@@ -14,6 +14,7 @@ import {
 } from "@/types";
 import { StandingsTable } from "@/components/leagues/StandingsTable";
 import { HistoricalStandingsScrubber, type CompletedGameweek } from "@/components/leagues/HistoricalStandingsScrubber";
+import { StandingsExportMenu } from "@/components/leagues/StandingsExportMenu";
 import { LeagueChat } from "@/components/chat/LeagueChat";
 import { PrizeCalculator } from "@/components/leagues/PrizeCalculator";
 import { PaymentModal } from "@/components/leagues/PaymentModal";
@@ -309,6 +310,14 @@ export default function LeagueDetailPage({
       : undefined;
   const liveSquadEntry = liveStandings.find((s) => s.userId === liveSquadUserId);
 
+  // Export reflects exactly whichever standings view is currently on screen:
+  // the historical scrubber when active, otherwise the live/current table.
+  const isViewingHistoricalStandings = completedGameweeks.length > 0 && selectedGameweekId !== null;
+  const exportStandings = isViewingHistoricalStandings ? historicalStandings : displayStandings;
+  const exportGameweekLabel = isViewingHistoricalStandings
+    ? completedGameweeks.find((gw) => gw.id === selectedGameweekId)?.name ?? null
+    : snapshot?.gameweek?.name ?? null;
+
   // Check if current user is already a member
   const myEntry = user ? standings.find((s) => s.userId === user.id) : null;
   const isMember = !!myEntry;
@@ -544,8 +553,16 @@ export default function LeagueDetailPage({
                 </p>
               </div>
 
-              <div className="text-xs font-mono text-slate-400">
-                {standings.length} Teams
+              <div className="flex items-center gap-3">
+                <div className="text-xs font-mono text-slate-400">
+                  {standings.length} Teams
+                </div>
+                <StandingsExportMenu
+                  standings={exportStandings}
+                  leagueName={league.name}
+                  gameweekLabel={exportGameweekLabel}
+                  livePoints={isViewingHistoricalStandings ? undefined : livePoints}
+                />
               </div>
             </div>
 

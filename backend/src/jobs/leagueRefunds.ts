@@ -4,12 +4,19 @@ import { leagueService } from "../services/league/leagueService.js";
 import { financialService } from "../services/financial/financialService.js";
 
 /**
- * League Refund Job.
+ * League Refund Job (dead-league worker, issue #509; scheduled as
+ * "league-refunds" every 5 minutes in queues/jobQueue.ts).
  *
- * 1. Cancels UPCOMING leagues that missed minMembers by their start gameweek kickoff.
+ * 1. Cancels UPCOMING leagues that missed minMembers by their start gameweek
+ *    deadline, and notifies every joined manager that the league was
+ *    cancelled and their full entry fee will be refunded with no fee deducted.
  * 2. Dispatches batched on-chain refunds for every cancelled league with paid members
  *    (covers both automatic and creator/admin cancellations).
  * 3. Verifies the escrow holds nothing for fully refunded leagues.
+ *
+ * The cancellation step is idempotent: only UPCOMING leagues are selected,
+ * so a league reaching its deadline twice is cancelled, notified, and
+ * queued for refund exactly once.
  *
  * Failed batches are isolated in the payout dead-letter queue instead of failing the
  * job: recoverable ones are retried by the next run, the rest wait for an admin via

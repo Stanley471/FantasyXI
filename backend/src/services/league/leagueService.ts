@@ -19,10 +19,20 @@ import {
 import { PrizeService } from "./prizeService.js";
 import { ScoringService } from "../scoring/scoringService.js";
 import {
+  userNotificationHub,
+  type UserNotificationHub,
+} from "../notifications/userNotificationHub.js";
+import {
+  displayUsername,
+  normalizeViewer,
+  type PrivacyViewer,
+} from "../privacy/displayName.js";
+import {
   parseLeagueScoringConfig,
   resolveLeagueScoringConfig,
 } from "../../models/leagueScoringConfig.js";
 import type { LeagueScoringConfig } from "../../models/leagueScoringConfig.js";
+import { sanitizePlainText } from "../../lib/sanitizeText.js";
 
 function scoringConfigToJson(config: LeagueScoringConfig): Prisma.InputJsonObject {
   const positionWeights = (
@@ -73,6 +83,14 @@ export interface H2HAnomalyReport {
 
 export const MAX_LEAGUE_MEMBERS = 100_000;
 
+/**
+ * Real-time event published to every joined manager when the dead-league
+ * worker cancels their league for missing minMembers at the deadline
+ * (issue #509). Payload carries the full entry fee owed back, with no fee
+ * deducted.
+ */
+export const LEAGUE_CANCELLED_EVENT = "league.cancelled";
+
 /** Maximum lengths (after trimming) accepted when creating a league. */
 export const LEAGUE_NAME_MAX_LENGTH = 50;
 export const LEAGUE_DESCRIPTION_MAX_LENGTH = 200;
@@ -113,6 +131,9 @@ export class LeagueInvitationError extends Error {
 export const INVITATION_DEFAULT_TTL_HOURS = 72;
 export const INVITATION_MAX_TTL_HOURS = 24 * 30;
 
+/** Permissive RFC-5322-ish email check; the mail provider rejects anything it can't deliver. */
+const LEAGUE_INVITE_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 export const LEAGUE_SEARCH_MAX_PAGE_SIZE = 50;
 const LEAGUE_SEARCH_DEFAULT_PAGE_SIZE = 20;
 const LEAGUE_SORT_FIELDS: Record<LeagueSortField, string> = {
@@ -130,9 +151,22 @@ export interface LeagueSearchResult<T> {
   pageSize: number;
 }
 
+/**
+ * Official tie-break criteria applied, in order, when two or more managers
+ * finish with identical total points (issue #503): fewest transfers made,
+ * then most goals scored by squad, then fewest goals conceded.
+ */
+export type TieBreakCriterion = "transfers" | "goalsScored" | "goalsConceded";
+
+export interface SquadTieBreakStats {
+  transfersMade: number;
+  goalsScored: number;
+  goalsConceded: number;
+}
+
 export class LeagueService {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  constructor(private readonly db: any = prisma) { }
+  constructor(private readonly db: any = prisma, private readonly hub: UserNotificationHub = userNotificationHub) { }
 
   /**
    * Generates a unique, URL-safe 6-character alphanumeric invite code.
@@ -591,7 +625,7 @@ export class LeagueService {
       const league = await tx.league.create({
         data: {
           name: input.name.trim(),
-          description: input.description?.trim() || null,
+          description: input.description ? sanitizePlainText(input.description.trim()) || null : null,
           creatorId: userId,
           inviteCode,
           entryFee: input.entryFee,
@@ -858,6 +892,26 @@ export class LeagueService {
   }
 
   /**
+   * Creates a single-use invitation addressed to a specific email, for the
+   * email-invite flow. Returns the invitation plus the league fields the
+   * email template needs. Creator only.
+   */
+  public async createInvitationEmail(leagueId: string, requesterUserId: string, email: string) {
+    const normalizedEmail = typeof email === "string" ? email.trim() : "";
+    if (!LEAGUE_INVITE_EMAIL_PATTERN.test(normalizedEmail)) {
+      throw new LeagueValidationError("A valid recipient email address is required");
+    }
+
+    const invitation = await this.createInvitation(leagueId, requesterUserId);
+    const league = await this.db.league.findUnique({
+      where: { id: leagueId },
+      select: { name: true, entryFee: true },
+    });
+
+    return { invitation, email: normalizedEmail, league: league as { name: string; entryFee: number } };
+  }
+
+  /**
    * Lists a private league's invitations (never the tokens). Creator only.
    */
   public async listInvitations(leagueId: string, requesterUserId: string) {
@@ -1007,14 +1061,138 @@ export class LeagueService {
   }
 
   /**
+   * Gathers the per-squad stats needed for the official tie-break hierarchy
+   * (fewest transfers, most goals scored, fewest goals conceded) in three
+   * bulk queries regardless of league size.
+   */
+  private async computeTieBreakStats(
+    squadIds: string[],
+    startGameweekId: number,
+    endGameweekId: number
+  ): Promise<Map<string, SquadTieBreakStats>> {
+    const stats = new Map<string, SquadTieBreakStats>(
+      squadIds.map((id: string) => [id, { transfersMade: 0, goalsScored: 0, goalsConceded: 0 }])
+    );
+    if (squadIds.length === 0) return stats;
+
+    const transferCounts = await this.db.squadTransfer.groupBy({
+      by: ["squadId"],
+      where: {
+        squadId: { in: squadIds },
+        gameweekId: { gte: startGameweekId, lte: endGameweekId },
+      },
+      _count: { _all: true },
+    });
+    for (const row of transferCounts as Array<{ squadId: string; _count: { _all: number } }>) {
+      stats.get(row.squadId)!.transfersMade = row._count._all;
+    }
+
+    const squadPlayers = await this.db.squadPlayer.findMany({
+      where: { squadId: { in: squadIds } },
+      select: { squadId: true, playerId: true, player: { select: { goalsScored: true } } },
+    });
+    const playerIdsBySquad = new Map<string, number[]>();
+    for (const sp of squadPlayers as Array<{ squadId: string; playerId: number; player: { goalsScored: number } }>) {
+      stats.get(sp.squadId)!.goalsScored += sp.player.goalsScored;
+      const list = playerIdsBySquad.get(sp.squadId) ?? [];
+      list.push(sp.playerId);
+      playerIdsBySquad.set(sp.squadId, list);
+    }
+
+    const allPlayerIds = [...new Set(squadPlayers.map((sp: { playerId: number }) => sp.playerId))];
+    if (allPlayerIds.length > 0) {
+      const concededStats = await this.db.playerGameweekStats.groupBy({
+        by: ["playerId"],
+        where: {
+          playerId: { in: allPlayerIds },
+          gameweekId: { gte: startGameweekId, lte: endGameweekId },
+        },
+        _sum: { goalsConceded: true },
+      });
+      const concededByPlayer = new Map<number, number>(
+        (concededStats as Array<{ playerId: number; _sum: { goalsConceded: number | null } }>).map(
+          (row) => [row.playerId, row._sum.goalsConceded ?? 0]
+        )
+      );
+      for (const [squadId, playerIds] of playerIdsBySquad) {
+        const conceded = playerIds.reduce((sum, id) => sum + (concededByPlayer.get(id) ?? 0), 0);
+        stats.get(squadId)!.goalsConceded = conceded;
+      }
+    }
+
+    return stats;
+  }
+
+  /** Compares two squads using the official tie-break hierarchy; 0 if still tied on every criterion. */
+  private static compareByOfficialTieBreak(
+    squadIdA: string,
+    squadIdB: string,
+    stats: Map<string, SquadTieBreakStats>
+  ): number {
+    const a = stats.get(squadIdA) ?? { transfersMade: 0, goalsScored: 0, goalsConceded: 0 };
+    const b = stats.get(squadIdB) ?? { transfersMade: 0, goalsScored: 0, goalsConceded: 0 };
+    return (
+      a.transfersMade - b.transfersMade ||
+      b.goalsScored - a.goalsScored ||
+      a.goalsConceded - b.goalsConceded
+    );
+  }
+
+  /**
+   * Labels every squad tied on total points with whichever official
+   * tie-break criterion actually separated it from at least one other squad
+   * in its tied group, so the standings table can show which rule applied.
+   */
+  private static labelTieBreakGroups(
+    entries: Array<{ squadId: string; totalPoints: number }>,
+    stats: Map<string, SquadTieBreakStats>
+  ): Map<string, TieBreakCriterion> {
+    const labels = new Map<string, TieBreakCriterion>();
+    let groupStart = 0;
+    for (let i = 1; i <= entries.length; i++) {
+      const endOfGroup = i === entries.length || entries[i].totalPoints !== entries[groupStart].totalPoints;
+      if (endOfGroup) {
+        const group = entries.slice(groupStart, i);
+        if (group.length > 1) {
+          const label = LeagueService.resolveTieBreakCriterion(group, stats);
+          if (label) {
+            for (const entry of group) labels.set(entry.squadId, label);
+          }
+        }
+        groupStart = i;
+      }
+    }
+    return labels;
+  }
+
+  /** The first criterion (in official order) that varies across a tied-on-points group. */
+  private static resolveTieBreakCriterion(
+    group: Array<{ squadId: string }>,
+    stats: Map<string, SquadTieBreakStats>
+  ): TieBreakCriterion | null {
+    const values = group.map(
+      (entry) => stats.get(entry.squadId) ?? { transfersMade: 0, goalsScored: 0, goalsConceded: 0 }
+    );
+    if (new Set(values.map((v) => v.transfersMade)).size > 1) return "transfers";
+    if (new Set(values.map((v) => v.goalsScored)).size > 1) return "goalsScored";
+    if (new Set(values.map((v) => v.goalsConceded)).size > 1) return "goalsConceded";
+    return null;
+  }
+
+  /**
    * Computes deterministic league standings across the competition's gameweek window.
    *
-   * Tie-breaking hierarchy:
-   * 1. Total Points in the league window (descending)
-   * 2. Highest Single Gameweek Score in that window (descending)
-   * 3. Earliest joined timestamp (ascending)
+   * Tie-breaking hierarchy when total points are equal (official rules, issue #503):
+   * 1. Fewest transfers made (ascending)
+   * 2. Most goals scored by squad (descending)
+   * 3. Fewest goals conceded by squad (ascending)
+   * 4. Earliest joined timestamp (ascending) — final deterministic fallback
    */
-  public async getLeagueStandings(leagueId: string, gameweekId?: number): Promise<{
+  public async getLeagueStandings(
+    leagueId: string,
+    gameweekId?: number,
+    viewerOrId?: string | PrivacyViewer
+  ): Promise<{
     league: {
       id: string;
       name: string;
@@ -1028,6 +1206,9 @@ export class LeagueService {
     completedGameweeks: Array<{ id: number; name: string }>;
     prizeDistribution: ReturnType<typeof PrizeService.calculatePrizeDistribution>;
   }> {
+    // Anonymous managers show as "Manager #XXXX" to everyone except
+    // themselves and platform admins (issue #511).
+    const viewer = normalizeViewer(viewerOrId);
     const league = await this.db.league.findUnique({
       where: { id: leagueId },
       include: {
@@ -1035,7 +1216,7 @@ export class LeagueService {
         endGameweek: true,
         members: {
           include: {
-            user: { select: { id: true, username: true } },
+            user: { select: { id: true, username: true, isAnonymous: true } },
             squad: { select: { id: true, name: true } },
           },
         },
@@ -1062,6 +1243,12 @@ export class LeagueService {
     const previousGameweekId = gameweekId === undefined
       ? undefined
       : completedGameweeks.filter((gameweek: { id: number }) => gameweek.id < gameweekId).at(-1)?.id;
+
+    const tieBreakStats = await this.computeTieBreakStats(
+      squadIds,
+      league.startGameweekId,
+      league.endGameweekId
+    );
 
     const scoringConfig = league.scoringConfig
       ? parseLeagueScoringConfig(league.scoringConfig)
@@ -1119,12 +1306,13 @@ export class LeagueService {
       bestGameweekPoints: number;
       gameweekScores: Array<{ gameweekId: number; gameweekName: string; points: number }>;
       joinedAt: Date;
+      tieBreak: TieBreakCriterion | null;
     };
     const rankAt = (throughGameweekId?: number): RankedStandings[] => {
       const entries = league.members.map((member: {
         userId: string;
         squadId: string;
-        user: { username: string };
+        user: { username: string; isAnonymous?: boolean | null };
         squad: { name: string };
         status: MembershipStatus;
         joinedAt: Date;
@@ -1134,7 +1322,10 @@ export class LeagueService {
         );
         return {
           userId: member.userId,
-          username: member.user.username,
+          username: displayUsername(
+            { id: member.userId, username: member.user.username, isAnonymous: member.user.isAnonymous },
+            viewer
+          ),
           squadId: member.squadId,
           squadName: member.squad.name,
           membershipStatus: member.status,
@@ -1146,12 +1337,17 @@ export class LeagueService {
           joinedAt: member.joinedAt,
         };
       });
-      entries.sort((a: Omit<RankedStandings, "rank">, b: Omit<RankedStandings, "rank">) =>
+      entries.sort((a: Omit<RankedStandings, "rank" | "tieBreak">, b: Omit<RankedStandings, "rank" | "tieBreak">) =>
         b.totalPoints - a.totalPoints ||
-        b.bestGameweekPoints - a.bestGameweekPoints ||
+        LeagueService.compareByOfficialTieBreak(a.squadId, b.squadId, tieBreakStats) ||
         a.joinedAt.getTime() - b.joinedAt.getTime()
       );
-      return entries.map((entry: Omit<RankedStandings, "rank">, index: number) => ({ rank: index + 1, ...entry }));
+      const tieBreakLabels = LeagueService.labelTieBreakGroups(entries, tieBreakStats);
+      return entries.map((entry: Omit<RankedStandings, "rank" | "tieBreak">, index: number) => ({
+        rank: index + 1,
+        ...entry,
+        tieBreak: tieBreakLabels.get(entry.squadId) ?? null,
+      }));
     };
 
     const previousRanks = previousGameweekId === undefined
@@ -1275,7 +1471,7 @@ export class LeagueService {
    * Transitions a league through its lifecycle state machine.
    */
   public async transitionStatus(leagueId: string, targetStatus: LeagueStatus) {
-    const league = await prisma.league.findUnique({
+    const league = await this.db.league.findUnique({
       where: { id: leagueId },
       include: { startGameweek: true, endGameweek: true },
     });
@@ -1318,7 +1514,7 @@ export class LeagueService {
       }
     }
 
-    return prisma.$transaction(async (tx) => {
+    return this.db.$transaction(async (tx: any) => {
       const updated = await tx.league.update({
         where: { id: leagueId },
         data: { status: targetStatus },
@@ -1353,8 +1549,8 @@ export class LeagueService {
         });
 
         const pairings = LeagueService.generateRoundRobinSchedule(
-          members.map((m) => m.id),
-          gameweeks.map((g) => g.id)
+          members.map((m: { id: string }) => m.id),
+          gameweeks.map((g: { id: number }) => g.id)
         );
         await tx.leagueFixture.createMany({
           data: pairings.map((p) => ({ leagueId, ...p })),
@@ -1645,14 +1841,15 @@ export class LeagueService {
   /**
    * Returns the official H2H table for a head-to-head league.
    */
-  public async getH2HStandings(leagueId: string): Promise<H2HStandingsEntry[]> {
+  public async getH2HStandings(leagueId: string, viewerOrId?: string | PrivacyViewer): Promise<H2HStandingsEntry[]> {
+    const viewer = normalizeViewer(viewerOrId);
     const league = await this.db.league.findUnique({
       where: { id: leagueId },
       include: {
         members: {
           where: { status: MembershipStatus.ACTIVE },
           include: {
-            user: { select: { username: true } },
+            user: { select: { username: true, isAnonymous: true } },
             squad: { select: { name: true } },
           },
         },
@@ -1670,7 +1867,10 @@ export class LeagueService {
       league.members.map((m: any) => ({
         memberId: m.id,
         userId: m.userId,
-        username: m.user.username,
+        username: displayUsername(
+          { id: m.userId, username: m.user.username, isAnonymous: m.user.isAnonymous },
+          viewer
+        ),
         squadName: m.squad.name,
         matchesWon: m.matchesWon,
         matchesDrawn: m.matchesDrawn,
@@ -1882,6 +2082,8 @@ export class LeagueService {
   /**
    * True when a league missed its minimum member threshold and its start
    * gameweek has kicked off (falls back to the deadline when no kickoff is known).
+   * Kept for callers that gate on kickoff; the dead-league worker (issue #509)
+   * cancels at the deadline instead, via isUnderfilledAtDeadline below.
    */
   public static isUnderfilledAfterKickoff(
     league: { currentMembers: number; minMembers: number },
@@ -1896,40 +2098,89 @@ export class LeagueService {
   }
 
   /**
+   * True when a league missed its minimum member threshold and its start
+   * gameweek deadline has been reached. This is the trigger for the automated
+   * dead-league worker (issue #509): cancellation happens at the deadline,
+   * without waiting for the first kickoff that follows it.
+   */
+  public static isUnderfilledAtDeadline(
+    league: { currentMembers: number; minMembers: number },
+    startGameweek: { deadline: Date },
+    now: Date = new Date()
+  ): boolean {
+    return (
+      league.currentMembers < league.minMembers &&
+      now.getTime() >= startGameweek.deadline.getTime()
+    );
+  }
+
+  /**
    * Cancels every UPCOMING league that did not reach minMembers by its start
-   * gameweek kickoff. Returns the IDs of the cancelled leagues.
+   * gameweek deadline, and notifies every joined manager that the league was
+   * cancelled and their full entry fee will be refunded with no fee deducted.
+   * Returns the IDs of the cancelled leagues.
+   *
+   * Idempotent: only UPCOMING leagues are selected and transitionStatus
+   * refuses transitions out of the terminal CANCELLED state, so a league
+   * reaching its deadline twice is cancelled once, notified once, and its
+   * paid members are queued for refund (REFUND_PENDING) exactly once.
    */
   public async cancelUnderfilledLeagues(now: Date = new Date()): Promise<string[]> {
     const leagues = await this.db.league.findMany({
       where: { status: LeagueStatus.UPCOMING },
       include: {
-        startGameweek: {
-          include: {
-            fixtures: {
-              where: { kickoffTime: { not: null } },
-              orderBy: { kickoffTime: "asc" },
-              take: 1,
-            },
-          },
+        startGameweek: true,
+        members: {
+          select: { userId: true, hasPaid: true, paymentStatus: true },
         },
       },
     });
 
     const cancelled: string[] = [];
     for (const league of leagues) {
-      const firstKickoff = league.startGameweek.fixtures[0]?.kickoffTime ?? null;
       if (
-        LeagueService.isUnderfilledAfterKickoff(
+        LeagueService.isUnderfilledAtDeadline(
           league,
-          { deadline: league.startGameweek.deadline, firstKickoff },
+          { deadline: league.startGameweek.deadline },
           now
         )
       ) {
         await this.transitionStatus(league.id, LeagueStatus.CANCELLED);
+        this.notifyLeagueCancelled(league, league.members ?? []);
         cancelled.push(league.id);
       }
     }
     return cancelled;
+  }
+
+  /**
+   * Tells every joined manager their league was cancelled for missing
+   * minMembers at the deadline. Paid managers are told the exact full entry
+   * fee queued for refund; unpaid managers are told no fee was taken.
+   * Delivery is best-effort via the notification hub and never throws.
+   */
+  private notifyLeagueCancelled(
+    league: { id: string; name: string; minMembers: number; currentMembers: number; entryFee: unknown },
+    members: Array<{ userId: string; hasPaid?: boolean; paymentStatus?: PaymentStatus }>
+  ): void {
+    for (const member of members) {
+      const paid =
+        member.hasPaid === true ||
+        member.paymentStatus === PaymentStatus.PAYMENT_CONFIRMED ||
+        member.paymentStatus === PaymentStatus.REFUND_PENDING;
+      const refundAmount = paid ? league.entryFee : 0;
+      this.hub.publish(member.userId, LEAGUE_CANCELLED_EVENT, {
+        leagueId: league.id,
+        leagueName: league.name,
+        minMembers: league.minMembers,
+        currentMembers: league.currentMembers,
+        entryFee: league.entryFee,
+        refundAmount,
+        reason: paid
+          ? `League ${league.name} was cancelled: only ${league.currentMembers} of the required ${league.minMembers} managers joined before the deadline. Your full entry fee of ${league.entryFee} will be refunded with no fee deducted.`
+          : `League ${league.name} was cancelled: only ${league.currentMembers} of the required ${league.minMembers} managers joined before the deadline. No entry fee was taken from you.`,
+      });
+    }
   }
 
   /**
@@ -1964,11 +2215,12 @@ export class LeagueService {
    * Retrieves a single league with members, gameweeks, and creator info.
    * The invite code of a private league is only revealed to its creator.
    */
-  public async getLeagueById(leagueId: string, viewerId?: string) {
+  public async getLeagueById(leagueId: string, viewerOrId?: string | PrivacyViewer) {
+    const viewer = normalizeViewer(viewerOrId);
     const league = await this.db.league.findUnique({
       where: { id: leagueId },
       include: {
-        creator: { select: { id: true, username: true } },
+        creator: { select: { id: true, username: true, isAnonymous: true } },
         startGameweek: true,
         endGameweek: true,
       },
@@ -1983,14 +2235,29 @@ export class LeagueService {
       Number(league.entryFee)
     );
 
+    const redacted = LeagueService.redactForViewer(league, viewer?.id);
     return {
-      ...LeagueService.redactForViewer(league, viewerId),
+      ...redacted,
+      // The creator's username is public on the league page; an anonymous
+      // creator shows as "Manager #XXXX" to everyone but themselves/admins.
+      // The creator include is optional; stay defensive so a row without
+      // it can never crash the league page.
+      creator: redacted.creator
+        ? {
+            ...redacted.creator,
+            username: displayUsername(
+              { id: redacted.creator.id, username: redacted.creator.username, isAnonymous: redacted.creator.isAnonymous },
+              viewer
+            ),
+          }
+        : redacted.creator,
       prizeDistribution,
     };
   }
 
   /** Retrieves one page without loading the full membership relation. */
-  public async getLeagueMembers(leagueId: string, page: number, limit: number) {
+  public async getLeagueMembers(leagueId: string, page: number, limit: number, viewerOrId?: string | PrivacyViewer) {
+    const viewer = normalizeViewer(viewerOrId);
     const league = await this.db.league.findUnique({
       where: { id: leagueId },
       select: { id: true },
@@ -2005,7 +2272,7 @@ export class LeagueService {
       this.db.leagueMember.findMany({
         where: { leagueId },
         include: {
-          user: { select: { id: true, username: true } },
+          user: { select: { id: true, username: true, isAnonymous: true } },
           squad: { select: { id: true, name: true } },
         },
         orderBy: [{ joinedAt: "asc" }, { id: "asc" }],
@@ -2016,7 +2283,22 @@ export class LeagueService {
     ]);
 
     return {
-      members,
+      members: members.map((member: any) =>
+        // The include always carries the user; stay defensive so a partial
+        // row can never crash the member list.
+        member.user
+          ? {
+              ...member,
+              user: {
+                ...member.user,
+                username: displayUsername(
+                  { id: member.user.id, username: member.user.username, isAnonymous: member.user.isAnonymous },
+                  viewer
+                ),
+              },
+            }
+          : member
+      ),
       total,
       page,
       limit,
@@ -2188,8 +2470,10 @@ export class LeagueService {
    */
   public async getLeagues(
     filters: LeagueSearchFilters = {},
-    viewerId?: string
+    viewerOrId?: string | PrivacyViewer
   ): Promise<LeagueSearchResult<any>> {
+    const viewer = normalizeViewer(viewerOrId);
+    const viewerId = viewer?.id;
     const page = filters.page ?? 1;
     const pageSize = Math.min(filters.pageSize ?? LEAGUE_SEARCH_DEFAULT_PAGE_SIZE, LEAGUE_SEARCH_MAX_PAGE_SIZE);
     const sortField = LEAGUE_SORT_FIELDS[filters.sortBy ?? "newest"];
@@ -2200,7 +2484,7 @@ export class LeagueService {
       this.db.league.findMany({
         where,
         include: {
-          creator: { select: { id: true, username: true } },
+          creator: { select: { id: true, username: true, isAnonymous: true } },
           startGameweek: { select: { id: true, name: true, deadline: true } },
           endGameweek: { select: { id: true, name: true } },
         },
@@ -2213,7 +2497,23 @@ export class LeagueService {
     ]);
 
     return {
-      items: items.map((league: any) => LeagueService.redactForViewer(league, viewerId)),
+      items: items.map((league: any) => {
+        const redacted = LeagueService.redactForViewer(league, viewerId);
+        return {
+          ...redacted,
+          // The creator include is optional; stay defensive so a row without
+          // it can never crash league search.
+          creator: redacted.creator
+            ? {
+                ...redacted.creator,
+                username: displayUsername(
+                  { id: redacted.creator.id, username: redacted.creator.username, isAnonymous: redacted.creator.isAnonymous },
+                  viewer
+                ),
+              }
+            : redacted.creator,
+        };
+      }),
       total,
       page,
       pageSize,

@@ -5,6 +5,18 @@ import {
   playerAnalyticsEngine,
   PlayerNotFoundError,
 } from "../services/analytics/playerAnalyticsEngine.js";
+import { ownershipStatsService } from "../services/analytics/ownershipStatsService.js";
+import { marketTrendService } from "../services/fpl/marketTrendService.js";
+
+export async function getMarketTrends(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const requested = Number(req.query.windowHours ?? 6);
+    const windowHours = Number.isFinite(requested) ? Math.min(24, Math.max(1, requested)) : 6;
+    res.json({ success: true, data: await marketTrendService.getTrends(new Date(), windowHours) });
+  } catch (error) {
+    next(error);
+  }
+}
 
 /**
  * Player Controller.
@@ -28,6 +40,7 @@ export async function getPlayers(
       minPrice,
       maxPrice,
       isAvailable,
+      priceChanged,
       sortBy = "totalPoints",
       sortOrder = "desc",
       page = "1",
@@ -74,6 +87,10 @@ export async function getPlayers(
       where.isAvailable = isAvailable === "true";
     }
 
+    if (priceChanged === "true") {
+      where.priceChanges = { some: { changedAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } } };
+    }
+
     // Build orderBy
     const allowedSortFields = [
       "price",
@@ -102,6 +119,12 @@ export async function getPlayers(
               logoUrl: true,
             },
           },
+          priceChanges: {
+            where: { changedAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
+            orderBy: { changedAt: "desc" },
+            take: 1,
+            select: { diff: true, changedAt: true },
+          },
         },
         orderBy: { [sortField]: orderDirection },
         skip,
@@ -116,7 +139,11 @@ export async function getPlayers(
 
     res.json({
       success: true,
-      data: players,
+      data: players.map(({ priceChanges, ...player }) => ({
+        ...player,
+        priceDelta: priceChanges[0] ? Number(priceChanges[0].diff) : 0,
+        priceChangedAt: priceChanges[0]?.changedAt ?? null,
+      })),
       pagination: {
         page: pageNum,
         limit: limitNum,
@@ -354,6 +381,34 @@ export async function getPlayerAnalytics(
       res.status(404).json({ success: false, message: error.message });
       return;
     }
+    next(error);
+  }
+}
+
+/**
+ * GET /api/v1/players/stats/ownership
+ *
+ * Serves the Redis-cached platform-wide ownership/captaincy snapshot
+ * computed by the post-deadline worker (issue #499). Never recomputes on
+ * request, so a cache hit stays well under the 50ms response target.
+ */
+export async function getOwnershipAndCaptaincyStats(
+  _req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const cached = await ownershipStatsService.getCached();
+    if (!cached) {
+      res.status(503).json({
+        success: false,
+        message: "Ownership stats have not been computed yet. Try again after the next gameweek deadline.",
+      });
+      return;
+    }
+
+    res.json({ success: true, data: cached });
+  } catch (error) {
     next(error);
   }
 }

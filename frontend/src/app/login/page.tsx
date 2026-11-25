@@ -4,6 +4,8 @@ import React, { useState, useEffect, Suspense } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
+import { useWallet } from "@/context/WalletContext";
+import { describeStellarAuthError } from "@/lib/stellarAuth";
 import { api, ApiError } from "@/lib/api";
 import { computeDeviceFingerprint } from "@/lib/deviceFingerprint";
 import { describeGoogleAuthError, redirectToGoogleSignIn, safeReturnTo } from "@/lib/googleAuth";
@@ -45,7 +47,9 @@ function describeError(err: unknown, fallback: string): string {
 function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { login, loginWithPasskey, isAuthenticated } = useAuth();
+  const { login, loginWithPasskey, loginWithStellar, isAuthenticated } = useAuth();
+  const { wallets, publicKey, connect, signTransaction, isConnecting } = useWallet();
+  const [showWalletPicker, setShowWalletPicker] = useState(false);
 
   const returnTo = safeReturnTo(searchParams.get("returnTo"));
   const urlError = searchParams.get("error");
@@ -149,6 +153,31 @@ function LoginForm() {
       }
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  /** SEP-0010: the connected wallet signs a server challenge instead of entering a password. */
+  const handleStellarSignIn = async () => {
+    if (!publicKey) return;
+    setErrorMsg(null);
+    setIsSubmitting(true);
+    try {
+      await loginWithStellar(publicKey, signTransaction);
+      router.push(returnTo);
+    } catch (err: unknown) {
+      setErrorMsg(describeStellarAuthError(err, "Stellar wallet sign-in failed."));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleWalletPick = async (walletId: Parameters<typeof connect>[0]) => {
+    setErrorMsg(null);
+    try {
+      await connect(walletId);
+      setShowWalletPicker(false);
+    } catch (err: unknown) {
+      setErrorMsg(describeStellarAuthError(err, "Could not connect to the wallet."));
     }
   };
 
@@ -271,6 +300,50 @@ function LoginForm() {
                 <IconShield className="w-4 h-4 flex-shrink-0 text-[#37003c] group-hover:scale-105 transition-transform" />
                 <span>Sign in with a passkey</span>
               </button>
+            )}
+
+            {/* Stellar wallet sign-in (SEP-0010, issue #562) */}
+            {publicKey ? (
+              <button
+                type="button"
+                onClick={handleStellarSignIn}
+                disabled={isSubmitting}
+                data-testid="login-stellar-sign"
+                className="w-full flex items-center justify-center gap-2.5 px-4 py-2.5 mb-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-bold text-xs transition-all focus:outline-none focus:ring-2 focus:ring-[#37003c]/20 shadow-2xs disabled:opacity-60 cursor-pointer"
+              >
+                <IconShield className="w-4 h-4 flex-shrink-0 text-[#37003c]" />
+                <span>
+                  Sign in as {publicKey.slice(0, 4)}...{publicKey.slice(-4)}
+                </span>
+              </button>
+            ) : (
+              <div className="mb-3">
+                <button
+                  type="button"
+                  onClick={() => setShowWalletPicker((open) => !open)}
+                  disabled={isSubmitting || isConnecting}
+                  data-testid="login-stellar-connect"
+                  className="w-full flex items-center justify-center gap-2.5 px-4 py-2.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-bold text-xs transition-all focus:outline-none focus:ring-2 focus:ring-[#37003c]/20 shadow-2xs disabled:opacity-60 cursor-pointer"
+                >
+                  <IconShield className="w-4 h-4 flex-shrink-0 text-[#37003c]" />
+                  <span>Sign in with a Stellar wallet</span>
+                </button>
+                {showWalletPicker && (
+                  <div className="mt-2 grid grid-cols-2 gap-2" role="menu">
+                    {wallets.map((wallet) => (
+                      <button
+                        key={wallet.id}
+                        type="button"
+                        role="menuitem"
+                        onClick={() => handleWalletPick(wallet.id)}
+                        className="px-3 py-2 rounded-lg border border-slate-200 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
+                      >
+                        {wallet.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             )}
 
             {/* Google OAuth Button */}

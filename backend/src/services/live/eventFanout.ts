@@ -83,7 +83,20 @@ export class EventFanout {
     return () => { set.delete(listener); if (!set.size) this.listeners.delete(topic); };
   }
   publish(topic: string, entity: string, data: Record<string, unknown>): boolean {
-    return this.outbound.add({ topic, entity, data, origin: this.instanceId });
+    const result = this.outbound.add({ topic, entity, data, origin: this.instanceId });
+    if (result) {
+      void this.tagEventWithSequence(topic, { type: "delta", data, entity });
+    }
+    return result;
+  }
+
+  private async tagEventWithSequence(topic: string, event: Record<string, unknown>): Promise<void> {
+    try {
+      const { sequenceTracker } = await import("./sequenceTracker.js");
+      await sequenceTracker.tagAndStoreEvent(topic, event);
+    } catch {
+      this.errors++;
+    }
   }
   private deliver(events: FanoutEvent[]): void {
     // At most 12 x 4KB events/frame, including JSON overhead < 64KB.

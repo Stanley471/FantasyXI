@@ -1,6 +1,9 @@
 import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
+import { LoginSecurityService } from "../services/security/loginSecurityService.js";
+import { NoOpMailer } from "../services/security/mailer.js";
+import { setAccountStatusResolver } from "../services/privacy/accountStatus.js";
 import type { AddressInfo } from "net";
 import type { Server } from "http";
 import {
@@ -118,6 +121,8 @@ describe("Google OAuth state, return paths and link tickets", () => {
 describe("Google OAuth flows (integration)", () => {
   let server: Server;
   let base: string;
+  let resetSecurityFixture: () => void;
+  let restoreSecurityFixture: () => void;
   let store: ReturnType<typeof createUserStore>;
   /** The Google identity the next authorization code resolves to. */
   let nextIdentity: { googleId: string; email: string; name?: string; emailVerified: boolean };
@@ -126,6 +131,10 @@ describe("Google OAuth flows (integration)", () => {
     const { default: authRoutes } = await import("../routes/auth.routes.js");
     const { googleAuthService } = await import("../services/auth/googleAuthService.js");
     const { authService } = await import("../services/auth/authService.js");
+    const originalSecurity = Object.getOwnPropertyDescriptor(authService, "security")!;
+    resetSecurityFixture = () => Object.defineProperty(authService, "security", { configurable: true, value: new LoginSecurityService({ redis: null, mailer: new NoOpMailer(), anomalyChallenges: true }) });
+    restoreSecurityFixture = () => Object.defineProperty(authService, "security", originalSecurity);
+    setAccountStatusResolver((id) => !store.users.some(user => user.id === id));
 
     googleAuthService.getAuthorizationUrl = (state: string) =>
       `https://accounts.google.test/o/oauth2/auth?state=${encodeURIComponent(state)}`;
@@ -144,10 +153,14 @@ describe("Google OAuth flows (integration)", () => {
   });
 
   after(() => {
+    restoreSecurityFixture();
+    setAccountStatusResolver(null);
     server.close();
   });
 
   beforeEach(() => {
+    // Security state must share the same in-memory persistence boundary as users.
+    resetSecurityFixture();
     store = createUserStore();
     nextIdentity = { googleId: "google-1", email: "manager@gmail.com", name: "Manager", emailVerified: true };
   });
@@ -257,7 +270,7 @@ describe("Google OAuth flows (integration)", () => {
     it("signs an existing email/password manager into the same account", async () => {
       const registered = await (await send("POST", "/api/v1/auth/register", {
         email: "manager@gmail.com",
-        password: "correct-horse-battery",
+        password: "Correct-horse-battery1",
       })).json();
 
       const landing = await signInWithGoogle();
@@ -271,7 +284,7 @@ describe("Google OAuth flows (integration)", () => {
 
   describe("account linking", () => {
     async function register(email: string) {
-      const res = await send("POST", "/api/v1/auth/register", { email, password: "correct-horse-battery" });
+      const res = await send("POST", "/api/v1/auth/register", { email, password: "Correct-horse-battery1" });
       return (await res.json()).data as { token: string; user: { id: string } };
     }
 
@@ -327,7 +340,7 @@ describe("Google OAuth flows (integration)", () => {
       const refused = await send("DELETE", "/api/v1/auth/google/link", undefined, token);
       assert.equal(refused.status, 409);
 
-      const setPassword = await send("POST", "/api/v1/auth/password", { password: "new-password-123" }, token);
+      const setPassword = await send("POST", "/api/v1/auth/password", { password: "New-password-123" }, token);
       assert.equal(setPassword.status, 200);
       assert.deepEqual((await setPassword.json()).data.authProviders, { password: true, google: true });
 
@@ -335,18 +348,18 @@ describe("Google OAuth flows (integration)", () => {
       assert.equal(unlinked.status, 200);
       assert.deepEqual((await unlinked.json()).data.authProviders, { password: true, google: false });
 
-      const login = await send("POST", "/api/v1/auth/login", { email: "manager@gmail.com", password: "new-password-123" });
+      const login = await send("POST", "/api/v1/auth/login", { email: "manager@gmail.com", password: "New-password-123" });
       assert.equal(login.status, 200);
     });
 
     it("requires the current password to change an existing password", async () => {
       const { token } = await register("pw@example.com");
-      const wrong = await send("POST", "/api/v1/auth/password", { password: "another-pass-1", currentPassword: "nope" }, token);
+      const wrong = await send("POST", "/api/v1/auth/password", { password: "Another-pass-1", currentPassword: "nope" }, token);
       assert.equal(wrong.status, 401);
       const right = await send(
         "POST",
         "/api/v1/auth/password",
-        { password: "another-pass-1", currentPassword: "correct-horse-battery" },
+        { password: "Another-pass-1", currentPassword: "Correct-horse-battery1" },
         token
       );
       assert.equal(right.status, 200);

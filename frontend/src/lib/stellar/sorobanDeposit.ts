@@ -12,6 +12,7 @@
 
 import {
   Address,
+  BASE_FEE,
   Contract,
   nativeToScVal,
   Networks,
@@ -27,6 +28,46 @@ export interface DepositParams {
   rpcUrl?: string;
   networkPassphrase?: string;
   onProgress?: (status: string) => void;
+  /**
+   * Called with the simulated fee breakdown before the wallet is opened. Resolve
+   * `true` to continue to signing or `false` to cancel without a wallet prompt.
+   * When omitted, signing proceeds automatically after a successful simulation.
+   */
+  onFeeEstimate?: (estimate: FeeEstimate) => Promise<boolean>;
+  /** Injectable RPC server (used by tests). */
+  server?: SimulationServer;
+}
+
+/** Subset of `rpc.Server` used by the deposit flow. */
+export interface SimulationServer {
+  getAccount: rpc.Server["getAccount"];
+  simulateTransaction: rpc.Server["simulateTransaction"];
+  sendTransaction: rpc.Server["sendTransaction"];
+  getTransaction: rpc.Server["getTransaction"];
+}
+
+export interface FeeEstimate {
+  /** Soroban resource fee returned by simulation, in stroops. */
+  resourceFeeStroops: string;
+  /** Classic inclusion (base) fee, in stroops. */
+  inclusionFeeStroops: string;
+  /** Estimated total (resource + inclusion), in stroops. */
+  totalFeeStroops: string;
+  /** Estimated total as an XLM decimal string. */
+  totalFeeXlm: string;
+  /** Maximum fee the signed transaction authorizes, in stroops. */
+  maxFeeStroops: string;
+  cpuInstructions?: number;
+  readBytes?: number;
+  writeBytes?: number;
+}
+
+/** Thrown when the user declines the fee confirmation; no wallet prompt is shown. */
+export class DepositCancelledError extends Error {
+  constructor() {
+    super("Deposit cancelled before signing.");
+    this.name = "DepositCancelledError";
+  }
 }
 
 export interface WalletAdapter {
@@ -69,6 +110,113 @@ export class SorobanDepositTimeoutError extends Error {
   }
 }
 
+/** Converts a stroop amount to an XLM decimal string (7 decimals, trimmed). */
+export function stroopsToXlm(stroops: bigint | string): string {
+  const value = BigInt(stroops);
+  const whole = value / BigInt(10_000_000);
+  const frac = (value % BigInt(10_000_000)).toString().padStart(7, "0").replace(/0+$/, "");
+  return frac ? `${whole}.${frac}` : `${whole}`;
+}
+
+/** Maps a contract/simulation failure message to a readable explanation. */
+export function mapSimulationError(errMsg: string): string {
+  const contractMatch = errMsg.match(/Error\(Contract,\s*#?(\d+)\)/i);
+  if (contractMatch) {
+    const code = parseInt(contractMatch[1], 10);
+    switch (code) {
+      case 6:
+        return "You have already deposited for this league. Your entry is already confirmed!";
+      case 5:
+        return "This league is no longer accepting deposits (deadline locked or active).";
+      case 4:
+        return "The league escrow partition was not found on-chain.";
+      case 7:
+        return "This competition has already settled.";
+      case 8:
+        return "Invalid deposit amount specified.";
+      case 10:
+        return "Unauthorized: your account is not permitted to perform this action.";
+      case 14:
+        return "Deposits are temporarily paused by the escrow contract.";
+      default:
+        return `Smart contract rejected deposit (Error #${code}).`;
+    }
+  }
+  const lower = errMsg.toLowerCase();
+  if (lower.includes("leaguefull") || lower.includes("league full")) {
+    return "This league is full and no longer accepting entries.";
+  }
+  if (
+    lower.includes("insufficientbalance") ||
+    lower.includes("insufficient balance") ||
+    lower.includes("balance") ||
+    lower.includes("underfunded")
+  ) {
+    return "Insufficient USDC balance or missing USDC trustline in your connected wallet.";
+  }
+  return `Transaction simulation failed: ${errMsg}`;
+}
+
+/**
+ * Simulates `tx`, validates the result and returns the assembled (footprint +
+ * auth + resource fee) transaction with a fee breakdown. Throws a readable
+ * error, before any wallet prompt, if simulation fails or would revert.
+ */
+export async function simulateDeposit(
+  server: Pick<SimulationServer, "simulateTransaction">,
+  tx: Parameters<typeof rpc.assembleTransaction>[0]
+): Promise<{ preparedTx: ReturnType<ReturnType<typeof rpc.assembleTransaction>["build"]>; estimate: FeeEstimate }> {
+  let sim: Awaited<ReturnType<SimulationServer["simulateTransaction"]>>;
+  try {
+    sim = await server.simulateTransaction(tx);
+  } catch (err: unknown) {
+    throw new Error(mapSimulationError(err instanceof Error ? err.message : String(err)));
+  }
+
+  if (rpc.Api.isSimulationError(sim)) {
+    throw new Error(mapSimulationError(sim.error));
+  }
+  if (rpc.Api.isSimulationRestore(sim)) {
+    throw new Error(
+      "The escrow contract state has expired and must be restored on-chain before you can deposit. Please contact support."
+    );
+  }
+  if (!rpc.Api.isSimulationSuccess(sim) || !sim.result) {
+    throw new Error("Transaction simulation did not return a successful result.");
+  }
+
+  const preparedTx = rpc.assembleTransaction(tx, sim).build();
+  const resourceFee = BigInt(sim.minResourceFee);
+  const inclusionFee = BigInt(BASE_FEE);
+  const total = resourceFee + inclusionFee;
+
+  let cpuInstructions: number | undefined;
+  let readBytes: number | undefined;
+  let writeBytes: number | undefined;
+  try {
+    const resources = sim.transactionData.build().resources;
+    cpuInstructions = resources.instructions;
+    readBytes = resources.diskReadBytes;
+    writeBytes = resources.writeBytes;
+  } catch {
+    // Resource detail is informational; the fee total above is authoritative.
+  }
+
+  return {
+    preparedTx,
+    estimate: {
+      resourceFeeStroops: resourceFee.toString(),
+      inclusionFeeStroops: inclusionFee.toString(),
+      totalFeeStroops: total.toString(),
+      totalFeeXlm: stroopsToXlm(total),
+      maxFeeStroops: String(preparedTx.fee),
+      cpuInstructions,
+      readBytes,
+      writeBytes,
+    },
+  };
+}
+
 const DEFAULT_SOROBAN_RPC =
   process.env.NEXT_PUBLIC_STELLAR_SOROBAN_RPC_URL ||
   "https://soroban-testnet.stellar.org";
@@ -88,6 +236,7 @@ export async function depositToSorobanEscrow(
     rpcUrl = DEFAULT_SOROBAN_RPC,
     networkPassphrase = DEFAULT_NETWORK_PASSPHRASE,
     onProgress,
+    onFeeEstimate,
     signTransaction: signWithWallet,
   } = params;
 
@@ -99,7 +248,7 @@ export async function depositToSorobanEscrow(
   }
 
   onProgress?.("Connecting to Stellar network...");
-  const server = new rpc.Server(rpcUrl, { allowHttp: false });
+  const server: SimulationServer = params.server ?? new rpc.Server(rpcUrl, { allowHttp: false });
 
   // 1. Fetch user account sequence from RPC
   onProgress?.("Fetching account sequence...");
@@ -146,37 +295,13 @@ export async function depositToSorobanEscrow(
     .setTimeout(180)
     .build();
 
-  // 4. Simulate and prepare transaction (fetches resource footprint, auth requirements, and Soroban fee)
+  // 4. Simulate first: surfaces contract reverts and exact fees before any wallet prompt
   onProgress?.("Simulating transaction footprint...");
-  let preparedTx;
-  try {
-    preparedTx = await server.prepareTransaction(tx);
-  } catch (simErr: unknown) {
-    const errMsg = simErr instanceof Error ? simErr.message : String(simErr);
-    const contractMatch = errMsg.match(/Error\(Contract,\s*#?(\d+)\)/i);
-    if (contractMatch) {
-      const code = parseInt(contractMatch[1], 10);
-      switch (code) {
-        case 6:
-          throw new Error("You have already deposited for this league. Your entry is already confirmed!");
-        case 5:
-          throw new Error("This league is no longer accepting deposits (deadline locked or active).");
-        case 4:
-          throw new Error("The league escrow partition was not found on-chain.");
-        case 7:
-          throw new Error("This competition has already settled.");
-        case 8:
-          throw new Error("Invalid deposit amount specified.");
-        case 10:
-          throw new Error("Unauthorized: your account is not permitted to perform this action.");
-        default:
-          throw new Error(`Smart contract rejected deposit (Error #${code}).`);
-      }
-    }
-    if (errMsg.toLowerCase().includes("balance") || errMsg.toLowerCase().includes("underfunded")) {
-      throw new Error("Insufficient USDC balance or missing USDC trustline in your connected wallet.");
-    }
-    throw new Error(`Transaction simulation failed: ${errMsg}`);
+  const { preparedTx, estimate } = await simulateDeposit(server, tx);
+
+  if (onFeeEstimate) {
+    const approved = await onFeeEstimate(estimate);
+    if (!approved) throw new DepositCancelledError();
   }
 
   // 5. Request the selected wallet signature

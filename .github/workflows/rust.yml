@@ -79,5 +79,8 @@ jobs:
       - name: Run contract fuzz and invariant harness
         run: cargo test --verbose --test fuzz_tests --test invariant_tests
 
+      - name: Run stateful escrow invariant suite
+        run: cargo test --verbose --test escrow_state_machine_invariants
+
       - name: Build contract for wasm32 release target
         run: cargo build --target wasm32-unknown-unknown --release --verbose

@@ -313,6 +313,19 @@ describe("League search & filtering", () => {
       assert.equal((await service.getLeagueById(secret.id)).inviteCode, null);
       assert.equal((await service.getLeagueById(secret.id, CREATOR)).inviteCode, secret.inviteCode);
     });
+
+    it("tolerates league rows without a creator relation (privacy masking regression)", async () => {
+      // Seeded mock rows carry creatorId but no included `creator` object;
+      // the privacy masking must not crash on such rows.
+      const { service, premier, secret } = seed();
+      const search = await service.getLeagues({ q: "premier" });
+      assert.ok(search.items.length > 0);
+      assert.equal(search.items.find((l: any) => l.id === premier.id)?.creator, undefined);
+
+      const byId = await service.getLeagueById(secret.id, CREATOR);
+      assert.equal(byId.id, secret.id);
+      assert.equal(byId.creator, undefined);
+    });
   });
 });
 

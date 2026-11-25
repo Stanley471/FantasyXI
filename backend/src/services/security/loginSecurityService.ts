@@ -31,8 +31,15 @@ import {
   SecurityAnomalyType,
 } from "./securityAnomalyLog.js";
 import { assessTravel, DEFAULT_TRAVEL_POLICY, GeoPoint, TravelPolicy } from "./geoVelocity.js";
+import { loginActivityStore, type LoginActivityStore } from "./loginActivityStore.js";
+import { loginThreatFeed } from "./loginThreatFeed.js";
+import { emailService } from "../email/emailService.js";
 
 export interface LoginSecurityOptions {
+  anomalyChallenges?: boolean;
+  requireSharedStore?: boolean;
+  activity?: LoginActivityStore;
+  isThreatIp?: (ip: string) => Promise<boolean>;
   redis?: IRedisCacheClient | null;
   mailer?: Mailer;
   anomalyLog?: SecurityAnomalyLog;
@@ -55,6 +62,7 @@ export interface FailedLoginResult {
 
 /** A password-verified login attempt, with what the request revealed about the client. */
 export interface LoginAttempt {
+  asn?: string | null;
   userId: string;
   email: string;
   username: string;
@@ -80,11 +88,15 @@ interface KnownDevice {
 }
 
 interface LastLogin {
+  asn?: string | null;
   at: number;
   location: GeoPoint | null;
 }
 
 interface PendingChallenge {
+  ip?: string;
+  userAgent?: string | null;
+  asn?: string | null;
   userId: string;
   email: string;
   deviceId: string;
@@ -117,6 +129,8 @@ function hashChallengeCode(challengeId: string, code: string): Buffer {
 }
 
 export class LoginSecurityService {
+  private readonly options: LoginSecurityOptions;
+  private verificationTail: Promise<unknown> = Promise.resolve();
   private cache = new Map<string, { value: string; expiresAt: number }>();
   private redis: IRedisCacheClient | null;
   private mailerClient: Mailer;
@@ -129,6 +143,7 @@ export class LoginSecurityService {
   private now: () => number;
 
   constructor(options: LoginSecurityOptions = {}) {
+    this.options = options;
     this.redis = options.redis !== undefined ? options.redis : getRedisClient();
     this.mailerClient = options.mailer ?? defaultMailer;
     this.anomalyLog = options.anomalyLog ?? defaultAnomalyLog;
@@ -144,6 +159,35 @@ export class LoginSecurityService {
   public setRedisClient(client: IRedisCacheClient | null): void {
     this.redis = client;
   }
+  /** A verified passkey is already a strong second factor; record its trusted baseline. */
+  public async acceptVerifiedLogin(attempt: LoginAttempt): Promise<void> {
+    if (this.options.requireSharedStore && !this.redis?.eval) throw new Error("Shared login security storage required");
+    await this.recordSuccessfulLogin(attempt.userId,attempt.email,deriveDeviceId(attempt.deviceFingerprint,attempt.userAgent),attempt.location ?? null,attempt.asn);
+    await this.options.activity?.record(attempt,"VERIFIED",this.now());
+    if (attempt.location) await this.options.activity?.trustLocation(attempt.userId,attempt.location,this.now());
+  }
+
+  /** Erases this account's login baselines/challenges; never deletes another user's keys. */
+  public async forgetUser(userId: string, email: string): Promise<void> {
+    const exact = [`${KNOWN_DEVICE_PREFIX}${userId}`,`${LAST_LOGIN_PREFIX}${userId}`,`${FAILED_LOGIN_PREFIX}${email}`];
+    for (const key of exact) this.cache.delete(key);
+    for (const [key,entry] of this.cache) {
+      if (key.startsWith(CHALLENGE_PREFIX) && JSON.parse(entry.value).userId === userId) this.cache.delete(key);
+    }
+    if (!this.redis) return;
+    await this.redis.del(...exact);
+    const shared = this.redis as IRedisCacheClient & { scan?: (cursor: string,...args: string[]) => Promise<[string,string[]]> };
+    if (!shared.scan) throw new Error("Login cache does not support bounded erasure");
+    let cursor = "0"; const deadline = Date.now()+30_000;
+    do {
+      const page = await shared.scan(cursor,"MATCH",`${CHALLENGE_PREFIX}*`,"COUNT","100"); cursor=page[0];
+      for (const key of page[1]) {
+        const value=await shared.get(key);
+        if (value && JSON.parse(value).userId===userId) await shared.del(key);
+      }
+      if (Date.now()>deadline) throw new Error("Login cache erasure requires retry");
+    } while(cursor!=="0");
+  }
 
   private async readJson<T>(key: string): Promise<T | null> {
     if (this.redis) {
@@ -154,6 +198,7 @@ export class LoginSecurityService {
         const raw = await this.redis.get(key);
         return raw ? (JSON.parse(raw) as T) : null;
       } catch (err) {
+        if (this.options.requireSharedStore) throw new Error("Login security storage unavailable");
         console.warn(
           `[security] Redis GET error for ${key}, falling back to memory:`,
           (err as Error).message
@@ -173,6 +218,7 @@ export class LoginSecurityService {
       try {
         await this.redis.set(key, serialized, "EX", ttlSeconds);
       } catch (err) {
+        if (this.options.requireSharedStore) throw new Error("Login security storage unavailable");
         console.warn(
           `[security] Redis SET error for ${key}, falling back to memory:`,
           (err as Error).message
@@ -240,6 +286,7 @@ export class LoginSecurityService {
    * to compare it against yet.
    */
   public async assessLogin(attempt: LoginAttempt): Promise<LoginRiskAssessment> {
+    if (this.options.requireSharedStore && !this.redis?.eval) throw new Error("Shared login security storage required");
     const now = this.now();
     const deviceId = deriveDeviceId(attempt.deviceFingerprint, attempt.userAgent);
     const [knownDevices, lastLogin] = await Promise.all([
@@ -255,6 +302,10 @@ export class LoginSecurityService {
         this.travelPolicy
       );
       if (travel.impossible) {
+        if (this.options.anomalyChallenges) {
+          await this.options.activity?.record(attempt, "IMPOSSIBLE_TRAVEL", now);
+          return this.createChallenge(attempt, deviceId, location);
+        }
         this.anomalyLog.record({
           type: SecurityAnomalyType.IMPOSSIBLE_TRAVEL,
           userId: attempt.userId,
@@ -280,6 +331,13 @@ export class LoginSecurityService {
     }
 
     const devices = knownDevices ?? [];
+    if (this.options.anomalyChallenges && (
+      (attempt.asn && lastLogin?.asn && attempt.asn !== lastLogin.asn) ||
+      await this.options.isThreatIp?.(attempt.ip)
+    )) {
+      await this.options.activity?.record(attempt, "NETWORK_RISK", now);
+      return this.createChallenge(attempt, deviceId, location);
+    }
     if (devices.length > 0 && !devices.some((device) => device.deviceId === deviceId)) {
       this.anomalyLog.record({
         type: SecurityAnomalyType.NEW_DEVICE_LOGIN,
@@ -291,7 +349,8 @@ export class LoginSecurityService {
       return this.createChallenge(attempt, deviceId, location);
     }
 
-    await this.recordSuccessfulLogin(attempt.userId, attempt.email, deviceId, location);
+    await this.recordSuccessfulLogin(attempt.userId, attempt.email, deviceId, location, attempt.asn);
+    await this.options.activity?.record(attempt, "ALLOWED", now);
     return { decision: "ALLOW" };
   }
 
@@ -300,6 +359,42 @@ export class LoginSecurityService {
    * after MAX_CHALLENGE_ATTEMPTS wrong codes or when it expires.
    */
   public async verifyChallenge(challengeId: string, code: string): Promise<ChallengeVerification> {
+    // Redis serializes attempts/consumption across nodes; the local queue is only
+    // used by explicit single-process development/test stores.
+    if (this.redis?.eval) return this.verifySharedChallenge(challengeId, code);
+    if (this.options.requireSharedStore) throw new Error("Shared challenge verification unavailable");
+    const result = this.verificationTail.then(() => this.verifyLocalChallenge(challengeId, code));
+    this.verificationTail = result.catch(() => undefined);
+    return result;
+  }
+
+  private async verifySharedChallenge(challengeId: string, code: string): Promise<ChallengeVerification> {
+    const raw = await this.redis!.eval!(
+      `local raw = redis.call('GET', KEYS[1]); if not raw then return '' end
+       local c = cjson.decode(raw)
+       if tonumber(ARGV[2]) >= c.expiresAt then redis.call('DEL', KEYS[1]); return '' end
+       if c.codeHash ~= ARGV[1] then
+         c.attempts = c.attempts + 1
+         if c.attempts >= 5 then redis.call('DEL', KEYS[1]); return '' end
+         redis.call('SET', KEYS[1], cjson.encode(c), 'KEEPTTL')
+         return tostring(5-c.attempts)
+       end
+       redis.call('DEL', KEYS[1]); return raw`,
+      1, `${CHALLENGE_PREFIX}${challengeId}`, hashChallengeCode(challengeId, code).toString("hex"), this.now().toString(),
+    );
+    if (typeof raw !== "string" || !raw) return { verified: false, attemptsRemaining: 0 };
+    if (/^[1-4]$/.test(raw)) return { verified: false, attemptsRemaining: Number(raw) };
+    return this.finishChallenge(JSON.parse(raw) as PendingChallenge);
+  }
+
+  private async finishChallenge(challenge: PendingChallenge): Promise<ChallengeVerification> {
+    await this.recordSuccessfulLogin(challenge.userId, challenge.email, challenge.deviceId, challenge.location, challenge.asn);
+    await this.options.activity?.record({ userId: challenge.userId, email: challenge.email, username: "", ip: challenge.ip ?? "unknown", userAgent: challenge.userAgent, location: challenge.location, asn: challenge.asn }, "VERIFIED", this.now());
+    if (challenge.location) await this.options.activity?.trustLocation(challenge.userId, challenge.location, this.now());
+    return { verified: true, userId: challenge.userId };
+  }
+
+  private async verifyLocalChallenge(challengeId: string, code: string): Promise<ChallengeVerification> {
     const key = `${CHALLENGE_PREFIX}${challengeId}`;
     const challenge = await this.readJson<PendingChallenge>(key);
     const now = this.now();
@@ -320,8 +415,7 @@ export class LoginSecurityService {
     }
 
     await this.deleteKey(key);
-    await this.recordSuccessfulLogin(challenge.userId, challenge.email, challenge.deviceId, challenge.location);
-    return { verified: true, userId: challenge.userId };
+    return this.finishChallenge(challenge);
   }
 
   private async createChallenge(
@@ -334,6 +428,9 @@ export class LoginSecurityService {
     const expiresAt = this.now() + this.challengeTtlSeconds * 1000;
 
     const challenge: PendingChallenge = {
+      ip: attempt.ip,
+      userAgent: attempt.userAgent,
+      asn: attempt.asn,
       userId: attempt.userId,
       email: attempt.email,
       deviceId,
@@ -346,7 +443,7 @@ export class LoginSecurityService {
 
     await this.sendMail(attempt.email, "Your FantasyXI sign-in code",
       `Hi ${attempt.username},\n\n` +
-        "We noticed a sign-in to your FantasyXI account from a device we haven't seen before.\n\n" +
+        "This sign-in requires an additional security check.\n\n" +
         `Your verification code is: ${code}\n` +
         `It expires in ${Math.round(this.challengeTtlSeconds / 60)} minutes.\n\n` +
         `IP address: ${attempt.ip}\n` +
@@ -361,14 +458,15 @@ export class LoginSecurityService {
     userId: string,
     email: string,
     deviceId: string,
-    location: GeoPoint | null
+    location: GeoPoint | null,
+    asn?: string | null
   ): Promise<void> {
     const devicesKey = `${KNOWN_DEVICE_PREFIX}${userId}`;
     const devices = (await this.readJson<KnownDevice[]>(devicesKey)) ?? [];
     if (!devices.some((device) => device.deviceId === deviceId)) {
       devices.push({ deviceId, firstSeenAt: new Date(this.now()).toISOString() });
     }
-    const lastLogin: LastLogin = { at: this.now(), location };
+    const lastLogin: LastLogin = { at: this.now(), location, asn };
     await Promise.all([
       // Bounded so an account cannot grow the list without limit
       this.writeJson(devicesKey, devices.slice(-MAX_KNOWN_DEVICES), this.knownDeviceTtlSeconds),
@@ -386,8 +484,21 @@ export class LoginSecurityService {
       await this.mailerClient.send({ to, subject, text });
     } catch (error) {
       console.error(`[security] Failed to send "${subject}" email:`, error);
+      if(this.options.anomalyChallenges) throw new Error("Login challenge delivery unavailable");
     }
   }
 }
 
-export const loginSecurityService = new LoginSecurityService();
+export const loginSecurityService = new LoginSecurityService({
+  anomalyChallenges: true,
+  travelPolicy: { maxSpeedKmh: 800, toleranceKm: 0 },
+  requireSharedStore: process.env.NODE_ENV === "production",
+  activity: loginActivityStore,
+  isThreatIp: (ip) => loginThreatFeed.contains(ip),
+  mailer: { send: async message => {
+    if(process.env.NODE_ENV==="production" && !process.env.RESEND_API_KEY && !process.env.SENDGRID_API_KEY) throw new Error("Login mail transport is not configured");
+    const html="<pre>"+message.text.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")+"</pre>";
+    const result=await emailService.getProvider().sendEmail({...message,html});
+    if(!result.success) throw new Error("Login mail delivery failed");
+  } },
+});

@@ -10,6 +10,8 @@ import { User, AuthResponse, ApiSuccessResponse } from "@/types";
 import { api, API_BASE_URL } from "@/lib/api";
 import { getRealtimeBus } from "@/lib/realtime/realtimeBus";
 import { authenticateWithPasskey, type PublicKeyCredentialRequestOptionsJSON } from "@/lib/passkeys";
+import { authenticateWithStellar } from "@/lib/stellarAuth";
+import type { WalletTransactionSigner } from "@/lib/stellar/sorobanDeposit";
 import {
   clearOfflineData,
   isOfflineError,
@@ -25,6 +27,8 @@ interface AuthContextType {
   login: (token: string, user: User) => void;
   /** Passkey sign-in; pass the options of a WEBAUTHN login challenge to complete a step-up (issue #273) */
   loginWithPasskey: (stepUpOptions?: PublicKeyCredentialRequestOptionsJSON) => Promise<void>;
+  /** SEP-0010 sign-in with a connected Stellar wallet (issue #562) */
+  loginWithStellar: (address: string, signTransaction: WalletTransactionSigner) => Promise<void>;
   logout: () => void;
   setAuthToken: (token: string) => Promise<void>;
   refreshUser: () => Promise<void>;
@@ -85,6 +89,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const loginWithPasskey = async (stepUpOptions?: PublicKeyCredentialRequestOptionsJSON) => {
     const session = await authenticateWithPasskey(stepUpOptions);
+    login(session.token, session.user);
+  };
+
+  const loginWithStellar = async (address: string, signTransaction: WalletTransactionSigner) => {
+    const session = await authenticateWithStellar(address, signTransaction);
     login(session.token, session.user);
   };
 
@@ -166,6 +175,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isAuthenticated: !!user && !!token,
         login,
         loginWithPasskey,
+        loginWithStellar,
         logout,
         setAuthToken,
         refreshUser,

@@ -43,6 +43,9 @@ const toRadians = (degrees: number) => (degrees * Math.PI) / 180;
  * geolocation itself.
  */
 export function haversineDistanceKm(from: GeoPoint, to: GeoPoint): number {
+  for (const point of [from, to]) {
+    if (!Number.isFinite(point.latitude) || !Number.isFinite(point.longitude) || Math.abs(point.latitude) > 90 || Math.abs(point.longitude) > 180) throw new RangeError("Invalid geographic point");
+  }
   const dLat = toRadians(to.latitude - from.latitude);
   const dLon = toRadians(to.longitude - from.longitude);
   const a =
@@ -59,6 +62,7 @@ export function assessTravel(
   current: { point: GeoPoint; at: number },
   policy: TravelPolicy = DEFAULT_TRAVEL_POLICY
 ): TravelAssessment {
+  if (![previous.at, current.at, policy.maxSpeedKmh, policy.toleranceKm].every(Number.isFinite) || policy.maxSpeedKmh <= 0 || policy.toleranceKm < 0) throw new RangeError("Invalid travel timing or policy");
   const distanceKm = haversineDistanceKm(previous.point, current.point);
   const elapsedHours = Math.max(0, current.at - previous.at) / 3_600_000;
   const effectiveKm = Math.max(0, distanceKm - policy.toleranceKm);

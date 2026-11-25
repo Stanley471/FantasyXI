@@ -3,18 +3,31 @@
 import React, { useEffect, useRef, useState } from "react";
 import { copyToClipboard } from "@/lib/clipboard";
 import { IconCheck, IconCopy } from "@/components/ui/Icons";
+import { emitToast } from "@/context/ToastContext";
 
 export const COPIED_FEEDBACK_MS = 2000;
 
-/**
- * One-click copy button with a transient "Copied!" tooltip. The confirmation
- * is also announced through a polite ARIA live region for screen readers.
- */
-export const CopyButton: React.FC<{
+export interface CopyButtonProps {
   value: string;
   ariaLabel: string;
   className?: string;
-}> = ({ value, ariaLabel, className = "" }) => {
+  toastMessage?: string;
+  statusMessage?: string;
+  onCopied?: (ok: boolean) => void;
+}
+
+/**
+ * One-click copy button with a transient "Copied!" tooltip, toast notification,
+ * and polite ARIA live region announcement for screen readers.
+ */
+export const CopyButton: React.FC<CopyButtonProps> = ({
+  value,
+  ariaLabel,
+  className = "",
+  toastMessage = "Invite link copied to clipboard",
+  statusMessage = "Invite link copied to clipboard",
+  onCopied,
+}) => {
   const [copied, setCopied] = useState(false);
   const [failed, setFailed] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -25,6 +38,12 @@ export const CopyButton: React.FC<{
     const ok = await copyToClipboard(value);
     setCopied(ok);
     setFailed(!ok);
+    if (ok) {
+      emitToast.success(toastMessage);
+    } else {
+      emitToast.error("Could not copy to clipboard");
+    }
+    onCopied?.(ok);
     clearTimeout(timer.current);
     timer.current = setTimeout(() => {
       setCopied(false);
@@ -53,8 +72,9 @@ export const CopyButton: React.FC<{
         </span>
       )}
       <span role="status" aria-live="polite" className="sr-only" data-testid="copy-status">
-        {copied ? "Copied to clipboard!" : failed ? "Copy failed" : ""}
+        {copied ? statusMessage : failed ? "Copy failed" : ""}
       </span>
     </span>
   );
 };
+

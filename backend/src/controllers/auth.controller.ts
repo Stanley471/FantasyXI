@@ -4,13 +4,15 @@ import {
   AuthValidationError,
   AuthConflictError,
   AuthUnauthorizedError,
+  AuthForbiddenError,
   AuthNotFoundError,
   AuthLoginBlockedError,
 } from "../services/auth/authService.js";
-import { locateFromHeaders } from "../services/security/geoVelocity.js";
+import { trustedLoginSignals } from "../services/security/trustedLoginSignals.js";
 import { ReferralService } from "../services/auth/referralService.js";
 import { jwtKeyRotationService } from "../services/auth/jwtKeyRotationService.js";
 import { webAuthnService, PasskeyError } from "../services/auth/webAuthnService.js";
+import { stellarAuthService, StellarAuthError } from "../services/auth/stellarAuthService.js";
 import { refreshTokenService, RefreshTokenUnauthorizedError } from "../services/auth/refreshTokenService.js";
 import {
   passkeyRecoveryService,
@@ -44,9 +46,8 @@ export async function logout(req: Request, res: Response, next: NextFunction): P
 /** Client metadata that drives login security (issues #117, #331) and Sybil signals (#274). */
 function requestContext(req: Request) {
   return {
-    ip: req.ip ?? req.socket.remoteAddress ?? "unknown",
+    ...trustedLoginSignals(req),
     userAgent: req.headers["user-agent"] ?? null,
-    location: locateFromHeaders(req.headers),
   };
 }
 
@@ -165,6 +166,41 @@ export async function verifyLoginChallenge(
       return;
     }
     next(error);
+  }
+}
+
+/** Answers a failed SEP-10 step with its status; anything else goes to the error handler. */
+function handleStellarAuthError(error: unknown, res: Response, next: NextFunction): void {
+  if (error instanceof StellarAuthError) {
+    res.status(error.statusCode).json({ success: false, message: error.message });
+    return;
+  }
+  if (error instanceof AuthUnauthorizedError) {
+    res.status(401).json({ success: false, message: error.message });
+    return;
+  }
+  next(error);
+}
+
+/** GET /api/v1/auth/stellar/challenge?account=G... (issue #562): SEP-10 challenge transaction */
+export async function getStellarChallenge(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const account = typeof req.query.account === "string" ? req.query.account : undefined;
+    const challenge = await stellarAuthService.createChallenge(account);
+    res.json({ success: true, data: challenge });
+  } catch (error) {
+    handleStellarAuthError(error, res, next);
+  }
+}
+
+/** POST /api/v1/auth/stellar/verify body: { transaction } (issue #562): signed SEP-10 challenge */
+export async function verifyStellarChallenge(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { account } = await stellarAuthService.verifyChallenge(req.body?.transaction);
+    const result = await authService.loginWithStellarAccount(account, requestContext(req));
+    res.json({ success: true, message: "Logged in successfully", data: result });
+  } catch (error) {
+    handleStellarAuthError(error, res, next);
   }
 }
 
@@ -514,11 +550,15 @@ export async function setPassword(
       return;
     }
 
-    const user = await authService.setPassword(req.user.id, req.body ?? {});
+    const { user, revokedSessions } = await authService.setPassword(req.user.id, req.body ?? {});
     res.json({
       success: true,
-      message: "Password updated",
+      message:
+        revokedSessions > 0
+          ? `Password updated. Revoked ${revokedSessions} other active session(s).`
+          : "Password updated",
       data: user,
+      revokedSessions,
     });
   } catch (error) {
     if (error instanceof AuthValidationError) {
@@ -599,7 +639,19 @@ export async function handleGoogleCallback(
     }
 
     // Authenticate or link user
-    const result = await authService.handleGoogleAuth(verifiedGoogleUser);
+    const result = await authService.handleGoogleAuth(verifiedGoogleUser, requestContext(req));
+
+    if ("challengeRequired" in result) {
+      if (wantsJson) {
+        res.status(202).json({success:true,message:"Secondary verification required",data:result});
+      } else {
+        // Carry challenge metadata only; no access or refresh token is issued.
+        const callback = new URL("/auth/callback",frontendUrl());
+        callback.hash = new URLSearchParams({challengeId:result.challengeId!,method:result.method,expiresAt:result.expiresAt}).toString();
+        res.redirect(callback.toString());
+      }
+      return;
+    }
 
     // If client requested JSON (e.g. testing / API clients)
     if (wantsJson) {

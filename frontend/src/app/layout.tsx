@@ -4,6 +4,8 @@ import "./globals.css";
 import { AuthProvider } from "@/context/AuthContext";
 import { WalletProvider } from "@/context/WalletContext";
 import { ToastProvider } from "@/context/ToastContext";
+import { ThemeProvider } from "@/context/ThemeContext";
+import { ThemeScript } from "@/components/theme/ThemeScript";
 import { AppShell } from "@/components/layout/AppShell";
 import { TelemetryProvider } from "@/components/layout/TelemetryProvider";
 
@@ -49,17 +51,24 @@ export default function RootLayout({
     <html
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      suppressHydrationWarning
     >
-      <body className="min-h-full flex flex-col bg-[#f8fafc] text-slate-800 font-sans selection:bg-[#37003c] selection:text-white">
-        <AuthProvider>
-          <WalletProvider>
-            <ToastProvider>
-              <TelemetryProvider>
-                <AppShell>{children}</AppShell>
-              </TelemetryProvider>
-            </ToastProvider>
-          </WalletProvider>
-        </AuthProvider>
+      <head>
+        {/* Prevent FOUC by applying theme before React hydrates */}
+        <ThemeScript />
+      </head>
+      <body className="min-h-full flex flex-col bg-[var(--fxi-background)] text-[var(--fxi-foreground)] font-sans selection:bg-[var(--fxi-primary)] selection:text-white">
+        <ThemeProvider>
+          <AuthProvider>
+            <WalletProvider>
+              <ToastProvider>
+                <TelemetryProvider>
+                  <AppShell>{children}</AppShell>
+                </TelemetryProvider>
+              </ToastProvider>
+            </WalletProvider>
+          </AuthProvider>
+        </ThemeProvider>
       </body>
     </html>
   );

@@ -1,9 +1,11 @@
+import { setAccountStatusResolver } from "../services/privacy/accountStatus.js";
+setAccountStatusResolver(() => false); // Active-account fixture for this isolated unit suite.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import express, { Request, Response, NextFunction, Router } from "express";
 import type { AddressInfo } from "net";
 import type { Server } from "http";
-import { signAccessToken } from "../config/jwt.js";
+import { signAccessToken, verifyAccessToken } from "../config/jwt.js";
 import {
   Permission,
   Role,
@@ -12,7 +14,7 @@ import {
   isElevatedPermission,
 } from "../config/permissions.js";
 import { authenticateServiceKey, parseServiceApiKeys } from "../config/serviceAuth.js";
-import { createPermissionGuard, requireAuth } from "../middleware/authMiddleware.js";
+import { createPermissionGuard, requireAuth, requireCurrentRole, setRoleResolver } from "../middleware/authMiddleware.js";
 import apiV1Router from "../routes/index.js";
 import authRoutes from "../routes/auth.routes.js";
 import syncRoutes from "../routes/sync.routes.js";
@@ -52,6 +54,14 @@ function mockReqRes(user?: Request["user"]) {
 }
 
 describe("RBAC policy", () => {
+  it("rejects a demoted administrator even when the JWT still claims ADMIN", async () => {
+    const context=mockReqRes({id:"demoted",email:"demoted@example.test",username:"demoted",role:Role.ADMIN});
+    setRoleResolver(async()=>Role.USER);
+    try {
+      await requireCurrentRole(Role.ADMIN)(context.req,context.res,context.next);
+      assert.equal(context.status(),403);assert.equal(context.nextCalled(),false);
+    } finally { setRoleResolver(null); }
+  });
   it("defines an explicit permission set for USER, MODERATOR, ADMIN and SERVICE", () => {
     assert.deepEqual(Object.keys(ROLE_PERMISSIONS).sort(), ["ADMIN", "MODERATOR", "SERVICE", "USER"]);
   });
@@ -208,6 +218,18 @@ describe("requireAuth with service credentials", () => {
 describe("Route authorization audit", () => {
   /** Endpoints intentionally reachable without authentication. */
   const PUBLIC_ROUTES = new Set([
+    // Credential-proven sign-in/session exchanges do not yet have bearer access.
+    "POST /auth/refresh", "POST /auth/logout",
+    "POST /auth/webauthn/login/options", "POST /auth/webauthn/login/verify",
+    // Recovery precedes bearer access; completion verifies a one-time Ed25519 proof.
+    "POST /auth/webauthn/recovery/begin", "POST /auth/webauthn/recovery/complete",
+    // SEP-10 proves wallet ownership before issuing bearer access.
+    "GET /auth/stellar/challenge", "POST /auth/stellar/verify",
+    "GET /auth/google/link/start",
+    // Existing public match and player statistics, with no privileged mutations.
+    "POST /players/batch-stats", "GET /players/:id/analytics", "GET /squads/:id/value",
+    "GET /leagues/:id/live", "GET /leagues/:leagueId/swiss/standings", "GET /leagues/:leagueId/swiss/current-round",
+    "GET /live/leaderboard/:leagueId", "GET /live/leaderboard/:leagueId/stream",
     "POST /auth/register",
     "POST /auth/login",
     // Completes a challenged sign-in: the caller has no session yet (issue #331)
@@ -276,13 +298,13 @@ describe("Route authorization audit", () => {
   it("protects every non-public endpoint with requireAuth and a permission guard", () => {
     const unguarded = allRoutes
       .filter((r) => !PUBLIC_ROUTES.has(r.key))
-      .filter((r) => !r.guards.includes("requireAuth") || !r.guards.includes("permissionGuard"))
+      .filter((r) => !r.guards.includes("requireAuth") || !(r.guards.includes("permissionGuard") || r.guards.includes("currentRoleGuard")))
       .map((r) => r.key);
     assert.deepEqual(unguarded, []);
   });
 
   it("keeps every public route read-only apart from sign-up and sign-in", () => {
-    const SIGN_IN_ROUTES = new Set(["POST /auth/register", "POST /auth/login", "POST /auth/login/verify"]);
+    const SIGN_IN_ROUTES = new Set(["POST /auth/register", "POST /auth/login", "POST /auth/login/verify", "POST /auth/refresh", "POST /auth/logout", "POST /auth/webauthn/login/options", "POST /auth/webauthn/login/verify", "POST /auth/webauthn/recovery/begin", "POST /auth/webauthn/recovery/complete", "POST /auth/stellar/verify", "POST /players/batch-stats"]);
     const mutatingPublic = [...PUBLIC_ROUTES].filter((key) => !key.startsWith("GET ") && !SIGN_IN_ROUTES.has(key));
     assert.deepEqual(mutatingPublic, []);
   });
@@ -367,7 +389,12 @@ describe("Unauthorized access attempts (HTTP)", () => {
 
   it("rejects tampered tokens", async () => {
     const token = tokenFor(UserRole.ADMIN);
-    const tampered = token.slice(0, -2) + (token.endsWith("aa") ? "bb" : "aa");
+    const parts = token.split(".");
+    const signature = Buffer.from(parts[2], "base64url");
+    signature[0] ^= 1;
+    parts[2] = signature.toString("base64url");
+    const tampered = parts.join(".");
+    assert.throws(() => verifyAccessToken(tampered), /signature/i);
     const res = await call("POST", "/admin/sync/bootstrap", { Authorization: `Bearer ${tampered}` });
     assert.equal(res.status, 401);
   });
