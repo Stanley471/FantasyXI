@@ -99,6 +99,8 @@ export interface Player {
   teamId: number;
   team?: Team;
   price: number;
+  priceDelta?: number;
+  priceChangedAt?: string | null;
   totalPoints: number;
   minutesPlayed: number;
   goalsScored: number;
@@ -460,6 +462,8 @@ export interface LivePlayerEvent {
   redCards: number;
   saves: number;
   bonus: number;
+  bps: number;
+  provisionalBonus: number;
   totalPoints: number;
 }
 

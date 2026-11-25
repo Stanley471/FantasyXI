@@ -9,6 +9,7 @@
 
 import crypto from "crypto";
 import { EventEmitter } from "events";
+import { sessionRevocationBloom } from "./sessionRevocationBloom.js";
 
 export interface DeviceInfo {
   browser: string;
@@ -161,6 +162,10 @@ export class SessionRegistryService {
    * Checks whether a session ID is currently valid (not revoked and not expired).
    */
   public async isSessionValid(sessionId: string, userId: string): Promise<boolean> {
+    if (await sessionRevocationBloom.isRevoked(sessionId)) {
+      this.revokedSessionIds.add(sessionId);
+      return false;
+    }
     if (this.revokedSessionIds.has(sessionId)) {
       return false;
     }
@@ -194,6 +199,7 @@ export class SessionRegistryService {
     const session = this.sessions.get(sessionId);
     if (!session) {
       this.revokedSessionIds.add(sessionId);
+      await sessionRevocationBloom.add(sessionId, null, reason, new Date(Date.now() + 7 * 24 * 3600 * 1000));
       return false;
     }
 
@@ -201,6 +207,7 @@ export class SessionRegistryService {
     session.revokedAt = new Date();
     session.revocationReason = reason;
     this.revokedSessionIds.add(sessionId);
+    await sessionRevocationBloom.add(sessionId, session.userId, reason, session.expiresAt);
 
     this.dispatchRevocationEvent({
       userId: session.userId,
@@ -237,6 +244,7 @@ export class SessionRegistryService {
         session.revokedAt = now;
         session.revocationReason = reason;
         this.revokedSessionIds.add(id);
+        await sessionRevocationBloom.add(id, userId, reason, session.expiresAt);
         revokedCount++;
       } else {
         this.revokedSessionIds.add(id);

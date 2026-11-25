@@ -22,6 +22,7 @@ export enum SecurityAnomalyType {
   WEBAUTHN_COUNTER_REGRESSION = "WEBAUTHN_COUNTER_REGRESSION",
   /** Account linked to a suspected multi-account (Sybil) cluster in a paid league (issue #274) */
   SYBIL_CLUSTER_SUSPECTED = "SYBIL_CLUSTER_SUSPECTED",
+  PASSKEY_RECOVERY_COMPLETED = "PASSKEY_RECOVERY_COMPLETED",
 }
 
 export interface SecurityAnomalyInput {

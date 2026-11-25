@@ -15,6 +15,7 @@ import {
   createSlidingWindowRateLimiter,
   MemorySlidingWindowStore,
   RedisSlidingWindowStore,
+  MemoryAdaptivePenaltyStore,
 } from "../middleware/rateLimiter.js";
 
 async function makeRequest(server: Server, path: string, headers: Record<string, string> = {}) {
@@ -292,6 +293,7 @@ describe("Rate-Limiting & Abuse Prevention Middleware Suite", () => {
       });
       assert.equal(blocked.status, 429);
       assert.equal(blocked.headers.get("x-ratelimit-limit"), "1");
+      assert.equal(blocked.headers.get("ratelimit-limit"), "1");
       assert.equal(blocked.headers.get("x-ratelimit-remaining"), "0");
       assert.equal(blocked.headers.get("retry-after"), "60");
     } finally {
@@ -360,5 +362,78 @@ describe("Rate-Limiting & Abuse Prevention Middleware Suite", () => {
     assert.equal(getRateLimitTier("/api/webhooks/stellar", false, true), "webhook");
     assert.equal(getRateLimitTier("/api/players", false, true), "anonymous");
     assert.equal(getRateLimitTier("/api/players", true), "authenticated");
+  });
+
+  it("uses a verified API-key bucket without trusting arbitrary key headers", async () => {
+    const previous = process.env.RATE_LIMIT_API_KEYS;
+    process.env.RATE_LIMIT_API_KEYS = "service-secret";
+    const app = express();
+    app.set("trust proxy", true);
+    app.get(
+      "/api/custom",
+      createSlidingWindowRateLimiter({
+        store: new MemorySlidingWindowStore(),
+        adaptiveStore: new MemoryAdaptivePenaltyStore(),
+        routeGroups: [{
+          name: "custom",
+          prefixes: ["/api/custom"],
+          tiers: {
+            anonymous: { limit: 1, windowMs: 60_000 },
+            authenticated: { limit: 2, windowMs: 60_000 },
+            webhook: { limit: 2, windowMs: 60_000 },
+            apiKey: { limit: 3, windowMs: 60_000 },
+          },
+        }],
+      }),
+      (_req, res) => res.status(200).end()
+    );
+    const server = app.listen(0);
+    const address = server.address() as any;
+    try {
+      const request = () => fetch(`http://127.0.0.1:${address.port}/api/custom`, { headers: { "X-Api-Key": "service-secret" } });
+      assert.equal((await request()).status, 200);
+      assert.equal((await request()).status, 200);
+      assert.equal((await request()).status, 200);
+      assert.equal((await request()).status, 429);
+    } finally {
+      server.close();
+      if (previous === undefined) delete process.env.RATE_LIMIT_API_KEYS;
+      else process.env.RATE_LIMIT_API_KEYS = previous;
+    }
+  });
+
+  it("adaptively reduces quota after repeated scanner responses", async () => {
+    const app = express();
+    app.set("trust proxy", true);
+    app.get(
+      "/api/probe",
+      createSlidingWindowRateLimiter({
+        store: new MemorySlidingWindowStore(),
+        adaptiveStore: new MemoryAdaptivePenaltyStore(),
+        routeGroups: [{
+          name: "probe",
+          prefixes: ["/api/probe"],
+          tiers: {
+            anonymous: { limit: 8, windowMs: 60_000 },
+            authenticated: { limit: 8, windowMs: 60_000 },
+            webhook: { limit: 8, windowMs: 60_000 },
+          },
+        }],
+      }),
+      (_req, res) => res.status(404).json({ success: false })
+    );
+    const server = app.listen(0);
+    const address = server.address() as any;
+    const request = () => fetch(`http://127.0.0.1:${address.port}/api/probe`);
+    try {
+      for (let index = 0; index < 3; index++) assert.equal((await request()).status, 404);
+      await new Promise((resolve) => setImmediate(resolve));
+      const reduced = await request();
+      assert.equal(reduced.status, 404);
+      assert.equal(reduced.headers.get("ratelimit-policy"), "adaptive; level=1");
+      assert.equal((await request()).status, 429);
+    } finally {
+      server.close();
+    }
   });
 });

@@ -257,7 +257,7 @@ export default function LeaguesPage() {
             Leagues Hub
           </h1>
           <p className="text-xs text-slate-500 mt-1 max-w-xl leading-relaxed">
-            Compete in classic fantasy leagues. Prize pools are secured in non-custodial smart escrow with Pollar & Zcash integration.
+            Compete in classic fantasy leagues. Prize pools are secured in non-custodial Soroban smart escrow on Stellar.
           </p>
           <Link href="/leaderboard" className="mt-2 inline-block text-xs font-bold text-[#37003c] hover:underline">
             See the global leaderboard &rarr;
