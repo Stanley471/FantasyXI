@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { after, before, beforeEach, describe, it, mock } from "node:test";
 import express from "express";
+import { ipKeyGenerator } from "express-rate-limit";
+import { LoginSecurityService } from "../services/security/loginSecurityService.js";
+import { NoOpMailer } from "../services/security/mailer.js";
 import request, { type Response } from "supertest";
 import type { OAuth2Client } from "google-auth-library";
 import { generateOAuthState, OAUTH_NONCE_COOKIE } from "../config/google.js";
@@ -65,6 +68,8 @@ describe("Google OAuth callback error states (integration)", { concurrency: fals
   let db: ReturnType<typeof userStore>;
   let client: ReturnType<typeof googleClient>;
   let restoreServices: () => void;
+  let resetAuthLimits: () => void;
+  let resetSecurityFixture: () => void;
   const environment = {
     GOOGLE_CLIENT_ID: "test-client.apps.googleusercontent.com",
     GOOGLE_CLIENT_SECRET: "test-client-secret",
@@ -83,6 +88,10 @@ describe("Google OAuth callback error states (integration)", { concurrency: fals
     const { authService } = await import("../services/auth/authService.js");
     const { GoogleAuthService, googleAuthService } = await import("../services/auth/googleAuthService.js");
 
+    const { authRateLimiter } = await import("../middleware/rateLimiter.js");
+    resetAuthLimits = () => authRateLimiter.resetKey(ipKeyGenerator("::ffff:127.0.0.1"));
+    const originalSecurity = Object.getOwnPropertyDescriptor(authService, "security")!;
+    resetSecurityFixture = () => Object.defineProperty(authService, "security", { configurable: true, value: new LoginSecurityService({ redis: null, mailer: new NoOpMailer(), anomalyChallenges: true }) });
     const originalDb = Object.getOwnPropertyDescriptor(authService, "db")!;
     Object.defineProperty(authService, "db", { configurable: true, get: () => db });
     const verifyCode = mock.method(googleAuthService, "verifyAuthorizationCode", (code: string) => {
@@ -92,6 +101,7 @@ describe("Google OAuth callback error states (integration)", { concurrency: fals
     restoreServices = () => {
       verifyCode.mock.restore();
       Object.defineProperty(authService, "db", originalDb);
+      Object.defineProperty(authService, "security", originalSecurity);
     };
 
     app = express();
@@ -107,6 +117,9 @@ describe("Google OAuth callback error states (integration)", { concurrency: fals
   });
 
   beforeEach(() => {
+    // Each OAuth case has its own client budget and in-memory security history.
+    resetAuthLimits();
+    resetSecurityFixture();
     db = userStore();
     client = googleClient();
   });

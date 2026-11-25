@@ -1,6 +1,9 @@
 import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
+import { LoginSecurityService } from "../services/security/loginSecurityService.js";
+import { NoOpMailer } from "../services/security/mailer.js";
+import { setAccountStatusResolver } from "../services/privacy/accountStatus.js";
 import type { AddressInfo } from "net";
 import type { Server } from "http";
 import {
@@ -118,6 +121,8 @@ describe("Google OAuth state, return paths and link tickets", () => {
 describe("Google OAuth flows (integration)", () => {
   let server: Server;
   let base: string;
+  let resetSecurityFixture: () => void;
+  let restoreSecurityFixture: () => void;
   let store: ReturnType<typeof createUserStore>;
   /** The Google identity the next authorization code resolves to. */
   let nextIdentity: { googleId: string; email: string; name?: string; emailVerified: boolean };
@@ -126,6 +131,10 @@ describe("Google OAuth flows (integration)", () => {
     const { default: authRoutes } = await import("../routes/auth.routes.js");
     const { googleAuthService } = await import("../services/auth/googleAuthService.js");
     const { authService } = await import("../services/auth/authService.js");
+    const originalSecurity = Object.getOwnPropertyDescriptor(authService, "security")!;
+    resetSecurityFixture = () => Object.defineProperty(authService, "security", { configurable: true, value: new LoginSecurityService({ redis: null, mailer: new NoOpMailer(), anomalyChallenges: true }) });
+    restoreSecurityFixture = () => Object.defineProperty(authService, "security", originalSecurity);
+    setAccountStatusResolver((id) => !store.users.some(user => user.id === id));
 
     googleAuthService.getAuthorizationUrl = (state: string) =>
       `https://accounts.google.test/o/oauth2/auth?state=${encodeURIComponent(state)}`;
@@ -144,10 +153,14 @@ describe("Google OAuth flows (integration)", () => {
   });
 
   after(() => {
+    restoreSecurityFixture();
+    setAccountStatusResolver(null);
     server.close();
   });
 
   beforeEach(() => {
+    // Security state must share the same in-memory persistence boundary as users.
+    resetSecurityFixture();
     store = createUserStore();
     nextIdentity = { googleId: "google-1", email: "manager@gmail.com", name: "Manager", emailVerified: true };
   });

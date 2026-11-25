@@ -1,3 +1,5 @@
+import { setAccountStatusResolver } from "../services/privacy/accountStatus.js";
+setAccountStatusResolver(() => false); // Active-account fixture for this isolated unit suite.
 import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";

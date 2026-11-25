@@ -1,3 +1,5 @@
+import { setAccountStatusResolver } from "../services/privacy/accountStatus.js";
+setAccountStatusResolver(() => false); // Active-account fixture for this isolated unit suite.
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import express, { NextFunction, Request, Response } from "express";
@@ -71,6 +73,7 @@ class FakeRedis implements IdempotencyRedisClient {
 interface AppOptions {
   store: IdempotencyStore;
   handlerDelayMs?: number;
+  beforeRespond?: () => Promise<void>;
   lockTtlMs?: number;
   required?: boolean;
 }
@@ -94,6 +97,7 @@ function buildApp(options: AppOptions) {
     state.executions++;
     const execution = state.executions;
     if (options.handlerDelayMs) await sleep(options.handlerDelayMs);
+    if (options.beforeRespond) await options.beforeRespond();
     if (state.throwNext > 0) {
       state.throwNext--;
       return next(new Error("database connection reset"));
@@ -247,13 +251,21 @@ for (const [label, makeStore] of [
     });
 
     it("keeps the lock alive while a slow handler outlives the lock TTL", async () => {
-      const { app, state } = buildApp({ store, handlerDelayMs: 450, lockTtlMs: 150 });
+      let entered!: () => void, release!: () => void;
+      const started = new Promise<void>(resolve => { entered = resolve; });
+      const held = new Promise<void>(resolve => { release = resolve; });
+      const { app, state } = buildApp({ store, lockTtlMs: 2000, beforeRespond: async () => { entered(); await held; } });
       // supertest is lazy: .then() sends the first request now
       const first = post(app, "key-slow", { amount: 7 }).then((res) => res);
-      await sleep(300); // past the original lock TTL
-      const duplicate = await post(app, "key-slow", { amount: 7 });
+      await started;
+      await sleep(2200); // past the original lock TTL, with the original handler still blocked
+      const duplicate = post(app, "key-slow", { amount: 7 }).then(res => res);
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const response = await Promise.race([duplicate,new Promise<never>((_resolve,reject)=>{ timeout=setTimeout(()=>reject(new Error("Duplicate request entered the blocked original handler")),2000); })]);
+        assert.equal(response.status,409);
+      } finally { if(timeout)clearTimeout(timeout);release();await duplicate; }
       const original = await first;
-      assert.equal(duplicate.status, 409);
       assert.equal(original.status, 201);
       assert.equal(state.executions, 1);
     });

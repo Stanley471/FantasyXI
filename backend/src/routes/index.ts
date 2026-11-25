@@ -27,6 +27,8 @@ import { requireAuth, requirePermission } from "../middleware/authMiddleware.js"
 import { mutationRateLimiter } from "../middleware/rateLimiter.js";
 import { Permission } from "../types/index.js";
 import { fplDataFreshness } from "../middleware/fplDataFreshness.js";
+import financialMerkleRoutes from "./financialMerkle.routes.js";
+import privacyRoutes from "./privacy.routes.js";
 
 /**
  * Main API v1 router.
@@ -34,6 +36,8 @@ import { fplDataFreshness } from "../middleware/fplDataFreshness.js";
  * Laravel equivalent: routes/api.php route groups with prefix 'v1'.
  */
 const apiV1Router = Router();
+apiV1Router.use("/financial-audit", financialMerkleRoutes);
+apiV1Router.use("/privacy",privacyRoutes);
 
 apiV1Router.use("/auth", authRoutes);
 apiV1Router.use("/admin/sync", syncRoutes);

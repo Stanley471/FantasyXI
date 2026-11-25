@@ -3,10 +3,13 @@ import cors from "cors";
 import dotenv from "dotenv";
 import apiV1Router from "./routes/index.js";
 import devRoutes from "./routes/dev.routes.js";
-import { apiRateLimiter } from "./middleware/rateLimiter.js";
+import { apiRateLimiter, authorizationRateLimiter } from "./middleware/rateLimiter.js";
 import { requestSigning } from "./middleware/requestSigning.js";
 import { errorHandler } from "./middleware/error.middleware.js";
 import { getJwks } from "./controllers/auth.controller.js";
+import { requireAuth, requirePermission } from "./middleware/authMiddleware.js";
+import { Permission } from "./config/permissions.js";
+import { securityCanary } from "./middleware/securityCanary.js";
 
 import { requestReadConsistency } from "./middleware/readConsistency.js";
 
@@ -52,6 +55,10 @@ app.use(
   })
 );
 app.use(express.json());
+app.use(securityCanary.guard);
+// Decoys have no administrative effect. Probes create a shared, expiring lockout.
+app.all(["/api/v1/admin/maintenance-shell", "/api/admin/maintenance-shell"], securityCanary.trigger);
+app.all(["/api/v1/admin/canary/:token", "/api/admin/canary/:token"], securityCanary.trigger);
 // Rate limiting runs before signature verification so unauthenticated
 // clients cannot use the HMAC check as an unthrottled oracle.
 // HMAC request signing for public read endpoints (issue #455). Pass-through
@@ -133,7 +140,7 @@ app.get("/api/health", (req: Request, res: Response) => {
  * GET /api/v1/admin/tenants - List all active tenants (admin only)
  * Requires authentication with ADMIN role
  */
-app.get("/api/v1/admin/tenants", async (_req: Request, res: Response) => {
+app.get("/api/v1/admin/tenants", authorizationRateLimiter, requireAuth, requirePermission(Permission.SECURITY_REVIEW), async (_req: Request, res: Response) => {
   try {
     const { listActiveTenants } = await import(
       "./services/tenantContextService.js"
@@ -157,7 +164,7 @@ app.get("/api/v1/admin/tenants", async (_req: Request, res: Response) => {
  * GET /api/v1/admin/tenant-stats - Get tenant boundary violation statistics
  * Shows security audit data for the last 24 hours
  */
-app.get("/api/v1/admin/tenant-stats", async (_req: Request, res: Response) => {
+app.get("/api/v1/admin/tenant-stats", authorizationRateLimiter, requireAuth, requirePermission(Permission.SECURITY_REVIEW), async (_req: Request, res: Response) => {
   try {
     const { getTenantBoundaryStats } = await import(
       "./middleware/tenantBoundary.js"
@@ -180,7 +187,7 @@ app.get("/api/v1/admin/tenant-stats", async (_req: Request, res: Response) => {
  * POST /api/v1/admin/tenants - Create a new tenant (admin only)
  * Request body: { tier: 'ENTERPRISE' | 'SPONSORED', displayName: string }
  */
-app.post("/api/v1/admin/tenants", async (req: Request, res: Response) => {
+app.post("/api/v1/admin/tenants", authorizationRateLimiter, requireAuth, requirePermission(Permission.SECURITY_REVIEW), async (req: Request, res: Response) => {
   try {
     const { tier, displayName } = req.body;
 

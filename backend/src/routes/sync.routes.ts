@@ -4,7 +4,7 @@ import {
   syncFixtures,
   syncGameweekLive,
 } from "../controllers/sync.controller.js";
-import { requireAuth, requirePermission, requireRole } from "../middleware/authMiddleware.js";
+import { requireAuth, requirePermission, requireCurrentRole } from "../middleware/authMiddleware.js";
 import { Permission, UserRole } from "../types/index.js";
 import { syncRateLimiter, mutationRateLimiter } from "../middleware/rateLimiter.js";
 
@@ -17,7 +17,7 @@ const router = Router();
 // ============================================================
 router.use(
   requireAuth,
-  requireRole(UserRole.ADMIN, UserRole.MODERATOR),
+  requireCurrentRole(UserRole.ADMIN, UserRole.MODERATOR),
   requirePermission(Permission.FPL_SYNC),
   syncRateLimiter,
   mutationRateLimiter
