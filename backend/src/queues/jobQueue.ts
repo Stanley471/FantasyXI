@@ -1,4 +1,5 @@
 import { financialService } from "../services/financial/financialService.js";
+import { dbMaintenanceWorker } from "../workers/dbMaintenanceWorker.js";
 import PgBoss from "pg-boss";
 import { collectMatchdaySyncTasks } from "../jobs/matchdayPolling.js";
 import { lockDueGameweeksAndRefreshOwnership } from "../jobs/ownershipStatsRefresh.js";
@@ -89,6 +90,8 @@ export const JOB_DEFINITIONS: JobDefinition[] = [
   { name: "jwt-key-rotation", cron: "*/15 * * * *", handler: () => jwtKeyRotationService.rotate() },
   // League integrity and collusion detection (issue #328)
   { name: "league-collusion-audit", cron: "0 */6 * * *", handler: () => auditLeaguesForCollusion() },
+  // Self-healing index fragmentation and table bloat maintenance (issue #436)
+  { name: "db-maintenance", cron: "0 2 * * *", handler: () => dbMaintenanceWorker.runOnce() },
   // Send deadline reminder emails 6 hours before gameweek deadline
   { name: "deadline-reminders", cron: "* * * * *", handler: () => sendGameweekDeadlineReminders() },
   // Soroban contract storage TTL extension worker (issue #548)
