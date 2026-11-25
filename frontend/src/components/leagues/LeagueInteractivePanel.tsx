@@ -14,6 +14,7 @@ import {
 } from "@/types";
 import { PrizeCalculator } from "@/components/leagues/PrizeCalculator";
 import { PaymentModal } from "@/components/leagues/PaymentModal";
+import { ClaimPrizeModal } from "@/components/leagues/ClaimPrizeModal";
 import { InvitationManager } from "@/components/leagues/InvitationManager";
 import { getOnChainLeague, OnChainLeagueState } from "@/lib/stellar/sorobanAudit";
 import { LiveMatchdayBar } from "@/components/live/LiveMatchdayBar";
@@ -67,6 +68,7 @@ export function LeagueInteractivePanel({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [copiedCode, setCopiedCode] = useState<boolean>(false);
   const [showPaymentModal, setShowPaymentModal] = useState<boolean>(false);
+  const [showClaimModal, setShowClaimModal] = useState<boolean>(false);
   const [liveSquadUserId, setLiveSquadUserId] = useState<string | null>(null);
   const [onChainLeague, setOnChainLeague] = useState<OnChainLeagueState | null>(null);
   const [auditError, setAuditError] = useState<string | null>(null);
@@ -188,11 +190,11 @@ export function LeagueInteractivePanel({
 
   // ── Invite code copy ──────────────────────────────────────────────────────
 
-  const copyInviteCode = () => {
+  const copyInviteCode = async () => {
     if (league.inviteCode) {
-      navigator.clipboard.writeText(league.inviteCode);
+      await navigator.clipboard.writeText(league.inviteCode);
       setCopiedCode(true);
-      toast.success("League invite code copied to clipboard!");
+      toast.success("Invite link copied to clipboard");
       setTimeout(() => setCopiedCode(false), 2000);
     }
   };
@@ -300,6 +302,7 @@ export function LeagueInteractivePanel({
             onClick={copyInviteCode}
             className="text-xs"
             title="Copy Invite Code"
+            aria-label="Copy Invite Code"
           >
             {copiedCode ? (
               <IconCheck className="w-3.5 h-3.5 text-emerald-400" />
@@ -318,6 +321,9 @@ export function LeagueInteractivePanel({
               </svg>
             )}
           </Button>
+          <span role="status" aria-live="polite" className="sr-only" data-testid="invite-code-copy-status">
+            {copiedCode ? "Invite link copied to clipboard" : ""}
+          </span>
         </div>
       )}
 
@@ -402,6 +408,17 @@ export function LeagueInteractivePanel({
               className="uppercase font-bold tracking-wide text-xs bg-amber-500 hover:bg-amber-400 text-slate-950"
             >
               Pay {league.entryFee} USDC Entry Fee
+            </Button>
+          ) : isMember && (league.status === LeagueStatus.COMPLETED || onChainLeague?.isSettled) ? (
+            <Button
+              type="button"
+              variant="primary"
+              size="md"
+              onClick={() => setShowClaimModal(true)}
+              className="uppercase font-bold tracking-wide text-xs bg-emerald-500 hover:bg-emerald-400 text-slate-950 flex items-center gap-1.5"
+            >
+              <IconTrophy className="w-4 h-4" />
+              Claim Prize
             </Button>
           ) : !isMember && !league.isPrivate ? (
             <Button
@@ -646,6 +663,25 @@ export function LeagueInteractivePanel({
           entryFee={league.entryFee}
           onPaymentSuccess={(deposit) => {
             setDepositEvidence(deposit);
+            loadLeagueData();
+          }}
+        />
+      )}
+
+      {/* Soroban Escrow Prize Claim Modal */}
+      {showClaimModal && (
+        <ClaimPrizeModal
+          isOpen={showClaimModal}
+          onClose={() => setShowClaimModal(false)}
+          leagueId={league.id}
+          leagueName={league.name}
+          prizeAmount={
+            league.prizePool > 0
+              ? Math.round(league.prizePool * 0.6 * 100) / 100
+              : 0
+          }
+          escrowContractId={escrowContractId}
+          onClaimSuccess={() => {
             loadLeagueData();
           }}
         />

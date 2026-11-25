@@ -62,6 +62,20 @@ export interface SorobanEventStore {
   commitBatch(id: string, events: DecodedSorobanEvent[], checkpoint: IngestionCheckpoint): Promise<void>;
 }
 
+/** Outcome of one catch-up run (see SorobanEventIngestionService.catchUp). */
+export interface CatchUpResult {
+  /** Ledger checkpoint before the run (null on first start). */
+  fromLedger: number | null;
+  /** Ledger checkpoint after the run. */
+  toLedger: number;
+  /** Latest ledger reported by the RPC at the end of the run. */
+  latestLedger: number;
+  pages: number;
+  events: number;
+  /** Ledgers the checkpoint was behind the network tip when the run began. */
+  gapLedgers: number;
+}
+
 /** The subset of the Soroban RPC client the daemon needs. */
 export interface SorobanEventSource {
   getEvents(request: rpc.Api.GetEventsRequest): Promise<rpc.Api.GetEventsResponse>;
@@ -313,6 +327,7 @@ export class SorobanEventIngestionService {
   private running = false;
   private timer: NodeJS.Timeout | null = null;
   private failures = 0;
+  private latestLedger: number | null = null;
 
   constructor(options: SorobanEventIngestionOptions) {
     this.source = options.source;
@@ -346,6 +361,15 @@ export class SorobanEventIngestionService {
    * Fetches, decodes and commits one page. Returns how many events it stored.
    */
   public async pollOnce(): Promise<number> {
+    return (await this.pollPage()).stored;
+  }
+
+  /** Latest network ledger seen in the most recent successful poll. */
+  public latestSeenLedger(): number | null {
+    return this.latestLedger;
+  }
+
+  private async pollPage(): Promise<{ stored: number; lastLedger: number; latestLedger: number; before: number | null }> {
     const checkpoint = await this.store.loadCheckpoint(this.checkpointId);
 
     let response: rpc.Api.GetEventsResponse;
@@ -406,7 +430,69 @@ export class SorobanEventIngestionService {
       lastLedger,
       cursor: response.cursor || checkpoint?.cursor || null,
     });
-    return decoded.length;
+
+    // The checkpoint above is only visible after the events are persisted.
+    this.latestLedger = response.latestLedger;
+    const lag = Math.max(0, response.latestLedger - lastLedger);
+    if (decoded.length > 0 || lag > 0) {
+      this.logger.info(
+        `[soroban-ingest] Ledger progress: ${checkpoint?.lastLedger ?? "start"} -> ${lastLedger} ` +
+          `(network tip ${response.latestLedger}, lag ${lag}), stored ${decoded.length} event(s)`
+      );
+    }
+    return {
+      stored: decoded.length,
+      lastLedger,
+      latestLedger: response.latestLedger,
+      before: checkpoint?.lastLedger ?? null,
+    };
+  }
+
+  /**
+   * Pages through every event between the saved checkpoint and the network tip.
+   * Run on startup and on a periodic timer so that downtime or an RPC outage is
+   * recovered without skipping a ledger: each page commits its events and the
+   * new checkpoint together, and a page that fails leaves the checkpoint where
+   * it was so the next run retries from the same position.
+   */
+  public async catchUp(maxPages = 10_000): Promise<CatchUpResult> {
+    const startCheckpoint = await this.store.loadCheckpoint(this.checkpointId);
+    let pages = 0;
+    let events = 0;
+    let last = { lastLedger: startCheckpoint?.lastLedger ?? 0, latestLedger: 0 };
+    let gapLedgers = 0;
+
+    while (pages < maxPages) {
+      const page = await this.pollPage();
+      if (pages === 0 && startCheckpoint) {
+        gapLedgers = Math.max(0, page.latestLedger - startCheckpoint.lastLedger);
+        if (gapLedgers > 1) {
+          this.logger.warn(
+            `[soroban-ingest] Gap detected: checkpoint ledger ${startCheckpoint.lastLedger} is ` +
+              `${gapLedgers} ledger(s) behind network tip ${page.latestLedger}; backfilling`
+          );
+        }
+      }
+      pages++;
+      events += page.stored;
+      last = { lastLedger: page.lastLedger, latestLedger: page.latestLedger };
+      // A short page means the cursor reached the tip.
+      if (page.stored < this.batchSize) break;
+    }
+
+    const result: CatchUpResult = {
+      fromLedger: startCheckpoint?.lastLedger ?? null,
+      toLedger: last.lastLedger,
+      latestLedger: last.latestLedger,
+      pages,
+      events,
+      gapLedgers,
+    };
+    this.logger.info(
+      `[soroban-ingest] Catch-up complete: ledgers ${result.fromLedger ?? "start"} -> ${result.toLedger}, ` +
+        `${result.events} event(s) in ${result.pages} page(s)`
+    );
+    return result;
   }
 
   public static backoffDelay(failures: number, baseMs: number, maxMs: number): number {
@@ -448,10 +534,11 @@ export class SorobanEventIngestionService {
 
   private async tick(): Promise<void> {
     try {
-      const stored = await this.pollOnce();
+      // Each tick drains everything between the checkpoint and the network tip,
+      // so startup and every periodic run also recover from downtime.
+      await this.catchUp();
       this.failures = 0;
-      // A full page means more events are waiting.
-      this.schedule(stored >= this.batchSize ? 0 : this.pollIntervalMs);
+      this.schedule(this.pollIntervalMs);
     } catch (error) {
       this.failures++;
       const delay = this.nextDelayAfterError(error, this.failures);

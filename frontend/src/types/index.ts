@@ -69,6 +69,10 @@ export interface User {
   username: string;
   name?: string | null;
   role?: "USER" | "MODERATOR" | "ADMIN";
+  /** True when the manager hides behind a "Manager #XXXX" alias in public standings (issue #511). */
+  isAnonymous?: boolean;
+  /** Deterministic public alias shown when isAnonymous is true. */
+  anonymousAlias?: string;
   /** Sign-in methods linked to the account; the same user whichever one is used */
   authProviders?: {
     password: boolean;
@@ -99,6 +103,8 @@ export interface Player {
   teamId: number;
   team?: Team;
   price: number;
+  priceDelta?: number;
+  priceChangedAt?: string | null;
   totalPoints: number;
   minutesPlayed: number;
   goalsScored: number;
@@ -111,6 +117,17 @@ export interface Player {
   selectedByPercent?: number | null;
   photoUrl: string | null;
   isAvailable: boolean;
+}
+
+export interface Notification {
+  id: string;
+  type: string;
+  title: string;
+  body?: string | null;
+  link?: string | null;
+  isRead: boolean;
+  createdAt: string;
+  readAt?: string | null;
 }
 
 export interface Fixture {
@@ -297,6 +314,8 @@ export interface LeagueStandingsEntry {
     points: number;
   }>;
   joinedAt: string;
+  /** Which official rule (if any) broke a tie on totalPoints with another squad. */
+  tieBreak?: "transfers" | "goalsScored" | "goalsConceded" | null;
 }
 
 // ============================================================
@@ -460,6 +479,8 @@ export interface LivePlayerEvent {
   redCards: number;
   saves: number;
   bonus: number;
+  bps: number;
+  provisionalBonus: number;
   totalPoints: number;
 }
 

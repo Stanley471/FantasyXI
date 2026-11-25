@@ -7,6 +7,13 @@ import { api, ApiError } from "@/lib/api";
 import { isOfflineError, loadSquadSnapshot, saveSquadSnapshot } from "@/lib/offlineStore";
 import { flushOfflineQueue } from "@/lib/offlineSyncCoordinator";
 import {
+  resolveTransferConflicts,
+  subscribeTransferConflicts,
+  type JournalSyncOutcome,
+} from "@/lib/transferJournalSync";
+import type { MergeResolutionMap } from "@/lib/mergeResolver";
+import { TransferConflictModal } from "@/components/team/TransferConflictModal";
+import {
   enqueueSquadMutation,
   getQueuedMutations,
   getQueuedMutationCount,
@@ -17,11 +24,18 @@ import {
 } from "@/lib/offlineQueue";
 import { registerServiceWorker } from "@/lib/pushNotifications";
 import { useOnlineStatus } from "@/lib/useOnlineStatus";
-import { Squad, Player, Position, SQUAD_RULES, ChipType, SquadChipUsage } from "@/types";
+import { Squad, Player, Position, SQUAD_RULES, ChipType, SquadChipUsage, Fixture, Gameweek, PlayerGameweekStats } from "@/types";
 import { Pitch } from "@/components/pitch/Pitch";
 import { Bench } from "@/components/pitch/Bench";
+import { FormationBuilder } from "@/components/pitch/FormationBuilder";
 import { BudgetBar } from "@/components/team/BudgetBar";
 import { CountdownTimer } from "@/components/team/CountdownTimer";
+import { PlayerFormSparkline } from "@/components/team/PlayerFormSparkline";
+import {
+  opponentByGameweekId,
+  toFormTrendPoints,
+  type FormTrendPoint,
+} from "@/lib/sparkline";
 import { PlayerPickerModal } from "@/components/team/PlayerPickerModal";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { validateCompleteSquad, detectFormation } from "@/lib/formation";
@@ -36,8 +50,8 @@ import { PositionBadge } from "@/components/ui/Badge";
 import { useToast } from "@/context/ToastContext";
 import {
   DndContext,
-  MouseSensor,
-  TouchSensor,
+  PointerSensor,
+  rectIntersection,
   useSensor,
   useSensors,
   DragEndEvent,
@@ -47,6 +61,7 @@ import {
 
 import { useTeamStore, LocalSquadPlayer, buildSquadPayload } from "@/store/teamStore";
 import { PlayerCard } from "@/components/pitch/PlayerCard";
+import { SquadShareExporter } from "@/components/team/SquadShareExporter";
 
 export default function TeamPage() {
   const router = useRouter();
@@ -62,7 +77,7 @@ export default function TeamPage() {
     substitutionFeedback, setSubstitutionFeedback,
     activeModalState, setActiveModalState,
     handleSwap, handleSetCaptain, handleSetViceCaptain,
-    setOwnerId, hydrateFromSquad, persistLineupOffline
+    setOwnerId, hydrateFromSquad, persistLineupOffline, recordTransfer
   } = useTeamStore();
 
   const { validateSquad: solveSquad } = useSquadSolver();
@@ -91,6 +106,16 @@ export default function TeamPage() {
   const [squadRevision, setSquadRevision] = useState<string | undefined>();
   const [conflictMutation, setConflictMutation] = useState<QueuedSquadMutation | null>(null);
   const [isSyncingOfflineQueue, setIsSyncingOfflineQueue] = useState<boolean>(false);
+  // 3-way merge conflicts from the offline transfer journal (issue #457).
+  const [transferConflict, setTransferConflict] = useState<
+    Extract<JournalSyncOutcome, { status: "conflicts" }> | null
+  >(null);
+
+  // The journal sync notifies here when a reconnect leaves conflicts to resolve.
+  useEffect(
+    () => subscribeTransferConflicts((outcome) => setTransferConflict(outcome)),
+    []
+  );
   const showingSnapshot = useRef(false);
   const userId = user?.id;
 
@@ -285,17 +310,61 @@ export default function TeamPage() {
   // Selected player object
   const selectedPlayer = players.find((p) => p.playerId === selectedPlayerId);
 
+  // Form trend for the Player Details modal: last-5-gameweeks points plus the
+  // opponent faced each gameweek, from the player detail and fixtures APIs.
+  // Each fetch degrades independently so a fixtures failure still shows points.
+  // No state is set synchronously here: `formPlayerId` records which player
+  // the shown trend belongs to (async callbacks only), and loading is derived
+  // from whether it matches the selected player, so switching players shows
+  // the skeleton instead of the previous player's trend.
+  const [playerFormTrend, setPlayerFormTrend] = useState<FormTrendPoint[]>([]);
+  const [formPlayerId, setFormPlayerId] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!selectedPlayer) return;
+    let cancelled = false;
+    const playerId = selectedPlayer.playerId;
+    const teamId = selectedPlayer.player.teamId;
+    const playerRequest = api
+      .get<{
+        success: boolean;
+        data: Player & {
+          gameweekStats?: Array<PlayerGameweekStats & { gameweek?: Gameweek }>;
+        };
+      }>(`/api/v1/players/${playerId}`)
+      .catch(() => null);
+    const fixturesRequest = api
+      .get<{ success: boolean; data: Fixture[] }>(
+        `/api/v1/fixtures?teamId=${teamId}`
+      )
+      .catch(() => null);
+    Promise.all([playerRequest, fixturesRequest]).then(
+      ([playerRes, fixtureRes]) => {
+        if (cancelled) return;
+        const stats = playerRes?.data?.gameweekStats ?? [];
+        const fixtures = Array.isArray(fixtureRes?.data) ? fixtureRes.data : [];
+        setPlayerFormTrend(
+          toFormTrendPoints(stats, opponentByGameweekId(fixtures, teamId))
+        );
+        setFormPlayerId(playerId);
+      }
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedPlayer]);
+
+  const isPlayerFormLoading =
+    selectedPlayer !== undefined && formPlayerId !== selectedPlayer.playerId;
+
   // DND Handlers
+  // PointerSensor (#462) unifies mouse and touch through pointer events so
+  // one drag gesture works on desktop cursors and touch devices alike.
+  // An 8px activation distance keeps taps/clicks from starting a drag.
   const sensors = useSensors(
-    useSensor(MouseSensor, {
+    useSensor(PointerSensor, {
       activationConstraint: {
-        distance: 10,
-      },
-    }),
-    useSensor(TouchSensor, {
-      activationConstraint: {
-        delay: 350,
-        tolerance: 8,
+        distance: 8,
       },
     })
   );
@@ -318,10 +387,16 @@ export default function TeamPage() {
       const overIdNum = Number(over.id);
 
       if (!isNaN(activeIdNum) && !isNaN(overIdNum)) {
+        // A rejected swap leaves rejectedSwap in the store, so the dragged
+        // card snaps back with the contextual warning (#462).
         handleSwap(activeIdNum, overIdNum);
       }
       setSelectedPlayerId(null);
     }
+  };
+
+  const handleDragCancel = () => {
+    setActiveDragPlayer(null);
   };
 
   // Auto-pick balanced squad logic
@@ -470,6 +545,7 @@ export default function TeamPage() {
     const replacing = activeModalState.replacingPlayer;
     if (!replacing) return;
 
+    const replacingLocal = players.find((p) => p.playerId === replacing.id);
     setPlayers((prev) => {
       const idx = prev.findIndex((p) => p.playerId === replacing.id);
       if (idx === -1) return prev;
@@ -483,7 +559,40 @@ export default function TeamPage() {
       return clone;
     });
 
+    // Offline: record the transfer in the journal for the 3-way merge.
+    if (!isOnline && replacingLocal) recordTransfer(newPlayer, replacingLocal);
+
     setSelectedPlayerId(null);
+  };
+
+  // Applies the manager's per-conflict choices and resumes the journal sync.
+  const handleResolveTransferConflicts = async (resolutions: MergeResolutionMap) => {
+    if (!transferConflict) return;
+    const pending = transferConflict;
+    setTransferConflict(null);
+    try {
+      const outcome = await resolveTransferConflicts({
+        squadId,
+        userId: userId ?? null,
+        squadName,
+        conflicts: pending.conflicts,
+        resolutions,
+        base: pending.base,
+        local: pending.local,
+        remote: pending.remote,
+        merged: pending.merged,
+      });
+      if (outcome.status === "synced") {
+        toast.success("Offline transfers synced after resolving the conflicts.");
+      } else if (outcome.status === "held") {
+        toast.info("Your draft is saved on this device for the next gameweek.");
+      } else {
+        toast.info("Offline draft discarded; the server squad stands.");
+      }
+      await refreshQueueCount();
+    } catch {
+      toast.error("Couldn't apply the resolutions. Your draft is still saved on this device.");
+    }
   };
 
   // Save changes to backend with optimistic rollback or offline queue
@@ -656,7 +765,7 @@ export default function TeamPage() {
 
   if (isLoading) {
     return (
-      <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
+      <DndContext sensors={sensors} collisionDetection={rectIntersection} onDragStart={handleDragStart} onDragEnd={handleDragEnd} onDragCancel={handleDragCancel}>
         <div className="space-y-6 pb-12">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white border border-slate-200/80 p-6 sm:p-7 rounded-3xl shadow-sm">
             <div>
@@ -697,7 +806,7 @@ export default function TeamPage() {
   }
 
   return (
-    <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
+    <DndContext sensors={sensors} collisionDetection={rectIntersection} onDragStart={handleDragStart} onDragEnd={handleDragEnd} onDragCancel={handleDragCancel}>
       <div className="space-y-6 pb-12">
         {/* Top Header & Squad Name */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white border border-slate-200/80 p-6 sm:p-7 rounded-3xl shadow-sm">
@@ -758,6 +867,14 @@ export default function TeamPage() {
           </div>
         </div>
 
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white border border-slate-200/80 px-5 py-4 rounded-2xl shadow-sm">
+          <div>
+            <h2 className="text-sm font-black uppercase text-slate-900">Share squad</h2>
+            <p className="text-[11px] text-slate-500">Export your active formation as a high-resolution graphic</p>
+          </div>
+          <SquadShareExporter players={players} squadName={squadName} managerHandle={user?.username ?? "manager"} />
+        </div>
+
         {/* Offline Queue Status Banner */}
         {queuedMutationsCount > 0 && (
           <div
@@ -816,6 +933,15 @@ export default function TeamPage() {
             </div>
           </section>
         )}
+
+        {/* Offline transfer journal conflicts (issue #457): server vs local draft */}
+        <TransferConflictModal
+          open={transferConflict !== null}
+          conflicts={transferConflict?.conflicts ?? []}
+          squadName={squadName}
+          onResolve={handleResolveTransferConflicts}
+          onCancel={() => setTransferConflict(null)}
+        />
 
         {/* Offline mode: read-only view of the squad saved on this device */}
         {(offlineSnapshotAt || !isOnline) && queuedMutationsCount === 0 && (
@@ -916,6 +1042,9 @@ export default function TeamPage() {
                   </div>
                 </div>
               </div>
+              <div className="px-5 pt-4">
+                <PlayerFormSparkline points={playerFormTrend} loading={isPlayerFormLoading} />
+              </div>
               <div className="p-5 grid gap-2.5">
                 {selectedPlayer.isStarter && (
                   <>
@@ -973,6 +1102,10 @@ export default function TeamPage() {
         )}
 
         {/* Main Pitch View */}
+        <ErrorBoundary name="TeamBuilderFormation" fallbackTitle="Formation builder failed to render">
+          <FormationBuilder />
+        </ErrorBoundary>
+
         <ErrorBoundary name="TeamBuilderPitch" fallbackTitle="Pitch tactical view failed to render">
           <Pitch />
         </ErrorBoundary>

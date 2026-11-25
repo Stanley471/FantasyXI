@@ -17,6 +17,7 @@ import {
   syncQueuedMutations,
 } from "@/lib/offlineQueue";
 import { saveSquadSnapshot } from "@/lib/offlineStore";
+import { syncTransferJournal } from "@/lib/transferJournalSync";
 import { useTeamStore } from "@/store/teamStore";
 import { Squad } from "@/types";
 
@@ -89,7 +90,37 @@ export async function flushOfflineQueue(): Promise<SyncResult> {
   if (result.succeeded > 0 || result.rejected.length > 0) {
     await reconcileWithServer().catch(() => undefined);
   }
+
+  // Transfer journal (issue #457): merge the offline draft against the
+  // current server squad once the queue has flushed. Skipped while the
+  // network or session is down — the journal sync reports that itself —
+  // and never allowed to break the queue flush.
+  if (result.halted !== "offline" && result.halted !== "unauthorized") {
+    await syncTransferJournalFromStore().catch(() => undefined);
+  }
   return result;
+}
+
+/**
+ * Runs the journal's 3-way merge for the signed-in manager's squad.
+ * Clean merges commit through the squad API; conflicts are held and the
+ * team page opens the resolution modal via the journal's subscribers.
+ */
+async function syncTransferJournalFromStore(): Promise<void> {
+  const { ownerId, squadId, squadName } = useTeamStore.getState();
+  if (!ownerId) return;
+  const outcome = await syncTransferJournal({ squadId, userId: ownerId, squadName });
+  if (outcome.status === "synced") {
+    emitToast.success(
+      `Synced ${outcome.committed} offline transfer${outcome.committed === 1 ? "" : "s"} from your draft journal.`
+    );
+    await reconcileWithServer().catch(() => undefined);
+  } else if (outcome.status === "conflicts") {
+    emitToast.warning(
+      "Some offline transfers conflict with the server squad. Review them to finish syncing.",
+      { title: "Transfer conflicts need your decision", duration: 10_000 }
+    );
+  }
 }
 
 /** Wires the flush triggers; returns a function that removes them. */

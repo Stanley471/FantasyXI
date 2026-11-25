@@ -16,6 +16,7 @@ import { stellarConfig } from "../../config/stellar.js";
 import { StellarService, stellarService } from "./stellarService.js";
 import { PrizeService } from "../league/prizeService.js";
 import { createSettlementProof } from "./settlementProof.js";
+import { payoutAuditAnchorService } from "../audit/payoutAuditAnchorService.js";
 import { EmailService, emailService } from "../email/emailService.js";
 import {
   PayoutDeadLetterService,
@@ -195,6 +196,63 @@ export class FinancialService {
       .slice(0, 8)
       .toUpperCase();
     return `FXI:${cleanLeague}:${cleanUser}`;
+  }
+
+  /**
+   * Cursor-paginated, filterable view of a user's own transaction history
+   * (issue #496). Cursors are opaque transaction IDs; pagination walks the
+   * `(userId, createdAt)` index newest-first.
+   */
+  public async listUserTransactions(
+    userId: string,
+    options: {
+      limit?: number;
+      before?: string;
+      after?: string;
+      status?: TransactionStatus;
+      type?: TransactionType;
+    } = {}
+  ): Promise<{
+    transactions: unknown[];
+    nextCursor: string | null;
+    prevCursor: string | null;
+  }> {
+    const limit = Math.min(100, Math.max(1, options.limit ?? 20));
+    const where: Record<string, unknown> = { userId };
+    if (options.status) where.status = options.status;
+    if (options.type) where.type = options.type;
+
+    const orderBy = [{ createdAt: "desc" as const }, { id: "desc" as const }];
+
+    if (options.before) {
+      // Walk backwards: Prisma returns the page immediately before the
+      // cursor already in the requested (newest-first) orderBy direction.
+      const rows = await this.db.transaction.findMany({
+        where,
+        orderBy,
+        cursor: { id: options.before },
+        skip: 1,
+        take: -limit,
+      });
+      return {
+        transactions: rows,
+        nextCursor: rows.length > 0 ? rows[rows.length - 1].id : null,
+        prevCursor: rows.length === limit ? rows[0].id : null,
+      };
+    }
+
+    const rows = await this.db.transaction.findMany({
+      where,
+      orderBy,
+      take: limit,
+      ...(options.after ? { cursor: { id: options.after }, skip: 1 } : {}),
+    });
+
+    return {
+      transactions: rows,
+      nextCursor: rows.length === limit ? rows[rows.length - 1].id : null,
+      prevCursor: options.after && rows.length > 0 ? rows[0].id : null,
+    };
   }
 
   /**
@@ -826,6 +884,9 @@ export class FinancialService {
         prizeAmount: winner.prizeAmount,
       })),
     });
+    const heldWinnerUserIds = sortedMembers
+      .filter((member: any) => member.payoutHoldAt && winners.some((winner) => winner.userId === member.userId))
+      .map((member: any) => member.userId);
 
     return {
       leagueId: league.id,
@@ -837,10 +898,14 @@ export class FinancialService {
       platformFee: distribution.platformFee,
       netPrizePool: distribution.prizePool,
       winners,
+      ...(heldWinnerUserIds.length > 0 ? { heldWinnerUserIds } : {}),
       ...(league.payoutPreset && league.payoutPreset !== "standard" && distribution.prizePool > 0 && winners.length > 0
         ? { distributionBps: PrizeService.encodeSorobanPayoutAmounts(winners.map((winner) => winner.prizeAmount), distribution.prizePool) }
         : {}),
-      canSettle: true,
+      canSettle: heldWinnerUserIds.length === 0,
+      ...(heldWinnerUserIds.length > 0
+        ? { unsettledReason: "Settlement is on administrative hold while winner fraud signals are reviewed." }
+        : {}),
       proofHash,
     };
   }
@@ -1032,6 +1097,7 @@ export class FinancialService {
       await tx.coordinatedTransaction.updateMany({ where: { settlementKey: leagueId },
         data: { status: "SUCCESS", ledgerSeq, finalizedAt: confirmedAt, transactionId: ledgerRows[0].id } });
     });
+    await payoutAuditAnchorService.recordSettlement(txHash);
     return { leagueId, contractLeagueId: FinancialService.toContractLeagueId(leagueId).toString(),
       stellarTxHash: txHash, ledgerSeq, winnerTransactionCount: plan.winners.length, platformFee: plan.platformFee };
   }

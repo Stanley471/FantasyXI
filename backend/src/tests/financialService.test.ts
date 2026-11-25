@@ -676,6 +676,35 @@ describe("FinancialService State Machine & Accounting", () => {
       );
     });
 
+    it("blocks automated settlement while a winning account has a fraud payout hold", async () => {
+      const mockDb = createMockDb();
+      mockDb.state.leagues.set("league_held", {
+        id: "league_held",
+        name: "Held Cash Cup",
+        entryFee: 10,
+        status: LeagueStatus.ACTIVE,
+        creatorId: "creator_user",
+        members: [{
+          id: "held_member",
+          userId: "held_user",
+          leagueId: "league_held",
+          status: MembershipStatus.ACTIVE,
+          paymentStatus: PaymentStatus.PAYMENT_CONFIRMED,
+          stellarAddress: testWallet1,
+          joinedAt: new Date(),
+          payoutHoldAt: new Date(),
+          payoutHoldReason: "Automated collusion review",
+          payoutRiskScore: 92,
+          user: { username: "Held Manager" },
+          squad: { name: "Held Squad", totalPoints: 100 },
+        }],
+      });
+      const plan = await new FinancialService(mockDb, createMockStellar()).prepareSettlement("league_held", "creator_user");
+      assert.equal(plan.canSettle, false);
+      assert.deepEqual(plan.heldWinnerUserIds, ["held_user"]);
+      assert.match(plan.unsettledReason ?? "", /administrative hold/i);
+    });
+
     it("should split a first-place tie and dispatch confirmed transactions atomically", async () => {
       const mockDb = createMockDb();
       const members = [1, 2].map((i) => ({

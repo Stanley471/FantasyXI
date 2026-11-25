@@ -25,6 +25,7 @@ function eventLabels(e: LivePlayerEvent): Array<{ label: string; className: stri
   if (e.redCards) labels.push({ label: "Red", className: "text-rose-400" });
   if (e.saves) labels.push({ label: `${e.saves} saves`, className: "text-slate-300" });
   if (e.bonus) labels.push({ label: `+${e.bonus} bonus`, className: "text-violet-300" });
+  if (e.provisionalBonus) labels.push({ label: `+${e.provisionalBonus} projected`, className: "text-fuchsia-300" });
   return labels;
 }
 

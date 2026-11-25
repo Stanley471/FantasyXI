@@ -322,7 +322,7 @@ describe("GET /api/v1/leaderboard", () => {
     const body = await res.json();
 
     assert.equal(body.data.viewer.rank, 6);
-    assert.equal(spy.mock.calls[0].arguments[1], "user-frank");
+    assert.deepEqual(spy.mock.calls[0].arguments[1], { id: "user-frank", role: "USER" });
     spy.mock.restore();
   });
 

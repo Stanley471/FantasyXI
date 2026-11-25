@@ -1,11 +1,14 @@
 import DataLoader from "dataloader";
 import { prisma } from "../config/db.js";
+import { displayUsername, type PrivacyViewer } from "../services/privacy/displayName.js";
 
 export interface GraphQLContext {
   loaders: {
     users: DataLoader<string, Awaited<ReturnType<typeof prisma.user.findMany>>[number] | null>;
     players: DataLoader<number, Awaited<ReturnType<typeof prisma.player.findMany>>[number] | null>;
   };
+  /** Signed-in viewer when a Bearer token was presented; undefined when anonymous. */
+  viewer?: PrivacyViewer;
 }
 
 const userInclude = {
@@ -41,6 +44,34 @@ export const createResolvers = (database: typeof prisma = prisma) => ({
   },
   User: {
     countryCode: (user: { countryCode?: string | null }) => user.countryCode,
+    /**
+     * Anonymous managers show as "Manager #XXXX" to everyone except
+     * themselves and platform admins (issue #511). The flag travels on the
+     * user record, so this covers users, user, leagues and league alike.
+     */
+    username: (
+      user: { id: string; username: string; isAnonymous?: boolean | null },
+      _args: unknown,
+      context?: GraphQLContext
+    ) =>
+      displayUsername(
+        { id: user.id, username: user.username, isAnonymous: user.isAnonymous },
+        context?.viewer
+      ),
+    /**
+     * The real name is visible only to the manager themselves and platform
+     * admins (issue #511); everyone else reads null.
+     */
+    name: (
+      user: { id: string; name?: string | null },
+      _args: unknown,
+      context?: GraphQLContext
+    ) => {
+      if (!user.name) return null;
+      const viewer = context?.viewer;
+      if (viewer && (viewer.id === user.id || viewer.role === "ADMIN")) return user.name;
+      return null;
+    },
   },
   Player: {
     price: (player: { price: unknown }) => Number(player.price),

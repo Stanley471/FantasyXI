@@ -11,6 +11,7 @@ import {
   initWebVitals,
   getQueueLength,
   getRating,
+  sanitizeTelemetryValue,
 } from '../lib/telemetry.js';
 
 // ---------------------------------------------------------------------------
@@ -116,7 +117,7 @@ describe('Telemetry System', () => {
         flush();
 
         assert.equal(calls.length, 1);
-        assert.equal(calls[0].url, '/api/telemetry');
+        assert.match(calls[0].url, /\/api\/telemetry$/);
 
         const parsed = JSON.parse(calls[0].data) as { events: unknown[] };
         assert.ok(Array.isArray(parsed.events));
@@ -277,6 +278,20 @@ describe('Telemetry System', () => {
 
     it('should default to "good" for unknown metric names', () => {
       assert.equal(getRating('UNKNOWN_METRIC', 9999), 'good');
+    });
+  });
+
+  describe('privacy and grouping', () => {
+    it('redacts token fields and PII values', () => {
+      assert.equal(sanitizeTelemetryValue('Bearer abc.def.ghi', 'authorization'), '[REDACTED]');
+      assert.equal(sanitizeTelemetryValue('manager@example.test failed', 'message'), '[REDACTED] failed');
+    });
+
+    it('deduplicates equivalent errors in the pending batch', () => {
+      const before = getQueueLength();
+      trackError(new Error('same failure'));
+      trackError(new Error('same failure'));
+      assert.equal(getQueueLength(), before + 1);
     });
   });
 });
