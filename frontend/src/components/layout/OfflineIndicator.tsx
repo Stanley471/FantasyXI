@@ -1,11 +1,20 @@
 "use client";
 
-import React, { useEffect } from "react";
+import React, { useEffect, useRef } from "react";
 import { useOnlineStatus } from "@/lib/useOnlineStatus";
 import { startOfflineSyncCoordinator } from "@/lib/offlineSyncCoordinator";
+import { emitToast } from "@/context/ToastContext";
 
 export function OfflineIndicator() {
   const isOffline = !useOnlineStatus();
+  const wasOffline = useRef(isOffline);
+
+  useEffect(() => {
+    if (wasOffline.current && !isOffline) {
+      emitToast.success("Back online", { duration: 3000 });
+    }
+    wasOffline.current = isOffline;
+  }, [isOffline]);
 
   useEffect(() => {
     // Register Service Worker for PWA offline capabilities

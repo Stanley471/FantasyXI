@@ -32,6 +32,7 @@ import {
   StrKey,
   xdr,
   Transaction,
+  SorobanDataBuilder,
 } from "@stellar/stellar-sdk";
 import {
   SorobanTransactionReplayQueue,
@@ -102,6 +103,7 @@ export interface InvocationResult {
   humanError?: string;
   isRetryable?: boolean;
   uncertain?: boolean;
+  gasConsumed?: string;
 }
 
 export type DepositSimulationResult =
@@ -821,6 +823,49 @@ export class SorobanContractClient {
   }
 
   /**
+   * Executes a multi-signature authorized refund (e.g. 2-of-3) across participants.
+   * Rejects locally before broadcasting to Soroban RPC if fewer than `requiredThreshold`
+   * distinct signers are provided.
+   */
+  public async refundWithMultisig(
+    approverSecrets: string[],
+    leagueId: number | bigint,
+    participants: string[],
+    requiredThreshold: number
+  ): Promise<InvocationResult> {
+    if (requiredThreshold < 1) {
+      return this.failure("Refund multisig threshold must be at least 1");
+    }
+    const distinctApprovers = new Set(approverSecrets).size;
+    if (distinctApprovers < requiredThreshold) {
+      return this.failure(
+        `Insufficient signatures for multisig refund: ${distinctApprovers} of ${requiredThreshold} required signer(s) provided`
+      );
+    }
+    return this.invokeWithMultisig(approverSecrets, "execute_multisig_refund", (approvals) => [
+      approvals,
+      SorobanContractClient.u64(leagueId),
+      xdr.ScVal.scvVec(participants.map((p) => SorobanContractClient.address(p))),
+    ]);
+  }
+
+  /**
+   * Executes an automated timeout proportional refund once the dispute lock window elapses.
+   */
+  public async executeTimeoutProportionalRefund(
+    callerSecret: string,
+    callerPublic: string,
+    leagueId: number | bigint,
+    proposalId: number | bigint
+  ): Promise<InvocationResult> {
+    return this.invoke(callerSecret, this.escrowContractId, "execute_timeout_refund", [
+      SorobanContractClient.address(callerPublic),
+      SorobanContractClient.u64(leagueId),
+      SorobanContractClient.u64(proposalId),
+    ]);
+  }
+
+  /**
    * Admin refunds deposits for cancelled league.
    */
   public async refund(
@@ -1250,5 +1295,101 @@ export class SorobanContractClient {
       nativeToScVal(thresholdLedgers, { type: "u32" }),
       nativeToScVal(extendToLedgers, { type: "u32" }),
     ]);
+  }
+
+  /**
+   * Extends the TTL for one or more ledger keys using Operation.extendFootprintTtl (issue #548).
+   */
+  public async extendFootprintTtl(
+    sourceSecret: string,
+    keys: xdr.LedgerKey[],
+    extendToLedgers: number = 518400
+  ): Promise<InvocationResult> {
+    return executeWithRetry(
+      async () => {
+        try {
+          const keypair = Keypair.fromSecret(sourceSecret);
+          const fee = await this.feeOracle.estimateInclusionFee();
+          const account = await this.server.getAccount(keypair.publicKey());
+
+          const builder = new SorobanDataBuilder();
+          builder.setReadOnly(keys);
+
+          const tx = new TransactionBuilder(account, {
+            fee,
+            networkPassphrase: this.networkPassphrase,
+          })
+            .setSorobanData(builder.build())
+            .addOperation(Operation.extendFootprintTtl({ extendTo: extendToLedgers }))
+            .setTimeout(30)
+            .build();
+
+          const simulation = await this.server.simulateTransaction(tx);
+          if (rpc.Api.isSimulationError(simulation)) {
+            return this.failure(`Simulation failed: ${simulation.error}`);
+          }
+
+          const prepared = rpc.assembleTransaction(tx, simulation).build();
+          await this.signer.sign(prepared, sourceSecret);
+          const pollRes = await this.sendAndPoll(prepared);
+          return {
+            ...pollRes,
+            gasConsumed: simulation.minResourceFee || "0",
+          };
+        } catch (error) {
+          const errorMsg = (error as Error).message;
+          const parsed = parseSorobanError(errorMsg);
+          if (parsed.isRetryable) {
+            throw error;
+          }
+          return this.failure(errorMsg);
+        }
+      },
+      { maxRetries: 2, initialDelayMs: 250 }
+    );
+  }
+
+  /**
+   * Extend contract instance TTL on-chain using Operation.extendFootprintTtl (issue #548).
+   */
+  public async extendContractInstanceTtl(
+    adminSecret: string,
+    extendToLedgers: number = 518400
+  ): Promise<InvocationResult> {
+    const contractScAddress = new Address(this.escrowContractId).toScAddress();
+    const instanceKey = xdr.LedgerKey.contractData(
+      new xdr.LedgerKeyContractData({
+        contract: contractScAddress,
+        key: xdr.ScVal.scvLedgerKeyContractInstance(),
+        durability: typeof (xdr.ContractDataDurability as any).persistent === "function"
+          ? (xdr.ContractDataDurability as any).persistent()
+          : xdr.ContractDataDurability.persistent,
+      })
+    );
+    return this.extendFootprintTtl(adminSecret, [instanceKey], extendToLedgers);
+  }
+
+  /**
+   * Extend contract persistent data storage TTL on-chain for a league using Operation.extendFootprintTtl (issue #548).
+   */
+  public async extendContractDataTtl(
+    adminSecret: string,
+    leagueId: number | bigint,
+    extendToLedgers: number = 518400
+  ): Promise<InvocationResult> {
+    const contractScAddress = new Address(this.escrowContractId).toScAddress();
+    const leagueKey = xdr.LedgerKey.contractData(
+      new xdr.LedgerKeyContractData({
+        contract: contractScAddress,
+        key: xdr.ScVal.scvVec([
+          xdr.ScVal.scvSymbol("League"),
+          SorobanContractClient.u64(leagueId),
+        ]),
+        durability: typeof (xdr.ContractDataDurability as any).persistent === "function"
+          ? (xdr.ContractDataDurability as any).persistent()
+          : xdr.ContractDataDurability.persistent,
+      })
+    );
+    return this.extendFootprintTtl(adminSecret, [leagueKey], extendToLedgers);
   }
 }

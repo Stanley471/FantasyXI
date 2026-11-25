@@ -13,6 +13,11 @@ import { prisma } from "../../config/db.js";
 import { getRedisClient } from "../../config/redis.js";
 import { eventFanout, type EventFanout } from "./eventFanout.js";
 import type { LiveWebSocketGateway } from "./liveTimelineService.js";
+import {
+  displayUsername,
+  normalizeViewer,
+  type PrivacyViewer,
+} from "../privacy/displayName.js";
 
 export interface IRedisZSetPipeline {
   zincrby(key: string, increment: number, member: string): this;
@@ -49,6 +54,8 @@ export interface ProvisionalSquadRegistration {
   squadId: string;
   userId: string;
   username: string;
+  /** True when the manager hides behind a "Manager #XXXX" alias (issue #511). */
+  isAnonymous?: boolean;
   squadName: string;
   leagueIds: string[];
   /** Completed gameweek points prior to the active gameweek */
@@ -91,6 +98,8 @@ export interface ProvisionalLeaderboardEntry {
   squadId: string;
   userId: string;
   username: string;
+  /** True when the manager hides behind a "Manager #XXXX" alias (issue #511). */
+  isAnonymous?: boolean;
   squadName: string;
   basePoints: number;
   livePoints: number;
@@ -102,6 +111,8 @@ export interface SquadRankDiff {
   squadId: string;
   userId: string;
   username: string;
+  /** True when the manager hides behind a "Manager #XXXX" alias (issue #511). */
+  isAnonymous?: boolean;
   squadName: string;
   oldRank: number | null;
   newRank: number;
@@ -117,6 +128,29 @@ export interface LeagueRankDiffPayload {
   gameweekId: number;
   updatedAt: string;
   diffs: SquadRankDiff[];
+}
+
+/**
+ * Masks anonymous managers in a broadcast rank-diff payload for one viewer
+ * (issue #511). Returns a copy; the shared payload is never mutated, so
+ * each SSE connection gets its own view while the owner themselves and
+ * platform admins still see real usernames.
+ */
+export function maskProvisionalDiffPayloadForViewer(
+  payload: LeagueRankDiffPayload,
+  viewerOrId?: string | PrivacyViewer | null
+): LeagueRankDiffPayload {
+  const viewer = normalizeViewer(viewerOrId);
+  return {
+    ...payload,
+    diffs: payload.diffs.map((diff) => ({
+      ...diff,
+      username: displayUsername(
+        { id: diff.userId, username: diff.username, isAnonymous: diff.isAnonymous },
+        viewer
+      ),
+    })),
+  };
 }
 
 export type LiveMatchEvent = LiveMatchPointEvent;
@@ -156,6 +190,8 @@ interface InternalSquadState {
   squadId: string;
   userId: string;
   username: string;
+  /** True when the manager hides behind a "Manager #XXXX" alias (issue #511). */
+  isAnonymous?: boolean;
   squadName: string;
   leagueIds: string[];
   basePoints: number;
@@ -291,6 +327,7 @@ export class LiveProvisionalLeaderboardService {
         squadId: reg.squadId,
         userId: reg.userId,
         username: reg.username,
+        isAnonymous: Boolean(reg.isAnonymous),
         squadName: reg.squadName,
         leagueIds: [...reg.leagueIds],
         basePoints: reg.basePoints,
@@ -393,7 +430,7 @@ export class LiveProvisionalLeaderboardService {
       include: {
         members: {
           include: {
-            user: { select: { username: true } },
+            user: { select: { username: true, isAnonymous: true } },
             squad: {
               include: {
                 players: true,
@@ -428,6 +465,7 @@ export class LiveProvisionalLeaderboardService {
           squadId: member.squadId,
           userId: member.userId,
           username: member.user?.username ?? "manager",
+          isAnonymous: Boolean(member.user?.isAnonymous),
           squadName: member.squad?.name ?? "Squad",
           leagueIds: [league.id],
           basePoints: completedPoints || (member.totalPoints ?? 0),
@@ -680,6 +718,7 @@ export class LiveProvisionalLeaderboardService {
           squadId: entry.squad.squadId,
           userId: entry.squad.userId,
           username: entry.squad.username,
+          isAnonymous: Boolean(entry.squad.isAnonymous),
           squadName: entry.squad.squadName,
           oldRank,
           newRank,
@@ -699,10 +738,16 @@ export class LiveProvisionalLeaderboardService {
 
   /**
    * Returns current provisional live standings for a league in O(N) without any DB query.
+   * Anonymous managers show as "Manager #XXXX" to everyone except themselves
+   * and platform admins (issue #511).
    */
-  public getLeagueLeaderboard(leagueId: string): ProvisionalLeaderboardEntry[] {
+  public getLeagueLeaderboard(
+    leagueId: string,
+    viewerOrId?: string | PrivacyViewer
+  ): ProvisionalLeaderboardEntry[] {
     const league = this.leagues.get(leagueId);
     if (!league) return [];
+    const viewer = normalizeViewer(viewerOrId);
 
     return league.entries.map((entry) => ({
       rank: entry.rank,
@@ -711,7 +756,11 @@ export class LiveProvisionalLeaderboardService {
       rankDelta: entry.previousRank !== null ? entry.previousRank - entry.rank : 0,
       squadId: entry.squad.squadId,
       userId: entry.squad.userId,
-      username: entry.squad.username,
+      username: displayUsername(
+        { id: entry.squad.userId, username: entry.squad.username, isAnonymous: entry.squad.isAnonymous },
+        viewer
+      ),
+      isAnonymous: Boolean(entry.squad.isAnonymous),
       squadName: entry.squad.squadName,
       basePoints: entry.squad.basePoints,
       livePoints: entry.squad.livePoints,
@@ -725,12 +774,14 @@ export class LiveProvisionalLeaderboardService {
    */
   public getSquadLeaguePosition(
     leagueId: string,
-    squadId: string
+    squadId: string,
+    viewerOrId?: string | PrivacyViewer
   ): ProvisionalLeaderboardEntry | null {
     const league = this.leagues.get(leagueId);
     if (!league) return null;
     const entry = league.entryBySquadId.get(squadId);
     if (!entry) return null;
+    const viewer = normalizeViewer(viewerOrId);
 
     return {
       rank: entry.rank,
@@ -739,7 +790,11 @@ export class LiveProvisionalLeaderboardService {
       rankDelta: entry.previousRank !== null ? entry.previousRank - entry.rank : 0,
       squadId: entry.squad.squadId,
       userId: entry.squad.userId,
-      username: entry.squad.username,
+      username: displayUsername(
+        { id: entry.squad.userId, username: entry.squad.username, isAnonymous: entry.squad.isAnonymous },
+        viewer
+      ),
+      isAnonymous: Boolean(entry.squad.isAnonymous),
       squadName: entry.squad.squadName,
       basePoints: entry.squad.basePoints,
       livePoints: entry.squad.livePoints,

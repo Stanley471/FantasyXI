@@ -21,10 +21,12 @@ import {
   revokeLeagueInvitation,
   previewLeagueInvitation,
   acceptLeagueInvitation,
+  inviteLeagueMemberByEmail,
 } from "../controllers/league.controller.js";
 import { requireAuth, requirePermission, optionalAuth, requireRole } from "../middleware/authMiddleware.js";
 import { Permission, UserRole } from "../types/index.js";
 import { authenticatedRateLimiter, mutationRateLimiter } from "../middleware/rateLimiter.js";
+import { leagueInviteRateLimiter } from "../middleware/leagueInviteRateLimiter.js";
 import { primaryReads } from "../middleware/readConsistency.js";
 import { getChatMessages, postChatMessage } from "../controllers/chat.controller.js";
 import { requireDepositRangeProof } from "../middleware/depositRangeProof.js";
@@ -54,17 +56,18 @@ router.get("/:id", optionalAuth, getLeagueById);
 // POST /api/v1/leagues/:id/join (Protected: member identity derived from token)
 router.post("/:id/join", requireAuth, authenticatedRateLimiter, mutationRateLimiter, requirePermission(Permission.LEAGUE_JOIN), joinLeague);
 
-// GET /api/v1/leagues/:id/members (Public: view league member list)
-router.get("/:id/members", getLeagueMembers);
+// GET /api/v1/leagues/:id/members (Public: view league member list; optionalAuth so
+// the viewer themselves / admins see real names of anonymous managers, issue #511)
+router.get("/:id/members", optionalAuth, getLeagueMembers);
 
-// GET /api/v1/leagues/:id/standings (Public: view league standings)
-router.get("/:id/standings", getLeagueStandings);
+// GET /api/v1/leagues/:id/standings (Public: view league standings; optionalAuth, issue #511)
+router.get("/:id/standings", optionalAuth, getLeagueStandings);
 
-// GET /api/v1/leagues/:id/live (Public: stream live standings and matchday events)
-router.get("/:id/live", streamLeagueLive);
+// GET /api/v1/leagues/:id/live (Public: stream live standings and matchday events; optionalAuth, issue #511)
+router.get("/:id/live", optionalAuth, streamLeagueLive);
 
-// GET /api/v1/leagues/:id/h2h-standings (Public: head-to-head league table)
-router.get("/:id/h2h-standings", getH2HStandings);
+// GET /api/v1/leagues/:id/h2h-standings (Public: head-to-head league table; optionalAuth, issue #511)
+router.get("/:id/h2h-standings", optionalAuth, getH2HStandings);
 
 // POST /api/v1/leagues/:id/cancel (Protected: creator only)
 router.post("/:id/cancel", requireAuth, authenticatedRateLimiter, mutationRateLimiter, requirePermission(Permission.LEAGUE_CANCEL_OWN), cancelLeague);
@@ -88,6 +91,15 @@ router.delete(
   requireAuth,
   requirePermission(Permission.LEAGUE_MANAGE_OWN),
   revokeLeagueInvitation
+);
+
+// POST /api/v1/leagues/:id/invite (Protected: creator only) — email invite (issue #495)
+router.post(
+  "/:id/invite",
+  requireAuth,
+  requirePermission(Permission.LEAGUE_MANAGE_OWN),
+  leagueInviteRateLimiter,
+  inviteLeagueMemberByEmail
 );
 
 // League chat (Protected: creator and members only). History is read from the

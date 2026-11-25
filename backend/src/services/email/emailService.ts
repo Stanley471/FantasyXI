@@ -13,6 +13,14 @@ export interface DepositConfirmationEmailPayload {
   txHash?: string;
 }
 
+export interface LeagueInviteEmailPayload {
+  to: string;
+  leagueName: string;
+  entryFee: number | string;
+  inviteUrl: string;
+  inviterName?: string;
+}
+
 export interface CaptainInjuryAlertEmailPayload {
   to: string;
   managerName?: string;
@@ -26,6 +34,21 @@ export interface CaptainInjuryAlertEmailPayload {
   news?: string | null;
   chanceOfPlayingNextRound?: number | null;
   teamManagementUrl?: string;
+}
+
+export interface DeadlineReminderEmailPayload {
+  to: string;
+  managerName: string;
+  leagueName: string;
+  gameweekName: string;
+  deadline: Date;
+  startersCount: number;
+  benchCount: number;
+  captainName: string;
+  viceCaptainName: string;
+  squadName: string;
+  teamManagementUrl: string;
+  upcomingFixturesSummary: string;
 }
 
 export interface SendEmailOptions {
@@ -221,6 +244,93 @@ export class EmailService {
   }
 
   /**
+   * Generates clean templated text and HTML body for a league invite, sent when
+   * a league creator invites a manager by email (issue #495).
+   */
+  public generateLeagueInviteEmailTemplate(payload: LeagueInviteEmailPayload): {
+    subject: string;
+    text: string;
+    html: string;
+  } {
+    const { leagueName, entryFee, inviteUrl, inviterName = "A FantasyXI manager" } = payload;
+    const numEntryFee = typeof entryFee === "string" ? parseFloat(entryFee) : entryFee;
+    const formattedEntryFee =
+      Number.isFinite(numEntryFee) && numEntryFee > 0
+        ? `${numEntryFee.toFixed(2)} USDC`
+        : "Free entry";
+    const subject = `${inviterName} invited you to join "${leagueName}" on FantasyXI`;
+
+    const text = [
+      `Hello,`,
+      ``,
+      `${inviterName} has invited you to join the private league "${leagueName}" on FantasyXI.`,
+      ``,
+      `Entry Fee: ${formattedEntryFee}`,
+      ``,
+      `Join here: ${inviteUrl}`,
+      ``,
+      `Best regards,`,
+      `The FantasyXI Team`,
+    ].join("\n");
+
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${subject}</title>
+</head>
+<body style="font-family: Arial, sans-serif; background-color: #0f172a; color: #f8fafc; padding: 24px; margin: 0;">
+  <div style="max-width: 600px; margin: 0 auto; background-color: #1e293b; border-radius: 8px; padding: 32px; border: 1px solid #334155;">
+    <h2 style="color: #10b981; margin-top: 0;">You're Invited! ⚽🏆</h2>
+    <p><strong>${inviterName}</strong> has invited you to join their private league:</p>
+
+    <div style="background-color: #0f172a; padding: 16px; border-radius: 6px; margin: 20px 0; border-left: 4px solid #10b981;">
+      <p style="margin: 4px 0;"><strong>League:</strong> ${leagueName}</p>
+      <p style="margin: 4px 0;"><strong>Entry Fee:</strong> ${formattedEntryFee}</p>
+    </div>
+
+    <p style="margin: 24px 0; text-align: center;">
+      <a href="${inviteUrl}" style="display: inline-block; background-color: #10b981; color: #0f172a; font-weight: bold; text-decoration: none; padding: 12px 24px; border-radius: 6px;">
+        Join League
+      </a>
+    </p>
+
+    <p style="font-size: 13px; color: #cbd5e1; word-break: break-all;">
+      Or copy this link: <a href="${inviteUrl}" style="color: #38bdf8;">${inviteUrl}</a>
+    </p>
+
+    <hr style="border: 0; border-top: 1px solid #334155; margin: 24px 0;" />
+    <p style="font-size: 12px; color: #94a3b8; text-align: center;">
+      This invitation was sent via FantasyXI on behalf of ${inviterName}.
+    </p>
+  </div>
+</body>
+</html>
+    `.trim();
+
+    return { subject, text, html };
+  }
+
+  /**
+   * Sends a league invite email directly through the configured provider.
+   * Dispatched from the `league-invite-email` background queue so the
+   * HTTP request that created the invitation never waits on mail delivery.
+   */
+  public async sendLeagueInviteEmail(
+    payload: LeagueInviteEmailPayload
+  ): Promise<EmailProviderResult> {
+    const { subject, text, html } = this.generateLeagueInviteEmailTemplate(payload);
+    return this.provider.sendEmail({
+      to: payload.to,
+      subject,
+      text,
+      html,
+    });
+  }
+
+  /**
    * Generates text and HTML email template alerting a manager that their squad captain
    * has been flagged as injured ('i'), doubtful ('d'), or suspended ('s') before the deadline.
    */
@@ -336,6 +446,119 @@ export class EmailService {
     payload: CaptainInjuryAlertEmailPayload
   ): Promise<EmailProviderResult> {
     return this.enqueueCaptainInjuryAlertEmail(payload);
+  }
+
+  /**
+   * Generates text and HTML email template for gameweek deadline reminder.
+   * Includes squad lineup and upcoming fixtures summary.
+   */
+  public generateDeadlineReminderTemplate(payload: DeadlineReminderEmailPayload): {
+    subject: string;
+    text: string;
+    html: string;
+  } {
+    const deadlineTime = payload.deadline.toLocaleTimeString("en-US", {
+      hour: "2-digit",
+      minute: "2-digit",
+      timeZone: "UTC",
+    });
+
+    const deadlineDate = payload.deadline.toLocaleDateString("en-US", {
+      weekday: "long",
+      month: "short",
+      day: "numeric",
+    });
+
+    const subject = `Deadline Reminder: ${payload.gameweekName} closes in 6 hours`;
+
+    const text = [
+      `Hello ${payload.managerName},`,
+      ``,
+      `This is a friendly reminder that the ${payload.gameweekName} deadline is approaching!`,
+      ``,
+      `Deadline: ${deadlineDate} at ${deadlineTime} UTC`,
+      `League: ${payload.leagueName}`,
+      `Squad: ${payload.squadName}`,
+      ``,
+      `Your Current Lineup:`,
+      `• Starters: ${payload.startersCount} players`,
+      `• Bench: ${payload.benchCount} players`,
+      `• Captain: ${payload.captainName}`,
+      `• Vice-Captain: ${payload.viceCaptainName}`,
+      ``,
+      `Upcoming Fixtures: ${payload.upcomingFixturesSummary}`,
+      ``,
+      `Make any last-minute transfers or captaincy changes before the deadline.`,
+      ``,
+      `Good luck!`,
+      `The FantasyXI Team`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>${subject}</title>
+</head>
+<body style="font-family: Arial, sans-serif; background-color: #0f172a; color: #f8fafc; padding: 24px;">
+  <div style="max-width: 600px; margin: 0 auto; background-color: #1e293b; border-radius: 8px; padding: 32px; border: 1px solid #334155;">
+    <h2 style="color: #fbbf24; margin-top: 0;">⏰ Gameweek Deadline Reminder</h2>
+    <p>Hello <strong>${payload.managerName}</strong>,</p>
+    <p>The <strong>${payload.gameweekName}</strong> deadline is approaching in just <strong>6 hours</strong>!</p>
+
+    <div style="background-color: #0f172a; padding: 16px; border-radius: 6px; margin: 20px 0; border-left: 4px solid #fbbf24;">
+      <p style="margin: 4px 0;"><strong>Deadline:</strong> ${deadlineDate} at ${deadlineTime} UTC</p>
+      <p style="margin: 4px 0;"><strong>League:</strong> ${payload.leagueName}</p>
+      <p style="margin: 4px 0;"><strong>Squad:</strong> ${payload.squadName}</p>
+    </div>
+
+    <h3 style="color: #38bdf8; margin-top: 24px;">Your Current Lineup</h3>
+    <div style="background-color: #0f172a; padding: 16px; border-radius: 6px; border-left: 4px solid #38bdf8;">
+      <p style="margin: 8px 0;"><strong>Starters:</strong> ${payload.startersCount} players</p>
+      <p style="margin: 8px 0;"><strong>Bench:</strong> ${payload.benchCount} players</p>
+      <p style="margin: 8px 0;"><strong>🎯 Captain:</strong> <span style="color: #fbbf24;">${payload.captainName}</span></p>
+      <p style="margin: 8px 0;"><strong>🏳️ Vice-Captain:</strong> ${payload.viceCaptainName}</p>
+    </div>
+
+    <h3 style="color: #34d399; margin-top: 24px;">Upcoming Fixtures</h3>
+    <p style="background-color: #0f172a; padding: 12px; border-radius: 6px; border-left: 4px solid #34d399; margin: 0;">
+      ${payload.upcomingFixturesSummary}
+    </p>
+
+    <p style="margin: 24px 0;">
+      <a href="${payload.teamManagementUrl}" style="display: inline-block; background-color: #10b981; color: #0f172a; font-weight: bold; text-decoration: none; padding: 12px 20px; border-radius: 6px;">
+        Manage Your Squad
+      </a>
+    </p>
+
+    <hr style="border: 0; border-top: 1px solid #334155; margin: 24px 0;" />
+    <p style="font-size: 12px; color: #94a3b8; text-align: center;">
+      This is an automated deadline reminder from FantasyXI. You can disable these notifications in your account settings.
+    </p>
+  </div>
+</body>
+</html>
+    `.trim();
+
+    return { subject, text, html };
+  }
+
+  /**
+   * Sends a deadline reminder email to a manager.
+   */
+  public async sendDeadlineReminder(
+    payload: DeadlineReminderEmailPayload
+  ): Promise<EmailProviderResult> {
+    const { subject, text, html } = this.generateDeadlineReminderTemplate(payload);
+    return this.provider.sendEmail({
+      to: payload.to,
+      subject,
+      text,
+      html,
+    });
   }
 }
 
