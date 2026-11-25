@@ -29,6 +29,7 @@ import {
   AccountSignalRecorder,
 } from "../security/accountSignals.js";
 import { webAuthnService as defaultWebAuthnService, WebAuthnService } from "./webAuthnService.js";
+import { managerAliasForUserId } from "../privacy/displayName.js";
 
 /** Request-derived context used for anomalous-login detection (issues #117, #331). */
 export interface AuthRequestContext {
@@ -85,9 +86,20 @@ export class AuthNotFoundError extends Error {
   }
 }
 
+/** The caller may not change another manager's account settings. */
+export class AuthForbiddenError extends Error {
+  constructor(message: string = "You do not have permission to perform this action") {
+    super(message);
+    this.name = "AuthForbiddenError";
+  }
+}
+
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const BCRYPT_SALT_ROUNDS = 10;
 const MIN_PASSWORD_LENGTH = 8;
+const PASSWORD_UPPERCASE_REGEX = /[A-Z]/;
+const PASSWORD_DIGIT_REGEX = /[0-9]/;
+const PASSWORD_SPECIAL_CHAR_REGEX = /[^A-Za-z0-9\s]/;
 
 export function toSafeUser(user: {
   id: string;
@@ -95,6 +107,7 @@ export function toSafeUser(user: {
   username: string;
   name?: string | null;
   role?: UserRole | string | null;
+  isAnonymous?: boolean | null;
   passwordHash?: string | null;
   googleId?: string | null;
   createdAt: Date;
@@ -106,6 +119,8 @@ export function toSafeUser(user: {
     username: user.username,
     name: user.name ?? null,
     role: (user.role as UserRole | undefined) ?? UserRole.USER,
+    isAnonymous: Boolean(user.isAnonymous),
+    anonymousAlias: managerAliasForUserId(user.id),
     // Which sign-in methods the account can use; never exposes the secrets themselves
     authProviders: {
       password: Boolean(user.passwordHash),
@@ -156,6 +171,38 @@ export class AuthService {
   }
 
   /**
+   * Validates password length and character complexity rules.
+   * Collects all failed criteria so the caller receives a single descriptive
+   * error message enumerating every missing requirement.
+   */
+  public validatePassword(password: unknown): void {
+    if (!password || typeof password !== "string") {
+      throw new AuthValidationError("Password is required");
+    }
+
+    const failures: string[] = [];
+
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      failures.push(`at least ${MIN_PASSWORD_LENGTH} characters`);
+    }
+    if (!PASSWORD_UPPERCASE_REGEX.test(password)) {
+      failures.push("at least one uppercase letter");
+    }
+    if (!PASSWORD_DIGIT_REGEX.test(password)) {
+      failures.push("at least one digit");
+    }
+    if (!PASSWORD_SPECIAL_CHAR_REGEX.test(password)) {
+      failures.push("at least one special character");
+    }
+
+    if (failures.length > 0) {
+      throw new AuthValidationError(
+        `Password must contain ${failures.join(", ")}`
+      );
+    }
+  }
+
+  /**
    * Validates registration inputs.
    */
   public validateRegisterInput(input: RegisterInput): {
@@ -171,15 +218,7 @@ export class AuthService {
       throw new AuthValidationError("Invalid email address format");
     }
 
-    if (!input.password || typeof input.password !== "string") {
-      throw new AuthValidationError("Password is required");
-    }
-
-    if (input.password.length < MIN_PASSWORD_LENGTH) {
-      throw new AuthValidationError(
-        `Password must be at least ${MIN_PASSWORD_LENGTH} characters long`
-      );
-    }
+    this.validatePassword(input.password);
 
     let normalizedUsername: string | undefined;
     if (input.username) {
@@ -406,6 +445,28 @@ export class AuthService {
     }
     this.signals.record(user.id, context);
     return this.issueAuthResult(user);
+  }
+
+  /**
+   * Signs in the account whose connected Stellar wallet is `stellarAddress`.
+   * The caller must already have proven control of that key (SEP-10, issue #562);
+   * the session carries the user's real role and permissions like any other login.
+   */
+  public async loginWithStellarAccount(
+    stellarAddress: string,
+    context?: AuthRequestContext
+  ): Promise<AuthResult> {
+    const wallet = await this.db.wallet.findUnique({
+      where: { stellarAddress },
+      include: { user: true },
+    });
+    if (!wallet?.user) {
+      throw new AuthUnauthorizedError("No FantasyXI account is linked to this Stellar wallet");
+    }
+    if (context) {
+      this.signals.record(wallet.user.id, { ip: context.ip });
+    }
+    return this.issueAuthResult(wallet.user);
   }
 
   /**
@@ -655,16 +716,10 @@ export class AuthService {
    */
   public async setPassword(
     userId: string,
-    input: { password?: string; currentPassword?: string }
-  ): Promise<SafeUser> {
-    if (!input.password || typeof input.password !== "string") {
-      throw new AuthValidationError("Password is required");
-    }
-    if (input.password.length < MIN_PASSWORD_LENGTH) {
-      throw new AuthValidationError(
-        `Password must be at least ${MIN_PASSWORD_LENGTH} characters long`
-      );
-    }
+    input: { password?: string; currentPassword?: string; revokeOtherSessions?: boolean }
+  ): Promise<{ user: SafeUser; revokedSessions: number }> {
+    this.validatePassword(input.password);
+    const nextPassword = input.password as string;
 
     const user = await this.db.user.findUnique({ where: { id: userId } });
     if (!user) {
@@ -680,10 +735,46 @@ export class AuthService {
       }
     }
 
-    const passwordHash = await bcrypt.hash(input.password, BCRYPT_SALT_ROUNDS);
+    const passwordHash = await bcrypt.hash(nextPassword, BCRYPT_SALT_ROUNDS);
     const updated = await this.db.user.update({
       where: { id: userId },
       data: { passwordHash },
+    });
+
+    let revokedSessions = 0;
+    if (input.revokeOtherSessions) {
+      await new RefreshTokenService(this.db).revokeAllForUser(userId);
+      revokedSessions = await sessionRegistryService.revokeAllUserSessions(userId);
+    }
+
+    return { user: toSafeUser(updated), revokedSessions };
+  }
+
+  /**
+   * Flips the leaderboard anonymization toggle (issue #511).
+   *
+   * Only the account owner themselves or a platform admin may change the
+   * flag; any other caller gets a 403, so one manager can never unmask or
+   * mask another manager. The flag takes effect on the next standings read.
+   */
+  public async updatePrivacySettings(
+    actor: { id: string; role?: UserRole | string | null },
+    targetUserId: string,
+    isAnonymous: unknown
+  ): Promise<SafeUser> {
+    if (typeof isAnonymous !== "boolean") {
+      throw new AuthValidationError("isAnonymous must be a boolean");
+    }
+    if (actor.id !== targetUserId && actor.role !== UserRole.ADMIN) {
+      throw new AuthForbiddenError("Only the account owner or a platform admin can change privacy settings");
+    }
+    const user = await this.db.user.findUnique({ where: { id: targetUserId } });
+    if (!user) {
+      throw new AuthNotFoundError("User not found");
+    }
+    const updated = await this.db.user.update({
+      where: { id: targetUserId },
+      data: { isAnonymous },
     });
     return toSafeUser(updated);
   }

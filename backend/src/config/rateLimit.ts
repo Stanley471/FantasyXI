@@ -11,6 +11,7 @@ export interface RateLimitRouteGroup {
     anonymous: RateLimitTierConfig;
     authenticated: RateLimitTierConfig;
     webhook: RateLimitTierConfig;
+    apiKey?: RateLimitTierConfig;
   };
 }
 
@@ -18,6 +19,7 @@ const defaultTiers = {
   anonymous: { limit: 100, windowMs: 15 * 60 * 1000 },
   authenticated: { limit: 300, ipLimit: 600, windowMs: 15 * 60 * 1000 },
   webhook: { limit: 1200, ipLimit: 2400, windowMs: 15 * 60 * 1000 },
+  apiKey: { limit: 600, ipLimit: 1200, windowMs: 15 * 60 * 1000 },
 };
 
 export const RATE_LIMIT_ROUTE_GROUPS: RateLimitRouteGroup[] = [
@@ -28,6 +30,7 @@ export const RATE_LIMIT_ROUTE_GROUPS: RateLimitRouteGroup[] = [
       anonymous: { limit: 30, windowMs: 60 * 1000 },
       authenticated: { limit: 120, ipLimit: 240, windowMs: 60 * 1000 },
       webhook: { limit: 300, ipLimit: 600, windowMs: 60 * 1000 },
+      apiKey: { limit: 240, ipLimit: 480, windowMs: 60 * 1000 },
     },
   },
   {
@@ -37,6 +40,7 @@ export const RATE_LIMIT_ROUTE_GROUPS: RateLimitRouteGroup[] = [
       anonymous: { limit: 60, windowMs: 60 * 1000 },
       authenticated: { limit: 180, ipLimit: 360, windowMs: 60 * 1000 },
       webhook: { limit: 300, ipLimit: 600, windowMs: 60 * 1000 },
+      apiKey: { limit: 240, ipLimit: 480, windowMs: 60 * 1000 },
     },
   },
   {
@@ -46,6 +50,7 @@ export const RATE_LIMIT_ROUTE_GROUPS: RateLimitRouteGroup[] = [
       anonymous: { limit: 60, windowMs: 60 * 1000 },
       authenticated: { limit: 180, ipLimit: 360, windowMs: 60 * 1000 },
       webhook: { limit: 300, ipLimit: 600, windowMs: 60 * 1000 },
+      apiKey: { limit: 240, ipLimit: 480, windowMs: 60 * 1000 },
     },
   },
   {
@@ -55,6 +60,7 @@ export const RATE_LIMIT_ROUTE_GROUPS: RateLimitRouteGroup[] = [
       anonymous: { limit: 60, windowMs: 60 * 1000 },
       authenticated: { limit: 180, ipLimit: 360, windowMs: 60 * 1000 },
       webhook: { limit: 300, ipLimit: 600, windowMs: 60 * 1000 },
+      apiKey: { limit: 240, ipLimit: 480, windowMs: 60 * 1000 },
     },
   },
   {
@@ -77,8 +83,9 @@ export function getRateLimitRouteGroup(path: string): RateLimitRouteGroup {
 export function getRateLimitTier(
   path: string,
   authenticated: boolean,
-  verifiedWebhook = false
-): "anonymous" | "authenticated" | "webhook" {
+  verifiedWebhook = false,
+  verifiedApiKey = false
+): "anonymous" | "authenticated" | "webhook" | "apiKey" {
   const webhookPath =
     path === "/api/webhooks" ||
     path.startsWith("/api/webhooks/") ||
@@ -87,5 +94,6 @@ export function getRateLimitTier(
   if (webhookPath && verifiedWebhook) {
     return "webhook";
   }
+  if (verifiedApiKey) return "apiKey";
   return authenticated ? "authenticated" : "anonymous";
 }

@@ -6,6 +6,7 @@ import { PlayerCard } from "./PlayerCard";
 import { detectFormation } from "@/lib/formation";
 
 import { useTeamStore } from "@/store/teamStore";
+import { useFlipAnimation } from "@/lib/flipAnimation";
 
 interface PitchProps {
   isLoading?: boolean;
@@ -50,10 +51,14 @@ export const Pitch: React.FC<PitchProps> = ({ isLoading = false }) => {
 
   const currentFormation = detectFormation(starters);
 
+  // FLIP re-ordering animation (#462): cards glide from their old slot to
+  // their new one when a swap or formation switch moves them.
+  const pitchRef = useFlipAnimation(starters);
+
   return (
     <div className="w-full relative rounded-2xl overflow-hidden shadow-2xl border border-pitch-border bg-slate-950" data-testid="pitch">
       {/* Tactical Grass Pitch Canvas */}
-      <div className="pitch-grass relative w-full min-h-[580px] sm:min-h-[660px] flex flex-col justify-between py-6 px-2 sm:px-6">
+      <div ref={pitchRef} className="pitch-grass relative w-full min-h-[580px] sm:min-h-[660px] flex flex-col justify-between py-6 px-2 sm:px-6">
         {/* Pitch Tactical Line Markings */}
         <div className="absolute inset-0 pointer-events-none opacity-40">
           {/* Halfway line */}

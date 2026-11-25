@@ -6,6 +6,17 @@ import {
   PlayerNotFoundError,
 } from "../services/analytics/playerAnalyticsEngine.js";
 import { ownershipStatsService } from "../services/analytics/ownershipStatsService.js";
+import { marketTrendService } from "../services/fpl/marketTrendService.js";
+
+export async function getMarketTrends(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const requested = Number(req.query.windowHours ?? 6);
+    const windowHours = Number.isFinite(requested) ? Math.min(24, Math.max(1, requested)) : 6;
+    res.json({ success: true, data: await marketTrendService.getTrends(new Date(), windowHours) });
+  } catch (error) {
+    next(error);
+  }
+}
 
 /**
  * Player Controller.
@@ -29,6 +40,7 @@ export async function getPlayers(
       minPrice,
       maxPrice,
       isAvailable,
+      priceChanged,
       sortBy = "totalPoints",
       sortOrder = "desc",
       page = "1",
@@ -75,6 +87,10 @@ export async function getPlayers(
       where.isAvailable = isAvailable === "true";
     }
 
+    if (priceChanged === "true") {
+      where.priceChanges = { some: { changedAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } } };
+    }
+
     // Build orderBy
     const allowedSortFields = [
       "price",
@@ -103,6 +119,12 @@ export async function getPlayers(
               logoUrl: true,
             },
           },
+          priceChanges: {
+            where: { changedAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
+            orderBy: { changedAt: "desc" },
+            take: 1,
+            select: { diff: true, changedAt: true },
+          },
         },
         orderBy: { [sortField]: orderDirection },
         skip,
@@ -117,7 +139,11 @@ export async function getPlayers(
 
     res.json({
       success: true,
-      data: players,
+      data: players.map(({ priceChanges, ...player }) => ({
+        ...player,
+        priceDelta: priceChanges[0] ? Number(priceChanges[0].diff) : 0,
+        priceChangedAt: priceChanges[0]?.changedAt ?? null,
+      })),
       pagination: {
         page: pageNum,
         limit: limitNum,

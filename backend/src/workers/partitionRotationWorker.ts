@@ -11,6 +11,15 @@ const TABLE = "contract_events";
 const PARENT = `public.${TABLE}`;
 const IDENTIFIER = /^[a-z][a-z0-9_]{0,62}$/;
 
+/** Partition size and buffer-cache telemetry entry (#431). */
+export interface PartitionMetric {
+  name: string;
+  totalBytes: number;
+  tableBytes: number;
+  rowEstimate: number;
+  cacheHitPct: number;
+}
+
 export interface PartitionRotationOptions {
   db?: any;
   now?: () => Date;
@@ -35,7 +44,8 @@ export class PartitionRotationWorker {
   constructor(options: PartitionRotationOptions = {}) {
     this.db = options.db ?? prisma;
     this.now = options.now ?? (() => new Date());
-    this.archiveDirectory = options.archiveDirectory ?? process.env.PARTITION_ARCHIVE_DIR;
+    this.archiveDirectory =
+      options.archiveDirectory ?? process.env.PARTITION_ARCHIVE_DIR;
     this.archiveAfterDays = options.archiveAfterDays ?? 90;
     this.precreateDays = options.precreateDays ?? 14;
     this.pollIntervalMs = options.pollIntervalMs ?? 6 * 60 * 60 * 1000;
@@ -50,7 +60,7 @@ export class PartitionRotationWorker {
       const next = this.addMonth(month);
       const name = this.partitionName(month);
       await this.db.$executeRawUnsafe(
-        `CREATE TABLE IF NOT EXISTS public.${name} PARTITION OF ${PARENT} FOR VALUES FROM ('${this.date(month)}') TO ('${this.date(next)}')`
+        `CREATE TABLE IF NOT EXISTS public.${name} PARTITION OF ${PARENT} FOR VALUES FROM ('${this.date(month)}') TO ('${this.date(next)}')`,
       );
       created.push(name);
     }
@@ -63,7 +73,9 @@ export class PartitionRotationWorker {
    */
   public async archiveExpiredPartitions(): Promise<string[]> {
     if (!this.archiveDirectory) return [];
-    const cutoff = new Date(this.now().getTime() - this.archiveAfterDays * DAY_MS);
+    const cutoff = new Date(
+      this.now().getTime() - this.archiveAfterDays * DAY_MS,
+    );
     const partitions = (await (this.db.$queryRawUnsafe as any)(
       `SELECT child.relname AS name
        FROM pg_inherits i JOIN pg_class parent ON parent.oid = i.inhparent
@@ -72,24 +84,31 @@ export class PartitionRotationWorker {
        WHERE n.nspname = 'public' AND parent.relname = $1 AND child.relname <> $2
        ORDER BY child.relname`,
       TABLE,
-      `${TABLE}_default`
+      `${TABLE}_default`,
     )) as Array<{ name: string }>;
     const archived: string[] = [];
     await mkdir(this.archiveDirectory, { recursive: true });
     for (const { name } of partitions) {
       const match = new RegExp(`^${TABLE}_(\\d{4})_(\\d{2})$`).exec(name);
       if (!match || !IDENTIFIER.test(name)) continue;
-      const month = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, 1));
+      const month = new Date(
+        Date.UTC(Number(match[1]), Number(match[2]) - 1, 1),
+      );
       if (this.addMonth(month) > cutoff) continue;
       const path = join(this.archiveDirectory, `${name}.dump`);
       await this.dumpPartition(name, path);
-      await this.db.$executeRawUnsafe(`ALTER TABLE ${PARENT} DETACH PARTITION public.${name} CONCURRENTLY`);
+      await this.db.$executeRawUnsafe(
+        `ALTER TABLE ${PARENT} DETACH PARTITION public.${name} CONCURRENTLY`,
+      );
       archived.push(name);
     }
     return archived;
   }
 
-  public async runOnce(): Promise<{ partitions: string[]; archived: string[] }> {
+  public async runOnce(): Promise<{
+    partitions: string[];
+    archived: string[];
+  }> {
     if (this.inFlight) return { partitions: [], archived: [] };
     this.inFlight = true;
     try {
@@ -101,6 +120,49 @@ export class PartitionRotationWorker {
     }
   }
 
+  /**
+   * Query partition sizes, row counts and buffer-cache hit ratios (#431).
+   * Returns one entry per partition of TABLE, ordered by partition name.
+   */
+  public async getPartitionMetrics(): Promise<PartitionMetric[]> {
+    const rows = (await (this.db.$queryRawUnsafe as any)(
+      `SELECT
+         child.relname                                    AS name,
+         pg_total_relation_size(child.oid)               AS total_bytes,
+         pg_relation_size(child.oid)                     AS table_bytes,
+         (SELECT reltuples::bigint FROM pg_class WHERE oid = child.oid) AS row_estimate,
+         COALESCE(
+           ROUND(
+             100.0 * SUM(blks_hit) /
+             NULLIF(SUM(blks_hit) + SUM(blks_read), 0)
+           )::int, 0
+         )                                               AS cache_hit_pct
+       FROM pg_inherits i
+       JOIN pg_class parent ON parent.oid = i.inhparent
+       JOIN pg_class child  ON child.oid  = i.inhrelid
+       JOIN pg_namespace n  ON n.oid = parent.relnamespace
+       LEFT JOIN pg_stat_user_tables s ON s.relname = child.relname
+       WHERE n.nspname = 'public' AND parent.relname = $1
+       GROUP BY child.relname, child.oid
+       ORDER BY child.relname`,
+      TABLE,
+    )) as Array<{
+      name: string;
+      total_bytes: bigint;
+      table_bytes: bigint;
+      row_estimate: bigint;
+      cache_hit_pct: number;
+    }>;
+
+    return rows.map((r) => ({
+      name: r.name,
+      totalBytes: Number(r.total_bytes),
+      tableBytes: Number(r.table_bytes),
+      rowEstimate: Number(r.row_estimate),
+      cacheHitPct: r.cache_hit_pct,
+    }));
+  }
+
   public start(): void {
     if (this.running) return;
     this.running = true;
@@ -108,6 +170,12 @@ export class PartitionRotationWorker {
       try {
         const result = await this.runOnce();
         logger.info({ ...result }, "Partition rotation completed");
+        // Emit size/row-count/cache-hit metrics for monitoring (#431).
+        const metrics = await this.getPartitionMetrics();
+        logger.info(
+          { partitionMetrics: metrics },
+          "Partition metrics snapshot",
+        );
       } catch (error) {
         logger.error({ err: error }, "Partition rotation failed");
       } finally {
@@ -125,18 +193,49 @@ export class PartitionRotationWorker {
 
   private async dumpPartition(name: string, path: string): Promise<void> {
     const connection = process.env.DATABASE_URL;
-    if (!connection) throw new Error("DATABASE_URL is required to archive partitions");
-    await promisify((command: string, args: string[], callback: (error: Error | null) => void) => {
-      const child = spawn(command, args, { stdio: "ignore", windowsHide: true });
-      child.once("error", callback);
-      child.once("exit", (code) => callback(code === 0 ? null : new Error(`pg_dump exited with code ${code}`)));
-    })(process.env.PG_DUMP_PATH || "pg_dump", ["--dbname", connection, "--format=custom", "--compress=9", "--table", `public.${name}`, "--file", path]);
+    if (!connection)
+      throw new Error("DATABASE_URL is required to archive partitions");
+    await promisify(
+      (
+        command: string,
+        args: string[],
+        callback: (error: Error | null) => void,
+      ) => {
+        const child = spawn(command, args, {
+          stdio: "ignore",
+          windowsHide: true,
+        });
+        child.once("error", callback);
+        child.once("exit", (code) =>
+          callback(
+            code === 0 ? null : new Error(`pg_dump exited with code ${code}`),
+          ),
+        );
+      },
+    )(process.env.PG_DUMP_PATH || "pg_dump", [
+      "--dbname",
+      connection,
+      "--format=custom",
+      "--compress=9",
+      "--table",
+      `public.${name}`,
+      "--file",
+      path,
+    ]);
   }
 
-  private monthStart(date: Date): Date { return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1)); }
-  private addMonth(date: Date): Date { return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1)); }
-  private date(date: Date): string { return date.toISOString().slice(0, 10); }
-  private partitionName(date: Date): string { return `${TABLE}_${date.getUTCFullYear()}_${String(date.getUTCMonth() + 1).padStart(2, "0")}`; }
+  private monthStart(date: Date): Date {
+    return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
+  }
+  private addMonth(date: Date): Date {
+    return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1));
+  }
+  private date(date: Date): string {
+    return date.toISOString().slice(0, 10);
+  }
+  private partitionName(date: Date): string {
+    return `${TABLE}_${date.getUTCFullYear()}_${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+  }
 }
 
 export const partitionRotationWorker = new PartitionRotationWorker();

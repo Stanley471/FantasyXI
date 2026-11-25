@@ -164,6 +164,9 @@ model User {
   googleId     String?  @unique @map("google_id")
   countryCode  String?  @map("country_code")
   role         UserRole @default(USER)
+  // Hides the manager's username behind a deterministic "Manager #XXXX"
+  // alias in public standings when true (issue #511).
+  isAnonymous  Boolean  @default(false) @map("is_anonymous")
   referrerId   String?  @map("referrer_id")
   referralCode String?  @unique @map("referral_code")
   createdAt    DateTime @default(now()) @map("created_at")
@@ -185,11 +188,15 @@ model User {
   matchmakingQueueEntry MatchmakingQueueEntry? @relation("MatchmakingQueueOwner")
   matchedQueueEntries  MatchmakingQueueEntry[] @relation("MatchmakingMatchedUser")
   webAuthnCredentials  WebAuthnCredential[]
+  passkeyRecoveryKey   PasskeyRecoveryKey?
+  passkeyRecoveryChallenges PasskeyRecoveryChallenge[]
+  securityEvents       AccountSecurityEvent[]
   accountSignals       AccountSignal[]
   refreshTokens        RefreshToken[]
   collusionFlagsAsA    LeagueCollusionFlag[] @relation("FlagAccountA")
   collusionFlagsAsB    LeagueCollusionFlag[] @relation("FlagAccountB")
   suspensionAppeals    SuspensionAppeal[]
+  notifications        Notification[]
 
   @@map("users")
 }
@@ -208,6 +215,26 @@ model RefreshToken {
   @@index([familyId])
   @@index([userId])
   @@map("refresh_tokens")
+}
+
+/// A user-facing notification (league invite, gameweek finalization, payment
+/// confirmation, ...) shown in the notification center drawer (issue #500).
+model Notification {
+  id        String    @id @default(uuid())
+  userId    String    @map("user_id")
+  type      String
+  title     String
+  body      String?
+  link      String?
+  isRead    Boolean   @default(false) @map("is_read")
+  createdAt DateTime  @default(now()) @map("created_at")
+  readAt    DateTime? @map("read_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([userId, isRead])
+  @@map("notifications")
 }
 
 /// A Stellar wallet linked to a user for USDC payments.
@@ -308,7 +335,9 @@ model Gameweek {
   chipCancellations SquadChipCancellation[]
   leagueFixtures  LeagueFixture[]
   matchRatingHistory MatchRatingHistory[]
+  auditAnchor     GameweekAuditAnchor?
 
+  @@index([deadline])
   @@map("gameweeks")
 }
 
@@ -583,6 +612,9 @@ model LeagueMember {
   hasPaid        Boolean          @default(false) @map("has_paid")
   rank           Int?
   totalPoints    Int              @default(0) @map("total_points")
+  payoutHoldAt   DateTime?        @map("payout_hold_at")
+  payoutHoldReason String?        @map("payout_hold_reason")
+  payoutRiskScore Float?          @map("payout_risk_score")
 
   // Head-to-head statistics
   matchesWon    Int @default(0) @map("matches_won")
@@ -671,6 +703,10 @@ model Transaction {
 
   // A batched refund shares one Stellar hash across several members
   @@unique([stellarTxHash, memberId])
+  // Supports cursor-paginated, filtered lookups of a user's own transaction history.
+  @@index([userId, createdAt])
+  @@index([userId, status])
+  @@index([userId, type])
   @@map("transactions")
 }
 
@@ -878,6 +914,29 @@ model DepositRefundClaim {
 
   @@index([userId, requestedAt])
   @@map("deposit_refund_claims")
+}
+
+/// Public, immutable receipt anchoring a settled gameweek's standings and prize
+/// allocations to Stellar: the SHA-256 digest is the MEMO_HASH of `stellarTxHash`.
+/// `snapshot` is the canonical data the digest was computed from.
+model GameweekAuditAnchor {
+  id            String   @id @default(uuid())
+  gameweekId    Int      @unique @map("gameweek_id")
+  digest        String   @map("digest")
+  snapshot      Json
+  leagueCount   Int      @map("league_count")
+  memberCount   Int      @map("member_count")
+  status        String   @default("PENDING")
+  stellarTxHash String?  @unique @map("stellar_tx_hash")
+  ledgerSeq     Int?     @map("ledger_seq")
+  errorMessage  String?  @map("error_message")
+  attempts      Int      @default(0)
+  createdAt     DateTime @default(now()) @map("created_at")
+  anchoredAt    DateTime? @map("anchored_at")
+
+  gameweek Gameweek @relation(fields: [gameweekId], references: [id])
+
+  @@map("gameweek_audit_anchors")
 }
 
 /// Tracks Soroban RPC event indexer position and pagination cursor
@@ -1129,6 +1188,19 @@ model CryptoAuditLogEntry {
   @@map("crypto_audit_log")
 }
 
+/// Definitive session revocation record checked only after a Redis Bloom hit.
+model RevokedSession {
+  id        String   @id @default(uuid())
+  sessionId String   @unique @map("session_id")
+  userId    String?  @map("user_id")
+  reason    String?
+  revokedAt DateTime @default(now()) @map("revoked_at")
+  expiresAt DateTime @map("expires_at")
+
+  @@index([expiresAt])
+  @@map("revoked_sessions")
+}
+
 /// An on-chain transaction whose finality is tracked by TransactionCoordinatorService.
 /// State lives here (not in memory) so polling resumes after a backend restart.
 model CoordinatedTransaction {
@@ -1308,6 +1380,51 @@ model WebAuthnCredential {
   @@map("webauthn_credentials")
 }
 
+/// One-time recovery verifier for a passkey-first account. The server stores
+/// only an Ed25519 public key; the mnemonic-derived private key never leaves
+/// the user's device.
+model PasskeyRecoveryKey {
+  userId     String    @id @map("user_id")
+  publicKey  Bytes     @map("public_key")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  usedAt     DateTime? @map("used_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("passkey_recovery_keys")
+}
+
+/// Single-use challenge signed by the mnemonic-derived recovery key.
+model PasskeyRecoveryChallenge {
+  id        String    @id @default(uuid())
+  userId    String    @map("user_id")
+  challenge String
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@map("passkey_recovery_challenges")
+}
+
+/// Durable security audit event used for account recovery and other actions
+/// that must survive process restarts.
+model AccountSecurityEvent {
+  id        String   @id @default(uuid())
+  userId    String?  @map("user_id")
+  type      String
+  detail    Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([type, createdAt])
+  @@map("account_security_events")
+}
+
 /// Login signature kinds linking accounts in the Sybil graph (issue #274)
 enum AccountSignalType {
   /// SHA-256 device ID (loginSecurityService.deriveDeviceId)
@@ -1428,4 +1545,214 @@ model SuspensionAppeal {
   @@index([flagId])
   @@index([accountId, status])
   @@map("suspension_appeals")
+}
+
+// ============================================================
+// ============================================================
+// TRANSACTIONAL OUTBOX  (Issue #438)
+// ============================================================
+
+/// Delivery status of a transactional outbox event.
+enum OutboxEventStatus {
+  PENDING
+  PUBLISHED
+  FAILED
+  DEAD
+}
+
+/// One integration event written atomically alongside its originating
+/// business mutation.  The outbox relay worker polls this table and
+/// publishes to the message bus with at-least-once semantics.
+model OutboxEvent {
+  id              String           @id @default(uuid())
+  deduplicationId String           @unique @map("deduplication_id")
+  aggregateType   String           @map("aggregate_type")
+  aggregateId     String           @map("aggregate_id")
+  eventType       String           @map("event_type")
+  payload         Json
+  status          OutboxEventStatus @default(PENDING)
+  attempts        Int              @default(0)
+  lockedUntil     DateTime?        @map("locked_until")
+  publishedAt     DateTime?        @map("published_at")
+  nextRetryAt     DateTime         @default(now()) @map("next_retry_at")
+  createdAt       DateTime         @default(now()) @map("created_at")
+
+  @@index([status, nextRetryAt])
+  @@index([aggregateType, aggregateId])
+  @@map("outbox_events")
+}
+
+// ============================================================
+// SOROBAN CATCH-UP & EVENT REPLAY (Issue #524)
+// ============================================================
+
+/// Persistent cursor for Soroban ledger catch-up worker.
+/// Tracks the last processed ledger sequence to resume fetch-and-replay on restart.
+model SorobanCatchupCursor {
+  id                    String   @id @default(uuid())
+  contractId            String   @map("contract_id")
+  network               String   @default("testnet")
+  lastProcessedLedgerSeq BigInt  @map("last_processed_ledger_seq")
+  lastCursor            String?  @map("last_cursor")
+  batchSize             Int      @default(100) @map("batch_size")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  @@unique([contractId, network])
+  @@index([network, updatedAt(sort: Desc)])
+  @@map("soroban_catchup_cursor")
+}
+
+/// Idempotency table for processed Soroban contract events.
+/// Prevents duplicate credits if the same event is fetched and replayed multiple times.
+model SorobanProcessedEvent {
+  id              String   @id @default(uuid())
+  eventId         String   @unique @map("event_id")
+  contractId      String   @map("contract_id")
+  ledgerSeq       BigInt   @map("ledger_seq")
+  txHash          String   @map("tx_hash")
+  eventIndex      Int      @map("event_index")
+  eventType       String   @map("event_type")
+  processedAt     DateTime @default(now()) @map("processed_at")
+
+  @@unique([contractId, ledgerSeq, txHash, eventIndex])
+  @@index([contractId, ledgerSeq(sort: Desc)])
+  @@index([txHash])
+  @@index([processedAt(sort: Desc)])
+  @@map("soroban_processed_events")
+}
+
+/// Telemetry and statistics for Soroban catch-up worker batches.
+/// Used for monitoring, alerting, and performance tuning.
+model SorobanCatchupTelemetry {
+  id              Int      @id @default(autoincrement())
+  batchId         String   @map("batch_id")
+  contractId      String   @map("contract_id")
+  startLedger     BigInt   @map("start_ledger")
+  endLedger       BigInt   @map("end_ledger")
+  eventsFetched   Int      @map("events_fetched")
+  eventsProcessed Int      @map("events_processed")
+  eventsDuplicated Int     @map("events_duplicated")
+  eventsSkipped   Int      @map("events_skipped")
+  durationMs      Int      @map("duration_ms")
+  status          String
+  errorMessage    String?  @map("error_message")
+  recordedAt      DateTime @default(now()) @map("recorded_at")
+
+  @@index([batchId])
+  @@index([recordedAt(sort: Desc)])
+  @@map("soroban_catchup_telemetry")
+}
+
+/// Advisory lock table for preventing concurrent catch-up and live Soroban event processing.
+/// Uses a simple row-based exclusive locking pattern.
+model SorobanProcessingLock {
+  id        String   @id @default(uuid())
+  contractId String  @map("contract_id")
+  network   String
+  lockedBy  String   @map("locked_by")
+  lockedAt  DateTime @map("locked_at")
+  expiresAt DateTime @map("expires_at")
+
+  @@unique([contractId, network])
+  @@index([expiresAt])
+  @@map("soroban_processing_lock")
+}
+
+// ============================================================
+// ANTI-COLLUSION DETECTION (Issue #519)
+// ============================================================
+
+/// Extended collusion flags table for squad similarity detection and clustering.
+/// Augments existing LeagueCollusionFlag with similarity metrics and review workflow.
+model CollusionFlagExtension {
+  id                    String   @id @default(uuid())
+  flagId                String   @unique @map("flag_id")
+  clusterMemberCount    Int      @default(2) @map("cluster_member_count")
+  similarityScore       Decimal  @map("similarity_score") @db.Decimal(4, 3)
+  improbabilityScore    Decimal? @map("improbability_score") @db.Decimal(5, 2)
+  signalsTriggered      String[] @map("signals_triggered")
+  reviewStatus          String   @default("PENDING") @map("review_status") // PENDING, REVIEWED, DISMISSED, CONFIRMED
+  reviewerUserId        String?  @map("reviewer_user_id")
+  reviewedAt            DateTime? @map("reviewed_at")
+  dismissedReason       String?  @map("dismissed_reason")
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  @@index([reviewStatus, createdAt(sort: Desc)])
+  @@map("collusion_flag_extensions")
+}
+
+// ============================================================
+// TOURNAMENT KNOCKOUT CUP (Issue #523)
+// ============================================================
+
+/// Knockout cup bracket metadata and state tracking.
+model PlayoffBracket {
+  id               String   @id @default(uuid())
+  leagueId         String   @map("league_id")
+  format           Int      // 16, 32, 64, 128
+  status           String   @default("CREATED") // CREATED, IN_PROGRESS, COMPLETED
+  startGameweekId  Int      @map("start_gameweek_id")
+  currentRound     Int      @default(1) @map("current_round")
+  totalRounds      Int      @map("total_rounds")
+  championMemberId String?  @map("champion_member_id")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  league    League             @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+  byes      PlayoffByeAssignment[]
+
+  @@index([leagueId, status])
+  @@map("playoff_brackets")
+}
+
+/// Records bye assignments in knockout brackets.
+/// A bye means a manager automatically advances to the next round without playing.
+model PlayoffByeAssignment {
+  id          String @id @default(uuid())
+  bracketId   String @map("bracket_id")
+  round       Int
+  slot        Int
+  memberId    String @map("member_id")
+
+  bracket PlayoffBracket @relation(fields: [bracketId], references: [id], onDelete: Cascade)
+
+  @@unique([bracketId, round, slot])
+  @@map("playoff_bye_assignments")
+}
+
+// ============================================================
+// FPL RATE LIMITER (Issue #521)
+// ============================================================
+
+/// Persistent rate limit state for FPL adaptive token bucket.
+/// Tracks bucket state across restarts for smooth backoff recovery.
+model FplRateLimiterState {
+  id                String   @id @default(uuid())
+  endpointKey       String   @unique @map("endpoint_key")
+  tokensAvailable   Decimal  @map("tokens_available") @db.Decimal(10, 2)
+  lastRefillAt      DateTime @map("last_refill_at")
+  consecutiveErrors Int      @default(0) @map("consecutive_errors")
+  backoffUntil      DateTime? @map("backoff_until")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  @@index([backoffUntil])
+  @@map("fpl_rate_limiter_state")
+}
+
+/// Telemetry for FPL request throttling and rate limiting.
+model FplThrottleTelemetry {
+  id                Int      @id @default(autoincrement())
+  endpointKey       String   @map("endpoint_key")
+  priority          String   // HIGH, LOW
+  queued_at         DateTime @map("queued_at")
+  dequeued_at       DateTime? @map("dequeued_at")
+  wait_ms           Int?     @map("wait_ms")
+  status            String   // GRANTED, DELAYED, REJECTED, TIMEOUT
+  reason            String?
+  recordedAt        DateTime @default(now()) @map("recorded_at")
+
+  @@index([endpointKey, recordedAt(sort: Desc)])
+  @@map("fpl_throttle_telemetry")
+}
 }

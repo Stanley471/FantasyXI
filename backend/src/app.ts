@@ -2,7 +2,9 @@ import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import apiV1Router from "./routes/index.js";
+import devRoutes from "./routes/dev.routes.js";
 import { apiRateLimiter } from "./middleware/rateLimiter.js";
+import { requestSigning } from "./middleware/requestSigning.js";
 import { errorHandler } from "./middleware/error.middleware.js";
 import { getJwks } from "./controllers/auth.controller.js";
 
@@ -50,7 +52,15 @@ app.use(
   })
 );
 app.use(express.json());
+// Rate limiting runs before signature verification so unauthenticated
+// clients cannot use the HMAC check as an unthrottled oracle.
+// HMAC request signing for public read endpoints (issue #455). Pass-through
+// while API_REQUEST_SIGNING_ENABLED is not "true"; when enabled it enforces
+// X-Signature / X-Timestamp / X-Nonce on GETs to the public prefixes only
+// (players, teams, gameweeks, fixtures, leaderboard, live, analytics,
+// proof-of-reserve). Auth flows, mutations and private routes are untouched.
 app.use(apiRateLimiter);
+app.use(requestSigning);
 app.use(requestReadConsistency);
 
 // ================================================================
@@ -208,7 +218,16 @@ app.post("/api/v1/admin/tenants", async (req: Request, res: Response) => {
 // Public JWK Set for access-token verification (issue #332)
 app.get("/.well-known/jwks.json", getJwks);
 
+// Interactive OpenAPI documentation (issue #510): Swagger UI at /api/docs
+// and the raw spec at /api/docs/docs.json — development only, never in
+// production. The router also 404s per-request when NODE_ENV is production.
+if (isDocsEnabled()) {
+  app.use("/api/docs", docsRouter);
+}
+
 // API v1 Routes
+// Development-only helpers; every route returns 404 in production (issue #558)
+app.use("/api/dev", devRoutes);
 app.use("/api/v1", apiV1Router);
 app.use("/api", apiV1Router);
 

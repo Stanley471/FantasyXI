@@ -38,11 +38,62 @@ export function getRedisConfig(): RedisConfig {
 let redisInstance: RedisType | null = null;
 let hasLoggedConnectionError = false;
 
+// ─── Circuit breaker (#432) ───────────────────────────────────────────────────
+
+type CircuitState = "closed" | "open" | "half-open";
+
+const circuit = {
+  state: "closed" as CircuitState,
+  failures: 0,
+  lastFailureAt: 0,
+  /** Consecutive failures before opening the circuit. */
+  threshold: Number(process.env.REDIS_CB_THRESHOLD ?? 5),
+  /** Milliseconds the circuit stays open before moving to half-open. */
+  resetMs: Number(process.env.REDIS_CB_RESET_MS ?? 10_000),
+};
+
+/** True when the circuit is open and callers should use the in-memory fallback. */
+export function isRedisCircuitOpen(): boolean {
+  if (circuit.state === "closed") return false;
+  if (circuit.state === "open") {
+    if (Date.now() - circuit.lastFailureAt >= circuit.resetMs) {
+      circuit.state = "half-open";
+      return false; // allow one probe
+    }
+    return true;
+  }
+  return false; // half-open: allow probe
+}
+
+export function recordRedisSuccess(): void {
+  circuit.failures = 0;
+  circuit.state = "closed";
+}
+
+export function recordRedisFailure(): void {
+  circuit.failures += 1;
+  circuit.lastFailureAt = Date.now();
+  if (circuit.failures >= circuit.threshold) {
+    if (circuit.state !== "open") {
+      console.warn(
+        `[Redis] Circuit breaker OPEN after ${circuit.failures} failures (#432)`,
+      );
+    }
+    circuit.state = "open";
+  }
+}
+
+export function getRedisCircuitState(): CircuitState {
+  return circuit.state;
+}
+
 /**
  * Creates a configured ioredis client instance.
  * Gracefully handles connection failures by preventing unhandled errors.
  */
-export function createRedisClient(configOverride?: Partial<RedisConfig>): RedisType | null {
+export function createRedisClient(
+  configOverride?: Partial<RedisConfig>,
+): RedisType | null {
   const config = { ...getRedisConfig(), ...configOverride };
 
   if (!config.enabled) {
@@ -74,18 +125,20 @@ export function createRedisClient(configOverride?: Partial<RedisConfig>): RedisT
         });
 
     client.on("error", (err: Error) => {
+      recordRedisFailure();
       if (!hasLoggedConnectionError) {
         console.warn(
-          `[Redis] Connection warning: ${err.message}. Cache operations will gracefully fall back.`
+          `[Redis] Connection warning: ${err.message}. Cache operations will gracefully fall back.`,
         );
         hasLoggedConnectionError = true;
       }
     });
 
     client.on("connect", () => {
+      recordRedisSuccess();
       hasLoggedConnectionError = false;
       console.log(
-        `[Redis] Connected successfully to ${config.url || `${config.host}:${config.port}`}`
+        `[Redis] Connected successfully to ${config.url || `${config.host}:${config.port}`}`,
       );
     });
 

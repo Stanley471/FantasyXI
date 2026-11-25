@@ -5,6 +5,7 @@ import {
   getLiveProvisionalLeaderboard,
   streamLiveProvisionalLeaderboard,
 } from "../controllers/live.controller.js";
+import { optionalAuth } from "../middleware/authMiddleware.js";
 
 const router = Router();
 
@@ -15,7 +16,8 @@ router.get("/timeline/:gameweekId", getLiveTimeline);
 router.get("/timeline/:gameweekId/stream", streamLiveTimeline);
 
 // Live provisional leaderboard snapshot and SSE delta stream
-router.get("/leaderboard/:leagueId", getLiveProvisionalLeaderboard);
-router.get("/leaderboard/:leagueId/stream", streamLiveProvisionalLeaderboard);
+// (optionalAuth so the viewer themselves / admins see real names, issue #511)
+router.get("/leaderboard/:leagueId", optionalAuth, getLiveProvisionalLeaderboard);
+router.get("/leaderboard/:leagueId/stream", optionalAuth, streamLiveProvisionalLeaderboard);
 
 export default router;

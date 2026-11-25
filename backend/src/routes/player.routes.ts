@@ -6,6 +6,7 @@ import {
   getOwnershipAndCaptaincyStats,
   batchPlayerStats,
   getPlayerAnalytics,
+  getMarketTrends,
 } from "../controllers/player.controller.js";
 import { requireAuth } from "../middleware/authMiddleware.js";
 import { authenticatedRateLimiter } from "../middleware/rateLimiter.js";
@@ -20,6 +21,9 @@ router.get("/ownership-stats", getPlayerOwnershipStats);
 
 // GET /api/v1/players/stats/ownership (cached ownership % + captaincy % per player)
 router.get("/stats/ownership", getOwnershipAndCaptaincyStats);
+
+// GET /api/v1/players/market-trends
+router.get("/market-trends", getMarketTrends);
 
 // POST /api/v1/players/batch-stats (authenticated, rate limited)
 router.post("/batch-stats", requireAuth, authenticatedRateLimiter, batchPlayerStats);

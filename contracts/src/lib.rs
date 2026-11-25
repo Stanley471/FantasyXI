@@ -2,9 +2,14 @@
 #![allow(clippy::too_many_arguments)]
 
 #[cfg(test)]
-extern crate std;
-#[cfg(test)]
 extern crate self as fantasyxi_escrow;
+#[cfg(test)]
+extern crate std;
+pub mod shielded_batcher;
+pub use shielded_batcher::{
+    BatchExecutionReport, BatcherConfig, QuarantinedPayout, QueuedPayout, ShieldedBatch,
+    ShieldedOutput, MAX_BATCH_SIZE,
+};
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Bytes,
@@ -18,6 +23,7 @@ const INSTANCE_LIFETIME_THRESHOLD: u32 = 14 * DAY_IN_LEDGERS;
 const PERSISTENT_BUMP_AMOUNT: u32 = 30 * DAY_IN_LEDGERS;
 const PERSISTENT_LIFETIME_THRESHOLD: u32 = 14 * DAY_IN_LEDGERS;
 const EMERGENCY_REFUND_TIMELOCK_SECONDS: u64 = 14 * 24 * 60 * 60;
+pub const MAX_FEE_BPS: u32 = 500; // Hard invariant: max 5% platform fee
 pub const PARTICIPANTS_PER_PAGE: u32 = 50;
 pub const TIMELOCK_DELAY_LEDGERS: u32 = 2 * DAY_IN_LEDGERS; // 34,560 ledgers (48 hours)
 pub const UPGRADE_TIMELOCK_LEDGERS: u32 = TIMELOCK_DELAY_LEDGERS;
@@ -59,8 +65,8 @@ pub enum EscrowError {
     ProposalExecuted = 30,
     UpgradeNotProposed = 31,
     InvalidFederationPeer = 32,
-    PauseProposalNotFound = 31,
-    AlreadyProposed = 32,
+    PauseProposalNotFound = 41,
+    AlreadyProposed = 42,
     LeagueFrozen = 33,
     DisputeActive = 34,
     DisputeWindowOpen = 35,
@@ -69,6 +75,12 @@ pub enum EscrowError {
     InsufficientStake = 38,
     DisputeNotExpired = 39,
     InvalidDisputeConfig = 40,
+    BatchWindowNotElapsed = 43,
+    InvalidBatchConfig = 44,
+    AllocationMismatch = 45,
+    EmptyBatch = 46,
+    InsufficientShieldedBalance = 47,
+    UnshieldedLeakDetected = 48,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -79,6 +91,9 @@ pub enum LeagueStatus {
     Active = 1,
     Settled = 2,
     Cancelled = 3,
+    Disputed = 4,
+    ArbitrationPending = 5,
+    Refunded = 6,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -125,6 +140,8 @@ pub struct UpgradeProposal {
     pub wasm_hash: BytesN<32>,
     pub proposer: Address,
     pub unlock_ledger: u32,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[contracttype]
 #[repr(u32)]
@@ -142,6 +159,38 @@ pub struct PauseProposal {
     pub reason_hash: BytesN<32>,
     pub proposed_at: u64,
     pub approvals: Vec<Address>,
+    pub executed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct DisputeConfig {
+    pub window_seconds: u64,
+    pub resolution_seconds: u64,
+    pub min_stake_bps: u32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct SettlementDispute {
+    pub challenger: Address,
+    pub stake: i128,
+    pub opened_at: u64,
+    pub resolve_by: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct MultisigRefundProposal {
+    pub id: u64,
+    pub league_id: u64,
+    pub proposer: Address,
+    pub participants: Vec<Address>,
+    pub reason_hash: BytesN<32>,
+    pub approvals: Vec<Address>,
+    pub threshold: u32,
+    pub created_at: u64,
+    pub timeout_at: u64,
     pub executed: bool,
 }
 
@@ -168,6 +217,22 @@ pub enum DataKey {
     MerkleRoot(u64),
     Claimed(u64, Address),
     DisputeReason(u64),
+    DisputeConfig,
+    PlatformFeeBps,
+    SettlementWinners(u64),
+    SettledAt(u64),
+    ActiveDispute(u64),
+    RefundProposal(u64),
+    NextRefundProposalId,
+    BatcherConfig,
+    NextPayoutId,
+    NextBatchId,
+    PayoutQueue(Address),
+    BatchWindowStart(Address),
+    QuarantinedPayouts,
+    ShieldedBalance(BytesN<32>, Address),
+    ShieldedBatch(u64),
+    TransparentAddressFingerprint(BytesN<32>),
 }
 
 /// # Issue #83: Soroban Escrow Smart Contract for Fantasy Leagues
@@ -219,6 +284,8 @@ impl FantasyXIEscrow {
             .set(&DataKey::EmergencyUnpauseAfter, &unpause_after);
         env.events()
             .publish((Symbol::new(env, "EmergencyPause"),), unpause_after);
+    }
+
     fn is_league_frozen_internal(env: &Env, league_id: u64) -> bool {
         env.storage()
             .persistent()
@@ -336,6 +403,32 @@ impl FantasyXIEscrow {
     /// Returns whether the escrow is currently paused.
     pub fn is_paused_view(env: Env) -> bool {
         Self::is_paused(&env)
+    }
+
+    /// Configures the platform fee basis points subject to the immutable MAX_FEE_BPS cap.
+    pub fn set_platform_fee_bps(
+        env: Env,
+        admin: Address,
+        fee_bps: u32,
+    ) -> Result<(), EscrowError> {
+        Self::require_admin(&env, &admin)?;
+        if fee_bps > MAX_FEE_BPS {
+            return Err(EscrowError::FeeExceedsMaxCap);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::PlatformFeeBps, &fee_bps);
+        env.events()
+            .publish((Symbol::new(&env, "PlatformFeeBpsSet"),), fee_bps);
+        Ok(())
+    }
+
+    /// Returns the configured platform fee basis points (defaulting to MAX_FEE_BPS if unset).
+    pub fn get_platform_fee_bps(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::PlatformFeeBps)
+            .unwrap_or(MAX_FEE_BPS)
     }
 
     /// Admin quorum appoints the guardian allowed to trigger a federated emergency pause.
@@ -869,7 +962,12 @@ impl FantasyXIEscrow {
         }
 
         // Platform Fee Hard Cap check
-        let max_fee = (league.total_deposited * 500) / 10000;
+        let fee_bps = env
+            .storage()
+            .instance()
+            .get::<_, u32>(&DataKey::PlatformFeeBps)
+            .unwrap_or(MAX_FEE_BPS);
+        let max_fee = (league.total_deposited * (fee_bps as i128)) / 10000;
         if platform_fee > max_fee {
             return Err(EscrowError::FeeExceedsMaxCap);
         }
@@ -1009,6 +1107,22 @@ impl FantasyXIEscrow {
                 );
             }
         }
+
+        let winners_key = DataKey::SettlementWinners(league_id);
+        env.storage().persistent().set(&winners_key, &winners);
+        env.storage().persistent().extend_ttl(
+            &winners_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        let settled_at_key = DataKey::SettledAt(league_id);
+        let now = env.ledger().timestamp();
+        env.storage().persistent().set(&settled_at_key, &now);
+        env.storage().persistent().extend_ttl(
+            &settled_at_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
 
         league.status = LeagueStatus::Settled;
         env.storage().persistent().set(&league_key, &league);
@@ -1473,6 +1587,8 @@ impl FantasyXIEscrow {
             return Err(EscrowError::ContractPaused);
         }
 
+        Self::check_settlement_claim_ready(&env, league_id)?;
+
         let claim_key = DataKey::ClaimablePrize(league_id, winner.clone());
         let amount: i128 = env
             .storage()
@@ -1537,7 +1653,12 @@ impl FantasyXIEscrow {
             return Err(EscrowError::AlreadySettled);
         }
 
-        let max_fee = (league.total_deposited * 500) / 10000;
+        let fee_bps = env
+            .storage()
+            .instance()
+            .get::<_, u32>(&DataKey::PlatformFeeBps)
+            .unwrap_or(MAX_FEE_BPS);
+        let max_fee = (league.total_deposited * (fee_bps as i128)) / 10000;
         if platform_fee > max_fee || platform_fee < 0 {
             return Err(EscrowError::FeeExceedsMaxCap);
         }
@@ -1658,10 +1779,8 @@ impl FantasyXIEscrow {
         let token_client = token::Client::new(&env, &league.asset);
         token_client.transfer(&env.current_contract_address(), &winner, &amount);
 
-        env.events().publish(
-            (symbol_short!("m_claimed"), league_id),
-            (winner, amount),
-        );
+        env.events()
+            .publish((symbol_short!("m_claimed"), league_id), (winner, amount));
 
         Ok(())
     }
@@ -1702,10 +1821,8 @@ impl FantasyXIEscrow {
             PERSISTENT_BUMP_AMOUNT,
         );
 
-        env.events().publish(
-            (Symbol::new(&env, "LeagueFrozen"), league_id),
-            reason_hash,
-        );
+        env.events()
+            .publish((Symbol::new(&env, "LeagueFrozen"), league_id), reason_hash);
 
         Ok(())
     }
@@ -1762,7 +1879,14 @@ impl FantasyXIEscrow {
         env.storage()
             .persistent()
             .remove(&DataKey::DisputeReason(league_id));
-        Self::settle(env, admin, league_id, winners, platform_treasury, platform_fee)
+        Self::settle(
+            env,
+            admin,
+            league_id,
+            winners,
+            platform_treasury,
+            platform_fee,
+        )
     }
 
     /// Resolves dispute with decreed proportional refund, unfreezing contract atomically.
@@ -1780,6 +1904,623 @@ impl FantasyXIEscrow {
             .persistent()
             .remove(&DataKey::DisputeReason(league_id));
         Self::refund(env, admin, league_id, participants)
+    }
+
+    fn check_settlement_claim_ready(env: &Env, league_id: u64) -> Result<(), EscrowError> {
+        let dispute_key = DataKey::ActiveDispute(league_id);
+        if let Some(dispute) = env
+            .storage()
+            .persistent()
+            .get::<_, SettlementDispute>(&dispute_key)
+        {
+            if env.ledger().timestamp() < dispute.resolve_by {
+                return Err(EscrowError::DisputeActive);
+            }
+            Self::slash_dispute_stake_internal(env, league_id, &dispute)?;
+        } else if let Some(cfg) = env
+            .storage()
+            .instance()
+            .get::<_, DisputeConfig>(&DataKey::DisputeConfig)
+        {
+            if cfg.window_seconds > 0 {
+                if let Some(settled_at) = env
+                    .storage()
+                    .persistent()
+                    .get::<_, u64>(&DataKey::SettledAt(league_id))
+                {
+                    if settled_at > 0
+                        && env.ledger().timestamp() < settled_at.saturating_add(cfg.window_seconds)
+                    {
+                        return Err(EscrowError::DisputeWindowOpen);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn slash_dispute_stake_internal(
+        env: &Env,
+        league_id: u64,
+        dispute: &SettlementDispute,
+    ) -> Result<(), EscrowError> {
+        let winners: Vec<WinnerPayout> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SettlementWinners(league_id))
+            .unwrap_or_else(|| Vec::new(env));
+
+        let mut total_prize: i128 = 0;
+        for w in winners.iter() {
+            if w.amount > 0 {
+                total_prize = total_prize.saturating_add(w.amount);
+            }
+        }
+
+        if total_prize > 0 {
+            let mut allocated: i128 = 0;
+            let mut shares: Vec<(Address, i128)> = Vec::new(env);
+            for w in winners.iter() {
+                if w.amount > 0 {
+                    let share = (dispute.stake * w.amount) / total_prize;
+                    allocated = allocated.saturating_add(share);
+                    shares.push_back((w.winner.clone(), share));
+                }
+            }
+            let remainder = dispute.stake - allocated;
+            for (idx, (winner_addr, share)) in shares.iter().enumerate() {
+                let extra = if idx == 0 { share + remainder } else { share };
+                if extra > 0 {
+                    let claim_key = DataKey::ClaimablePrize(league_id, winner_addr.clone());
+                    let current: i128 = env.storage().persistent().get(&claim_key).unwrap_or(0);
+                    let updated = current.saturating_add(extra);
+                    env.storage().persistent().set(&claim_key, &updated);
+                    env.storage().persistent().extend_ttl(
+                        &claim_key,
+                        PERSISTENT_LIFETIME_THRESHOLD,
+                        PERSISTENT_BUMP_AMOUNT,
+                    );
+                }
+            }
+        } else {
+            let league: LeagueState = env
+                .storage()
+                .persistent()
+                .get(&DataKey::League(league_id))
+                .ok_or(EscrowError::LeagueNotFound)?;
+            let admin: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::Admin)
+                .ok_or(EscrowError::NotInitialized)?;
+            if dispute.stake > 0 {
+                token::Client::new(env, &league.asset).transfer(
+                    &env.current_contract_address(),
+                    &admin,
+                    &dispute.stake,
+                );
+            }
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::ActiveDispute(league_id));
+        env.storage()
+            .persistent()
+            .set(&DataKey::SettledAt(league_id), &0_u64);
+        Ok(())
+    }
+
+    pub fn set_dispute_config(
+        env: Env,
+        approvals: Vec<Address>,
+        config: DisputeConfig,
+    ) -> Result<(), EscrowError> {
+        Self::authorize_signers(&env, &approvals)?;
+        const MAX_WINDOW_SECONDS: u64 = 30 * 24 * 60 * 60;
+        if config.window_seconds == 0 && config.resolution_seconds == 0 && config.min_stake_bps == 0
+        {
+            env.storage()
+                .instance()
+                .set(&DataKey::DisputeConfig, &config);
+            return Ok(());
+        }
+        if config.window_seconds == 0
+            || config.window_seconds > MAX_WINDOW_SECONDS
+            || config.resolution_seconds == 0
+            || config.min_stake_bps == 0
+            || config.min_stake_bps > 10_000
+        {
+            return Err(EscrowError::InvalidDisputeConfig);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::DisputeConfig, &config);
+        Ok(())
+    }
+
+    pub fn get_dispute(env: Env, league_id: u64) -> Option<SettlementDispute> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ActiveDispute(league_id))
+    }
+
+    pub fn open_dispute(
+        env: Env,
+        challenger: Address,
+        league_id: u64,
+        stake: i128,
+    ) -> Result<(), EscrowError> {
+        Self::ensure_operational(&env)?;
+        challenger.require_auth();
+
+        let cfg: DisputeConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::DisputeConfig)
+            .unwrap_or(DisputeConfig {
+                window_seconds: 0,
+                resolution_seconds: 0,
+                min_stake_bps: 0,
+            });
+        if cfg.window_seconds == 0 {
+            return Err(EscrowError::DisputeWindowClosed);
+        }
+
+        let league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&DataKey::League(league_id))
+            .ok_or(EscrowError::LeagueNotFound)?;
+        if league.status != LeagueStatus::Settled {
+            return Err(EscrowError::DisputeWindowClosed);
+        }
+
+        let dispute_key = DataKey::ActiveDispute(league_id);
+        if env.storage().persistent().has(&dispute_key) {
+            return Err(EscrowError::DisputeActive);
+        }
+
+        let settled_at: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SettledAt(league_id))
+            .unwrap_or(0);
+        let now = env.ledger().timestamp();
+        if settled_at == 0 || now >= settled_at.saturating_add(cfg.window_seconds) {
+            return Err(EscrowError::DisputeWindowClosed);
+        }
+
+        let min_stake = (league.total_deposited * (cfg.min_stake_bps as i128) + 9_999) / 10_000;
+        let required_stake = if min_stake > 0 { min_stake } else { 1 };
+        if stake < required_stake {
+            return Err(EscrowError::InsufficientStake);
+        }
+
+        token::Client::new(&env, &league.asset).transfer(
+            &challenger,
+            &env.current_contract_address(),
+            &stake,
+        );
+
+        let dispute = SettlementDispute {
+            challenger,
+            stake,
+            opened_at: now,
+            resolve_by: now.saturating_add(cfg.resolution_seconds),
+        };
+        env.storage().persistent().set(&dispute_key, &dispute);
+        env.storage().persistent().extend_ttl(
+            &dispute_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        Ok(())
+    }
+
+    pub fn resolve_dispute(
+        env: Env,
+        approvals: Vec<Address>,
+        league_id: u64,
+        upheld: bool,
+        corrected_winners: Vec<WinnerPayout>,
+    ) -> Result<(), EscrowError> {
+        Self::ensure_operational(&env)?;
+        Self::authorize_signers(&env, &approvals)?;
+
+        let dispute_key = DataKey::ActiveDispute(league_id);
+        let dispute: SettlementDispute = env
+            .storage()
+            .persistent()
+            .get(&dispute_key)
+            .ok_or(EscrowError::NoDispute)?;
+
+        if env.ledger().timestamp() >= dispute.resolve_by {
+            return Err(EscrowError::DisputeWindowClosed);
+        }
+
+        let league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&DataKey::League(league_id))
+            .ok_or(EscrowError::LeagueNotFound)?;
+
+        if upheld {
+            let old_winners: Vec<WinnerPayout> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::SettlementWinners(league_id))
+                .unwrap_or_else(|| Vec::new(&env));
+            let mut old_total: i128 = 0;
+            for w in old_winners.iter() {
+                old_total = old_total.saturating_add(w.amount);
+            }
+
+            if !corrected_winners.is_empty() {
+                let mut new_total: i128 = 0;
+                for w in corrected_winners.iter() {
+                    if w.amount < 0 {
+                        return Err(EscrowError::InvalidPrizeDistribution);
+                    }
+                    new_total = new_total.saturating_add(w.amount);
+                }
+                if new_total != old_total {
+                    return Err(EscrowError::InvalidPrizeDistribution);
+                }
+                for w in old_winners.iter() {
+                    env.storage()
+                        .persistent()
+                        .remove(&DataKey::ClaimablePrize(league_id, w.winner.clone()));
+                }
+                for w in corrected_winners.iter() {
+                    if w.amount > 0 {
+                        let claim_key = DataKey::ClaimablePrize(league_id, w.winner.clone());
+                        env.storage().persistent().set(&claim_key, &w.amount);
+                        env.storage().persistent().extend_ttl(
+                            &claim_key,
+                            PERSISTENT_LIFETIME_THRESHOLD,
+                            PERSISTENT_BUMP_AMOUNT,
+                        );
+                    }
+                }
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::SettlementWinners(league_id), &corrected_winners);
+            }
+
+            token::Client::new(&env, &league.asset).transfer(
+                &env.current_contract_address(),
+                &dispute.challenger,
+                &dispute.stake,
+            );
+            env.storage().persistent().remove(&dispute_key);
+            env.storage()
+                .persistent()
+                .set(&DataKey::SettledAt(league_id), &0_u64);
+        } else {
+            Self::slash_dispute_stake_internal(&env, league_id, &dispute)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn expire_dispute(env: Env, league_id: u64) -> Result<(), EscrowError> {
+        let dispute_key = DataKey::ActiveDispute(league_id);
+        let dispute: SettlementDispute = env
+            .storage()
+            .persistent()
+            .get(&dispute_key)
+            .ok_or(EscrowError::NoDispute)?;
+        if env.ledger().timestamp() < dispute.resolve_by {
+            return Err(EscrowError::DisputeNotExpired);
+        }
+        Self::slash_dispute_stake_internal(&env, league_id, &dispute)
+    }
+
+    /// Initiates a multi-signature refund proposal for a disputed or cancelled league.
+    /// Transitions LeagueStatus to Disputed (or ArbitrationPending if already disputed).
+    pub fn propose_multisig_refund(
+        env: Env,
+        proposer: Address,
+        league_id: u64,
+        participants: Vec<Address>,
+        reason_hash: BytesN<32>,
+        lock_window_seconds: u64,
+    ) -> Result<u64, EscrowError> {
+        proposer.require_auth();
+        let config: AdminConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminConfig)
+            .ok_or(EscrowError::NotInitialized)?;
+
+        let league_key = DataKey::League(league_id);
+        let mut league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&league_key)
+            .ok_or(EscrowError::LeagueNotFound)?;
+
+        let is_authorized_signer =
+            config.signers.iter().any(|s| s == proposer) || league.creator == proposer;
+        if !is_authorized_signer {
+            return Err(EscrowError::NotAuthorized);
+        }
+
+        if league.status == LeagueStatus::Settled || league.status == LeagueStatus::Refunded {
+            return Err(EscrowError::AlreadySettled);
+        }
+        if lock_window_seconds == 0 {
+            return Err(EscrowError::InvalidDisputeConfig);
+        }
+
+        let proposal_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextRefundProposalId)
+            .unwrap_or(1);
+        env.storage()
+            .instance()
+            .set(&DataKey::NextRefundProposalId, &(proposal_id + 1));
+
+        let now = env.ledger().timestamp();
+        let mut approvals = Vec::new(&env);
+        approvals.push_back(proposer.clone());
+
+        let proposal = MultisigRefundProposal {
+            id: proposal_id,
+            league_id,
+            proposer: proposer.clone(),
+            participants,
+            reason_hash: reason_hash.clone(),
+            approvals,
+            threshold: config.threshold,
+            created_at: now,
+            timeout_at: now.saturating_add(lock_window_seconds),
+            executed: false,
+        };
+
+        let proposal_key = DataKey::RefundProposal(proposal_id);
+        env.storage().persistent().set(&proposal_key, &proposal);
+        env.storage().persistent().extend_ttl(
+            &proposal_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        league.status = LeagueStatus::Disputed;
+        env.storage().persistent().set(&league_key, &league);
+        env.storage().persistent().extend_ttl(
+            &league_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::LeagueFrozen(league_id), &true);
+        env.storage()
+            .persistent()
+            .set(&DataKey::DisputeReason(league_id), &reason_hash);
+
+        env.events().publish(
+            (Symbol::new(&env, "RefundProposed"), league_id, proposal_id),
+            (proposer, reason_hash),
+        );
+
+        Ok(proposal_id)
+    }
+
+    /// Records an arbitrator or league admin approval on an active refund proposal.
+    /// Transitions LeagueStatus to ArbitrationPending.
+    pub fn approve_multisig_refund(
+        env: Env,
+        approver: Address,
+        proposal_id: u64,
+    ) -> Result<u32, EscrowError> {
+        approver.require_auth();
+        let config: AdminConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminConfig)
+            .ok_or(EscrowError::NotInitialized)?;
+
+        let proposal_key = DataKey::RefundProposal(proposal_id);
+        let mut proposal: MultisigRefundProposal = env
+            .storage()
+            .persistent()
+            .get(&proposal_key)
+            .ok_or(EscrowError::ProposalNotFound)?;
+
+        if proposal.executed {
+            return Err(EscrowError::ProposalExecuted);
+        }
+
+        let league_key = DataKey::League(proposal.league_id);
+        let mut league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&league_key)
+            .ok_or(EscrowError::LeagueNotFound)?;
+
+        let is_authorized_signer =
+            config.signers.iter().any(|s| s == approver) || league.creator == approver;
+        if !is_authorized_signer {
+            return Err(EscrowError::NotAuthorized);
+        }
+
+        if proposal.approvals.iter().any(|a| a == approver) {
+            return Err(EscrowError::AlreadyApproved);
+        }
+
+        proposal.approvals.push_back(approver.clone());
+        let count = proposal.approvals.len();
+
+        env.storage().persistent().set(&proposal_key, &proposal);
+        env.storage().persistent().extend_ttl(
+            &proposal_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        league.status = LeagueStatus::ArbitrationPending;
+        env.storage().persistent().set(&league_key, &league);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "RefundApproved"),
+                proposal.league_id,
+                proposal_id,
+            ),
+            (approver, count),
+        );
+
+        Ok(count)
+    }
+
+    /// Executes a multi-signature authorized refund across all specified participants.
+    /// Requires M-of-N threshold approvals (e.g. 2-of-3) verified via `authorize_signers`.
+    pub fn execute_multisig_refund(
+        env: Env,
+        approvals: Vec<Address>,
+        league_id: u64,
+        participants: Vec<Address>,
+    ) -> Result<(), EscrowError> {
+        Self::authorize_signers(&env, &approvals)?;
+
+        let league_key = DataKey::League(league_id);
+        let mut league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&league_key)
+            .ok_or(EscrowError::LeagueNotFound)?;
+
+        if league.status == LeagueStatus::Settled || league.status == LeagueStatus::Refunded {
+            return Err(EscrowError::AlreadySettled);
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::LeagueFrozen(league_id));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::DisputeReason(league_id));
+
+        let token_client = token::Client::new(&env, &league.asset);
+        let mut refunded_count: u32 = 0;
+
+        for participant in participants.iter() {
+            let dep_key = DataKey::Deposit(league_id, participant.clone());
+            if let Some(deposit_amount) = env.storage().persistent().get::<_, i128>(&dep_key) {
+                if deposit_amount > 0 {
+                    token_client.transfer(
+                        &env.current_contract_address(),
+                        &participant,
+                        &deposit_amount,
+                    );
+                    refunded_count += 1;
+                }
+                env.storage().persistent().remove(&dep_key);
+            }
+        }
+
+        league.status = LeagueStatus::Refunded;
+        env.storage().persistent().set(&league_key, &league);
+        env.storage().persistent().extend_ttl(
+            &league_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "MultisigRefund"), league_id),
+            (approvals.len(), refunded_count),
+        );
+
+        Ok(())
+    }
+
+    /// Automated dispute timeout: transitions an unreviewed dispute proposal to proportional
+    /// refund mode once the configurable lock window has elapsed.
+    pub fn execute_timeout_refund(
+        env: Env,
+        caller: Address,
+        league_id: u64,
+        proposal_id: u64,
+    ) -> Result<(), EscrowError> {
+        caller.require_auth();
+
+        let proposal_key = DataKey::RefundProposal(proposal_id);
+        let mut proposal: MultisigRefundProposal = env
+            .storage()
+            .persistent()
+            .get(&proposal_key)
+            .ok_or(EscrowError::ProposalNotFound)?;
+
+        if proposal.league_id != league_id {
+            return Err(EscrowError::LeagueNotFound);
+        }
+        if proposal.executed {
+            return Err(EscrowError::ProposalExecuted);
+        }
+        if env.ledger().timestamp() < proposal.timeout_at {
+            return Err(EscrowError::DisputeNotExpired);
+        }
+
+        let league_key = DataKey::League(league_id);
+        let mut league: LeagueState = env
+            .storage()
+            .persistent()
+            .get(&league_key)
+            .ok_or(EscrowError::LeagueNotFound)?;
+
+        if league.status == LeagueStatus::Settled || league.status == LeagueStatus::Refunded {
+            return Err(EscrowError::AlreadySettled);
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::LeagueFrozen(league_id));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::DisputeReason(league_id));
+
+        let token_client = token::Client::new(&env, &league.asset);
+        let mut refunded_count: u32 = 0;
+
+        for participant in proposal.participants.iter() {
+            let dep_key = DataKey::Deposit(league_id, participant.clone());
+            if let Some(deposit_amount) = env.storage().persistent().get::<_, i128>(&dep_key) {
+                if deposit_amount > 0 {
+                    token_client.transfer(
+                        &env.current_contract_address(),
+                        &participant,
+                        &deposit_amount,
+                    );
+                    refunded_count += 1;
+                }
+                env.storage().persistent().remove(&dep_key);
+            }
+        }
+
+        proposal.executed = true;
+        env.storage().persistent().set(&proposal_key, &proposal);
+
+        league.status = LeagueStatus::Refunded;
+        env.storage().persistent().set(&league_key, &league);
+
+        env.events().publish(
+            (Symbol::new(&env, "TimeoutRefund"), league_id, proposal_id),
+            (caller, refunded_count),
+        );
+
+        Ok(())
+    }
+
+    pub fn get_refund_proposal(env: Env, proposal_id: u64) -> Option<MultisigRefundProposal> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::RefundProposal(proposal_id))
     }
 
     /// Admin / Public endpoint to manually extend TTL of a league and instance
@@ -2002,6 +2743,8 @@ impl FantasyXIEscrow {
             return Err(EscrowError::TimelockActive);
         }
 
+        Self::ensure_operational(&env)?;
+
         let required_threshold = if config.signers.len() >= 2 && config.threshold < 2 {
             2
         } else {
@@ -2101,7 +2844,11 @@ impl FantasyXIEscrow {
         );
 
         env.events().publish(
-            (Symbol::new(&env, "PauseActionProposed"), proposal_id, action as u32),
+            (
+                Symbol::new(&env, "PauseActionProposed"),
+                proposal_id,
+                action as u32,
+            ),
             (caller, reason_hash),
         );
 
@@ -2186,12 +2933,6 @@ impl FantasyXIEscrow {
             return Err(EscrowError::ProposalExecuted);
         }
 
-        if env.ledger().sequence() < proposal.unlock_ledger {
-            return Err(EscrowError::TimelockActive);
-        }
-
-        Self::ensure_operational(&env)?;
-
         let required_threshold = if config.signers.len() >= 2 && config.threshold < 2 {
             2
         } else {
@@ -2199,7 +2940,6 @@ impl FantasyXIEscrow {
         };
 
         if proposal.approvals.len() < required_threshold {
-        if proposal.approvals.len() < config.threshold {
             return Err(EscrowError::InvalidMultisig);
         }
 
@@ -2288,6 +3028,127 @@ impl FantasyXIEscrow {
     pub fn get_pause_proposal(env: Env, proposal_id: u64) -> Option<PauseProposal> {
         let key = DataKey::PauseProposal(proposal_id);
         env.storage().persistent().get(&key)
+    }
+
+    /// Configures the privacy-preserving payout batcher window and max batch size (1..=50).
+    pub fn set_batcher_config(
+        env: Env,
+        admin: Address,
+        config: BatcherConfig,
+    ) -> Result<(), EscrowError> {
+        Self::require_admin(&env, &admin)?;
+        shielded_batcher::set_config(&env, config)
+    }
+
+    /// Returns the active payout batcher configuration.
+    pub fn get_batcher_config(env: Env) -> BatcherConfig {
+        shielded_batcher::get_config(&env)
+    }
+
+    /// Registers a transparent address fingerprint so the batcher can detect and block
+    /// accidental unshielded wallet linkages.
+    pub fn register_transparent_address(
+        env: Env,
+        admin: Address,
+        address: Address,
+    ) -> Result<(), EscrowError> {
+        Self::require_admin(&env, &admin)?;
+        shielded_batcher::register_transparent_address(&env, &address);
+        Ok(())
+    }
+
+    /// Enqueues a settled gameweek reward payout into the shielded batching queue.
+    pub fn enqueue_shielded_payout(
+        env: Env,
+        admin: Address,
+        league_id: u64,
+        asset: Address,
+        shielded_recipient: BytesN<32>,
+        amount: i128,
+        blinding_factor: BytesN<32>,
+    ) -> Result<u64, EscrowError> {
+        Self::ensure_operational(&env)?;
+        Self::require_admin(&env, &admin)?;
+        shielded_batcher::enqueue_payout(
+            &env,
+            league_id,
+            asset,
+            shielded_recipient,
+            amount,
+            blinding_factor,
+        )
+    }
+
+    /// Returns all currently queued payouts for an asset.
+    pub fn get_queued_payouts(env: Env, asset: Address) -> Vec<QueuedPayout> {
+        shielded_batcher::get_queued_payouts(&env, asset)
+    }
+
+    /// Returns all quarantined (malformed or unshielded-leaking) payout records.
+    pub fn get_quarantined_payouts(env: Env) -> Vec<QuarantinedPayout> {
+        shielded_batcher::get_quarantined_payouts(&env)
+    }
+
+    /// Flushes queued payouts into unified shielded batch transactions (up to 50 outputs
+    /// per batch), isolating malformed entries without halting valid settlements.
+    pub fn flush_payout_batch(
+        env: Env,
+        admin: Address,
+        asset: Address,
+        salt: BytesN<32>,
+        expected_valid_total: Option<i128>,
+        force: bool,
+    ) -> Result<BatchExecutionReport, EscrowError> {
+        Self::ensure_operational(&env)?;
+        Self::require_admin(&env, &admin)?;
+        shielded_batcher::flush_payout_batch(&env, asset, salt, expected_valid_total, force)
+    }
+
+    /// Retrieves a stored shielded batch by ID.
+    pub fn get_shielded_batch(env: Env, batch_id: u64) -> Option<ShieldedBatch> {
+        shielded_batcher::get_batch(&env, batch_id)
+    }
+
+    /// Returns the aggregated shielded balance for a shielded recipient and asset.
+    pub fn get_shielded_balance(env: Env, shielded_recipient: BytesN<32>, asset: Address) -> i128 {
+        shielded_batcher::get_shielded_balance(&env, shielded_recipient, asset)
+    }
+
+    /// Cryptographically verifies a shielded batch proof, amount conservation, and
+    /// absence of unshielded wallet linkages.
+    pub fn verify_shielded_batch_proof(
+        env: Env,
+        batch: ShieldedBatch,
+        salt: BytesN<32>,
+        expected_proof: BytesN<32>,
+    ) -> bool {
+        shielded_batcher::verify_batch_proof(&env, &batch, &salt, &expected_proof)
+    }
+
+    /// Derives a 32-byte shielded address from a 32-byte secret preimage.
+    pub fn derive_shielded_address(env: Env, secret: BytesN<32>) -> BytesN<32> {
+        shielded_batcher::derive_shielded_address(&env, &secret)
+    }
+
+    /// Claims funds from an aggregated shielded balance by proving ownership of the
+    /// shielded address preimage, without linking the destination to any league.
+    pub fn claim_shielded_balance(
+        env: Env,
+        shielded_recipient: BytesN<32>,
+        asset: Address,
+        destination: Address,
+        amount: i128,
+        preimage_secret: BytesN<32>,
+    ) -> Result<(), EscrowError> {
+        Self::ensure_operational(&env)?;
+        shielded_batcher::claim_shielded_balance(
+            &env,
+            shielded_recipient,
+            asset,
+            destination,
+            amount,
+            preimage_secret,
+        )
     }
 }
 
@@ -2600,7 +3461,7 @@ mod test {
         assert_eq!(token_client.balance(&first), 50_000_000);
         assert_eq!(
             client.get_league(&301).unwrap().status,
-            LeagueStatus::Active
+            LeagueStatus::Upcoming
         );
         assert_eq!(client.get_league(&301).unwrap().participant_count, 1);
         assert_eq!(
@@ -2967,6 +3828,35 @@ mod test {
         assert!(!client.is_paused_view());
         client.deposit(&user, &820);
         assert_eq!(client.get_deposit(&820, &user), 50_000_000);
+    }
+
+    #[test]
+    fn test_platform_fee_bps_invariant_and_storage() {
+        let (env, admin, _token_addr, client) = setup_test();
+        let attacker = Address::generate(&env);
+
+        // Default fee is MAX_FEE_BPS (500 bps = 5%)
+        assert_eq!(client.get_platform_fee_bps(), 500);
+
+        // Non-admin setting fee fails with NotAuthorized
+        assert_eq!(
+            client.try_set_platform_fee_bps(&attacker, &300),
+            Err(Ok(EscrowError::NotAuthorized))
+        );
+
+        // Admin setting fee > MAX_FEE_BPS fails with FeeExceedsMaxCap
+        assert_eq!(
+            client.try_set_platform_fee_bps(&admin, &501),
+            Err(Ok(EscrowError::FeeExceedsMaxCap))
+        );
+        assert_eq!(
+            client.try_set_platform_fee_bps(&admin, &1000),
+            Err(Ok(EscrowError::FeeExceedsMaxCap))
+        );
+
+        // Admin setting fee <= MAX_FEE_BPS succeeds
+        assert_eq!(client.try_set_platform_fee_bps(&admin, &250), Ok(Ok(())));
+        assert_eq!(client.get_platform_fee_bps(), 250);
     }
 
     #[test]
@@ -3454,7 +4344,6 @@ mod test {
         let league = client.get_league(&702).unwrap();
         assert_eq!(league.status, LeagueStatus::Upcoming);
         assert_eq!(client.get_settlement_hash(&702), None);
-
     }
 
     #[test]
@@ -3629,12 +4518,7 @@ mod test {
         assert_eq!(premature_unpause_propose, Err(Ok(EscrowError::NotPaused)));
 
         // 3. Valid pause proposal by Signer 1
-        client.propose_pause_action(
-            &signer_one,
-            &proposal_id,
-            &PauseAction::Pause,
-            &reason_hash,
-        );
+        client.propose_pause_action(&signer_one, &proposal_id, &PauseAction::Pause, &reason_hash);
 
         let prop = client.get_pause_proposal(&proposal_id).unwrap();
         assert_eq!(prop.id, proposal_id);

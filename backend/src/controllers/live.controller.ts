@@ -1,6 +1,15 @@
 import { Request, Response, NextFunction } from "express";
 import { liveTimelineService } from "../services/live/liveTimelineService.js";
-import { liveProvisionalLeaderboardService } from "../services/live/liveProvisionalLeaderboardService.js";
+import {
+  liveProvisionalLeaderboardService,
+  maskProvisionalDiffPayloadForViewer,
+} from "../services/live/liveProvisionalLeaderboardService.js";
+import type { PrivacyViewer } from "../services/privacy/displayName.js";
+
+/** Viewer identity for name masking (issue #511); undefined when signed out. */
+function viewerOf(req: Request): PrivacyViewer | undefined {
+  return req.user ? { id: req.user.id, role: req.user.role } : undefined;
+}
 
 /**
  * GET /api/v1/live/timeline/:gameweekId
@@ -120,7 +129,7 @@ export async function getLiveProvisionalLeaderboard(
       return;
     }
 
-    const rankings = liveProvisionalLeaderboardService.getLeagueLeaderboard(leagueId);
+    const rankings = liveProvisionalLeaderboardService.getLeagueLeaderboard(leagueId, viewerOf(req));
     res.json({
       success: true,
       data: {
@@ -164,13 +173,14 @@ export async function streamLiveProvisionalLeaderboard(
 
     send("standings", {
       leagueId,
-      rankings: liveProvisionalLeaderboardService.getLeagueLeaderboard(leagueId),
+      rankings: liveProvisionalLeaderboardService.getLeagueLeaderboard(leagueId, viewerOf(req)),
     });
 
     const unsubscribe = liveProvisionalLeaderboardService.subscribeLeagueDiffs(
       leagueId,
       (diff) => {
-        send("diff", diff);
+        // Each connection gets its own masked copy of the broadcast diff.
+        send("diff", maskProvisionalDiffPayloadForViewer(diff, viewerOf(req)));
       }
     );
 

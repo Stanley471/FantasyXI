@@ -13,6 +13,8 @@ import {
   IconUsers,
 } from "@/components/ui/Icons";
 import { useVirtualList } from "@/hooks/useVirtualList";
+import { PlayerCompareModal } from "@/components/players/PlayerCompareModal";
+import { MarketTrendsPanel } from "@/components/players/MarketTrendsPanel";
 
 export default function PlayersPage() {
   const [players, setPlayers] = useState<Player[]>([]);
@@ -22,7 +24,21 @@ export default function PlayersPage() {
   const [selectedTeamId, setSelectedTeamId] = useState<string>("ALL");
   const [sortBy, setSortBy] = useState<string>("totalPoints");
   const [sortOrder, setSortOrder] = useState<"desc" | "asc">("desc");
+  const [priceChangedOnly, setPriceChangedOnly] = useState(false);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [compareIds, setCompareIds] = useState<number[]>([]);
+  const [isCompareOpen, setIsCompareOpen] = useState(false);
+
+  function toggleCompare(playerId: number) {
+    setCompareIds((prev) => {
+      if (prev.includes(playerId)) return prev.filter((id) => id !== playerId);
+      if (prev.length >= 2) return [prev[1], playerId];
+      return [...prev, playerId];
+    });
+  }
+
+  const compareA = players.find((p) => p.id === compareIds[0]) ?? null;
+  const compareB = players.find((p) => p.id === compareIds[1]) ?? null;
 
   // Ref on the scrollable table wrapper for the virtualiser
   const tableContainerRef = useRef<HTMLDivElement>(null);
@@ -66,6 +82,7 @@ export default function PlayersPage() {
         params.set("sortBy", sortBy);
         params.set("sortOrder", sortOrder);
         params.set("limit", "100");
+        if (priceChangedOnly) params.set("priceChanged", "true");
 
         const res = await api.get<{
           success: boolean;
@@ -84,7 +101,7 @@ export default function PlayersPage() {
     }, 200);
 
     return () => clearTimeout(timer);
-  }, [search, selectedPosition, selectedTeamId, sortBy, sortOrder]);
+  }, [search, selectedPosition, selectedTeamId, sortBy, sortOrder, priceChangedOnly]);
 
   return (
     <div className="space-y-6 pb-12 max-w-full overflow-x-hidden">
@@ -185,13 +202,19 @@ export default function PlayersPage() {
             ))}
           </div>
 
-          <div className="text-xs font-mono text-slate-400">
-            Showing {players.length} players
+          <div className="flex items-center gap-3 text-xs font-mono text-slate-400">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" checked={priceChangedOnly} onChange={(event) => setPriceChangedOnly(event.target.checked)} className="accent-emerald-600" />
+              Price changed in 24h
+            </label>
+            <span>Showing {players.length} players</span>
           </div>
         </div>
       </div>
 
       {/* Players Data Table — virtualised */}
+      <MarketTrendsPanel />
+
       <div className="bg-white border border-slate-200/80 rounded-3xl shadow-sm overflow-hidden">
         {isLoading ? (
           <div className="py-24 text-center text-slate-400">
@@ -203,6 +226,7 @@ export default function PlayersPage() {
             <table className="w-full text-left border-collapse text-xs">
               <thead>
                 <tr className="border-b border-slate-200 text-slate-500 uppercase font-bold text-[10px] bg-slate-50 tracking-wider">
+                  <th className="py-3 px-3 w-10 text-center">Cmp</th>
                   <th className="py-3 px-4">Player</th>
                   <th className="py-3 px-3">Position</th>
                   <th className="py-3 px-3">Club</th>
@@ -244,8 +268,20 @@ export default function PlayersPage() {
                           tableLayout: "fixed",
                         }}
                       >
+                        {/* Compare checkbox */}
+                        <td className="py-3 px-3 text-center" style={{ width: "4%" }}>
+                          <input
+                            type="checkbox"
+                            aria-label={`Select ${p.displayName || p.lastName} to compare`}
+                            checked={compareIds.includes(p.id)}
+                            disabled={!compareIds.includes(p.id) && compareIds.length >= 2}
+                            onChange={() => toggleCompare(p.id)}
+                            className="w-3.5 h-3.5 accent-emerald-600 cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
+                          />
+                        </td>
+
                         {/* Name */}
-                        <td className="py-3 px-4" style={{ width: "22%" }}>
+                        <td className="py-3 px-4" style={{ width: "18%" }}>
                           <div className="font-bold text-slate-900 text-xs sm:text-sm truncate">
                             {p.displayName || `${p.firstName} ${p.lastName}`}
                           </div>
@@ -267,6 +303,11 @@ export default function PlayersPage() {
                         {/* Price */}
                         <td className="py-3 px-3 text-right font-mono font-bold text-slate-900" style={{ width: "9%" }}>
                           £{(p.price / 10).toFixed(1)}m
+                          {Boolean(p.priceDelta) && (
+                            <span className={`ml-1.5 rounded px-1 py-0.5 text-[9px] ${p.priceDelta! > 0 ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>
+                              {p.priceDelta! > 0 ? "+" : ""}{p.priceDelta!.toFixed(1)}
+                            </span>
+                          )}
                         </td>
 
                         {/* Points */}
@@ -341,6 +382,7 @@ export default function PlayersPage() {
                         <div className="text-slate-400 uppercase tracking-wide text-[9px] font-bold">£</div>
                         <div className="font-mono font-bold text-slate-900 text-[11px] pt-0.5">
                           {(p.price / 10).toFixed(1)}m
+                          {Boolean(p.priceDelta) && <span className={p.priceDelta! > 0 ? "ml-1 text-emerald-700" : "ml-1 text-rose-700"}>{p.priceDelta! > 0 ? "+" : ""}{p.priceDelta!.toFixed(1)}</span>}
                         </div>
                       </div>
                       <div className="rounded-xl bg-slate-50 border border-slate-200/80 px-2 py-1.5">
@@ -446,6 +488,42 @@ export default function PlayersPage() {
           </div>
         )}
       </div>
+
+      {/* Compare selection bar */}
+      {compareIds.length > 0 && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 bg-slate-900 text-white rounded-2xl shadow-xl px-4 py-3 text-xs">
+          <span className="font-medium">
+            {compareIds.length === 2
+              ? "2 players selected"
+              : "Select 1 more player to compare"}
+          </span>
+          <Button
+            variant="primary"
+            size="sm"
+            disabled={compareIds.length !== 2}
+            onClick={() => setIsCompareOpen(true)}
+            className="uppercase font-bold tracking-wide text-[11px] disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Compare
+          </Button>
+          <button
+            type="button"
+            onClick={() => setCompareIds([])}
+            className="text-slate-400 hover:text-white underline"
+          >
+            Clear
+          </button>
+        </div>
+      )}
+
+      {compareA && compareB && (
+        <PlayerCompareModal
+          isOpen={isCompareOpen}
+          onClose={() => setIsCompareOpen(false)}
+          playerA={compareA}
+          playerB={compareB}
+        />
+      )}
     </div>
   );
 }

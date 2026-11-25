@@ -569,8 +569,28 @@ export const TrendingUpIcon: React.FC<IconProps> = ({ size = 20, className = "",
   </svg>
 );
 
+export const DownloadIcon: React.FC<IconProps> = ({ size = 20, className = "", ...props }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+    {...props}
+  >
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+    <polyline points="7 10 12 15 17 10" />
+    <line x1="12" x2="12" y1="15" y2="3" />
+  </svg>
+);
+
 // Convenient Icon* aliases
 export {
+  DownloadIcon as IconDownload,
   FootballIcon as IconFootball,
   PitchIcon as IconPitch,
   TrophyIcon as IconTrophy,

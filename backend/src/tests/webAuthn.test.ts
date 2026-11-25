@@ -452,7 +452,7 @@ describe("Passkey API (integration, #273)", () => {
   async function signUp() {
     const res = await send("POST", "/api/v1/auth/register", {
       email: "manager@example.com",
-      password: "correct-horse-battery",
+      password: "Correct-horse-battery1",
       username: "manager",
     });
     assert.equal(res.status, 201);
@@ -503,7 +503,7 @@ describe("Passkey API (integration, #273)", () => {
 
     const passwordLogin = await send("POST", "/api/v1/auth/login", {
       email: "manager@example.com",
-      password: "correct-horse-battery",
+      password: "Correct-horse-battery1",
     });
     assert.equal(passwordLogin.status, 202);
     assert.equal(passwordLogin.body.data.method, "WEBAUTHN");
