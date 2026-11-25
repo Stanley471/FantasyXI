@@ -18,6 +18,7 @@ import {
   resolveDisputeRefundHandler,
   rejectDisputeHandler,
   executeMerkleSettlementHandler,
+  sponsorFeeHandler,
 } from "../controllers/financial.controller.js";
 import { requireAuth, requirePermission, requireRole } from "../middleware/authMiddleware.js";
 import { Permission, UserRole } from "../types/index.js";
@@ -135,6 +136,14 @@ router.post(
   mutationRateLimiter,
   requirePermission(Permission.DISPUTE_ARBITRATE),
   processDisputeTimeoutsHandler
+);
+
+// Stellar fee-bump transaction sponsorship endpoint (Issue #549)
+router.post(
+  "/sponsor-fee",
+  mutationRateLimiter,
+  requirePermission(Permission.PAYMENT_MANAGE_OWN),
+  sponsorFeeHandler
 );
 
 export default router;

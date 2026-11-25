@@ -13,6 +13,7 @@ import {
   IconUsers,
 } from "@/components/ui/Icons";
 import { useVirtualList } from "@/hooks/useVirtualList";
+import { PlayerCompareModal } from "@/components/players/PlayerCompareModal";
 import { MarketTrendsPanel } from "@/components/players/MarketTrendsPanel";
 
 export default function PlayersPage() {
@@ -25,6 +26,19 @@ export default function PlayersPage() {
   const [sortOrder, setSortOrder] = useState<"desc" | "asc">("desc");
   const [priceChangedOnly, setPriceChangedOnly] = useState(false);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [compareIds, setCompareIds] = useState<number[]>([]);
+  const [isCompareOpen, setIsCompareOpen] = useState(false);
+
+  function toggleCompare(playerId: number) {
+    setCompareIds((prev) => {
+      if (prev.includes(playerId)) return prev.filter((id) => id !== playerId);
+      if (prev.length >= 2) return [prev[1], playerId];
+      return [...prev, playerId];
+    });
+  }
+
+  const compareA = players.find((p) => p.id === compareIds[0]) ?? null;
+  const compareB = players.find((p) => p.id === compareIds[1]) ?? null;
 
   // Ref on the scrollable table wrapper for the virtualiser
   const tableContainerRef = useRef<HTMLDivElement>(null);
@@ -212,6 +226,7 @@ export default function PlayersPage() {
             <table className="w-full text-left border-collapse text-xs">
               <thead>
                 <tr className="border-b border-slate-200 text-slate-500 uppercase font-bold text-[10px] bg-slate-50 tracking-wider">
+                  <th className="py-3 px-3 w-10 text-center">Cmp</th>
                   <th className="py-3 px-4">Player</th>
                   <th className="py-3 px-3">Position</th>
                   <th className="py-3 px-3">Club</th>
@@ -253,8 +268,20 @@ export default function PlayersPage() {
                           tableLayout: "fixed",
                         }}
                       >
+                        {/* Compare checkbox */}
+                        <td className="py-3 px-3 text-center" style={{ width: "4%" }}>
+                          <input
+                            type="checkbox"
+                            aria-label={`Select ${p.displayName || p.lastName} to compare`}
+                            checked={compareIds.includes(p.id)}
+                            disabled={!compareIds.includes(p.id) && compareIds.length >= 2}
+                            onChange={() => toggleCompare(p.id)}
+                            className="w-3.5 h-3.5 accent-emerald-600 cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
+                          />
+                        </td>
+
                         {/* Name */}
-                        <td className="py-3 px-4" style={{ width: "22%" }}>
+                        <td className="py-3 px-4" style={{ width: "18%" }}>
                           <div className="font-bold text-slate-900 text-xs sm:text-sm truncate">
                             {p.displayName || `${p.firstName} ${p.lastName}`}
                           </div>
@@ -461,6 +488,42 @@ export default function PlayersPage() {
           </div>
         )}
       </div>
+
+      {/* Compare selection bar */}
+      {compareIds.length > 0 && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 bg-slate-900 text-white rounded-2xl shadow-xl px-4 py-3 text-xs">
+          <span className="font-medium">
+            {compareIds.length === 2
+              ? "2 players selected"
+              : "Select 1 more player to compare"}
+          </span>
+          <Button
+            variant="primary"
+            size="sm"
+            disabled={compareIds.length !== 2}
+            onClick={() => setIsCompareOpen(true)}
+            className="uppercase font-bold tracking-wide text-[11px] disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Compare
+          </Button>
+          <button
+            type="button"
+            onClick={() => setCompareIds([])}
+            className="text-slate-400 hover:text-white underline"
+          >
+            Clear
+          </button>
+        </div>
+      )}
+
+      {compareA && compareB && (
+        <PlayerCompareModal
+          isOpen={isCompareOpen}
+          onClose={() => setIsCompareOpen(false)}
+          playerA={compareA}
+          playerB={compareB}
+        />
+      )}
     </div>
   );
 }

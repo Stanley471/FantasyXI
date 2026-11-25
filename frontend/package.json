@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "type-check": "tsc --noEmit",
+    "test": "tsx --test src/tests/toast.test.ts src/tests/leagueChat.test.tsx src/tests/leaderboard.test.tsx src/tests/dragAndDropSubstitutions.test.ts src/tests/walletModal.test.ts src/tests/offlineQueue.test.ts src/tests/offlineSync.test.ts src/tests/livePitch.test.tsx src/tests/countdownTimer.test.tsx src/tests/copyButton.test.tsx src/tests/offlineIndicator.test.tsx src/tests/playerCompareModal.test.tsx",
     "test": "tsx --test src/tests/toast.test.ts src/tests/leagueChat.test.tsx src/tests/leaderboard.test.tsx src/tests/dragAndDropSubstitutions.test.ts src/tests/walletModal.test.ts src/tests/offlineQueue.test.ts src/tests/offlineSync.test.ts src/tests/livePitch.test.tsx src/tests/countdownTimer.test.tsx src/tests/copyButton.test.tsx src/tests/sharedWorkerSync.test.ts src/tests/tournamentBracket.test.tsx src/tests/gameweekRadar.test.tsx src/tests/dragDropFormationBuilder.test.ts src/tests/trustline.test.tsx src/tests/stellarNetworkStatus.test.tsx src/tests/sorobanSimulation.test.ts src/tests/connectWalletModal.test.tsx src/tests/theme.tokens.test.ts src/tests/theme.contrast.test.ts src/tests/theme.context.test.tsx src/tests/positionBadge.test.tsx src/tests/multiChainWalletLinker.test.ts",
     "test:e2e": "playwright test"
   },

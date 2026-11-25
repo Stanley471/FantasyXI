@@ -23,6 +23,7 @@ const INSTANCE_LIFETIME_THRESHOLD: u32 = 14 * DAY_IN_LEDGERS;
 const PERSISTENT_BUMP_AMOUNT: u32 = 30 * DAY_IN_LEDGERS;
 const PERSISTENT_LIFETIME_THRESHOLD: u32 = 14 * DAY_IN_LEDGERS;
 const EMERGENCY_REFUND_TIMELOCK_SECONDS: u64 = 14 * 24 * 60 * 60;
+pub const MAX_FEE_BPS: u32 = 500; // Hard invariant: max 5% platform fee
 pub const PARTICIPANTS_PER_PAGE: u32 = 50;
 pub const TIMELOCK_DELAY_LEDGERS: u32 = 2 * DAY_IN_LEDGERS; // 34,560 ledgers (48 hours)
 pub const UPGRADE_TIMELOCK_LEDGERS: u32 = TIMELOCK_DELAY_LEDGERS;
@@ -217,6 +218,7 @@ pub enum DataKey {
     Claimed(u64, Address),
     DisputeReason(u64),
     DisputeConfig,
+    PlatformFeeBps,
     SettlementWinners(u64),
     SettledAt(u64),
     ActiveDispute(u64),
@@ -401,6 +403,32 @@ impl FantasyXIEscrow {
     /// Returns whether the escrow is currently paused.
     pub fn is_paused_view(env: Env) -> bool {
         Self::is_paused(&env)
+    }
+
+    /// Configures the platform fee basis points subject to the immutable MAX_FEE_BPS cap.
+    pub fn set_platform_fee_bps(
+        env: Env,
+        admin: Address,
+        fee_bps: u32,
+    ) -> Result<(), EscrowError> {
+        Self::require_admin(&env, &admin)?;
+        if fee_bps > MAX_FEE_BPS {
+            return Err(EscrowError::FeeExceedsMaxCap);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::PlatformFeeBps, &fee_bps);
+        env.events()
+            .publish((Symbol::new(&env, "PlatformFeeBpsSet"),), fee_bps);
+        Ok(())
+    }
+
+    /// Returns the configured platform fee basis points (defaulting to MAX_FEE_BPS if unset).
+    pub fn get_platform_fee_bps(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::PlatformFeeBps)
+            .unwrap_or(MAX_FEE_BPS)
     }
 
     /// Admin quorum appoints the guardian allowed to trigger a federated emergency pause.
@@ -934,7 +962,12 @@ impl FantasyXIEscrow {
         }
 
         // Platform Fee Hard Cap check
-        let max_fee = (league.total_deposited * 500) / 10000;
+        let fee_bps = env
+            .storage()
+            .instance()
+            .get::<_, u32>(&DataKey::PlatformFeeBps)
+            .unwrap_or(MAX_FEE_BPS);
+        let max_fee = (league.total_deposited * (fee_bps as i128)) / 10000;
         if platform_fee > max_fee {
             return Err(EscrowError::FeeExceedsMaxCap);
         }
@@ -1620,7 +1653,12 @@ impl FantasyXIEscrow {
             return Err(EscrowError::AlreadySettled);
         }
 
-        let max_fee = (league.total_deposited * 500) / 10000;
+        let fee_bps = env
+            .storage()
+            .instance()
+            .get::<_, u32>(&DataKey::PlatformFeeBps)
+            .unwrap_or(MAX_FEE_BPS);
+        let max_fee = (league.total_deposited * (fee_bps as i128)) / 10000;
         if platform_fee > max_fee || platform_fee < 0 {
             return Err(EscrowError::FeeExceedsMaxCap);
         }
@@ -3790,6 +3828,35 @@ mod test {
         assert!(!client.is_paused_view());
         client.deposit(&user, &820);
         assert_eq!(client.get_deposit(&820, &user), 50_000_000);
+    }
+
+    #[test]
+    fn test_platform_fee_bps_invariant_and_storage() {
+        let (env, admin, _token_addr, client) = setup_test();
+        let attacker = Address::generate(&env);
+
+        // Default fee is MAX_FEE_BPS (500 bps = 5%)
+        assert_eq!(client.get_platform_fee_bps(), 500);
+
+        // Non-admin setting fee fails with NotAuthorized
+        assert_eq!(
+            client.try_set_platform_fee_bps(&attacker, &300),
+            Err(Ok(EscrowError::NotAuthorized))
+        );
+
+        // Admin setting fee > MAX_FEE_BPS fails with FeeExceedsMaxCap
+        assert_eq!(
+            client.try_set_platform_fee_bps(&admin, &501),
+            Err(Ok(EscrowError::FeeExceedsMaxCap))
+        );
+        assert_eq!(
+            client.try_set_platform_fee_bps(&admin, &1000),
+            Err(Ok(EscrowError::FeeExceedsMaxCap))
+        );
+
+        // Admin setting fee <= MAX_FEE_BPS succeeds
+        assert_eq!(client.try_set_platform_fee_bps(&admin, &250), Ok(Ok(())));
+        assert_eq!(client.get_platform_fee_bps(), 250);
     }
 
     #[test]

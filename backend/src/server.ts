@@ -46,6 +46,8 @@ import {
   type StellarStreamService,
 } from "./services/financial/stellarStreamService.js";
 import { createConnectionLeakDetector } from "./services/monitoring/connectionLeakDetector.js";
+import { startSessionStreamSubscriber, stopSessionStreamSubscriber } from "./services/auth/sessionStreamSync.js";
+import { outboxRelayWorker } from "./services/outbox/outboxRelayWorker.js";
 
 dotenv.config();
 
@@ -325,6 +327,14 @@ async function startServer(): Promise<void> {
   liveSocketServer = attachLiveSocketServer(httpServer);
   startTransactionCoordinator();
 
+  // Issue #439: start cross-node session revocation stream subscriber
+  startSessionStreamSubscriber();
+
+  // Issue #438: start transactional outbox relay worker
+  if (process.env.DATABASE_URL && process.env.OUTBOX_RELAY_ENABLED !== "false") {
+    outboxRelayWorker.start();
+  }
+
   // Initialize JWT signing key rotation and preload keys
   await jwtKeyRotationService.start().catch((err) => {
     console.warn("[jwt-keys] Failed to initialize key rotation service:", err);
@@ -341,6 +351,7 @@ process.on("SIGTERM", () => {
   partitionRotationWorker.stop();
   sorobanEventIngestion?.stop();
   stellarStream?.stop();
+  outboxRelayWorker.stop();
   // Persist buffered financial audit entries before exiting
   stopJobQueue()
     .finally(() => transactionCoordinator.stop())
@@ -351,6 +362,7 @@ process.on("SIGTERM", () => {
     .finally(() => liveSocketServer?.close())
     .finally(() => chatAdapter?.close())
     .finally(() => eventFanout.close())
+    .finally(() => stopSessionStreamSubscriber())
     .finally(() => closeRedisClient())
     .finally(() => connectionLeakDetector?.stop())
     .finally(() => process.exit(0));

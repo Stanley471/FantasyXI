@@ -14,6 +14,7 @@ import {
 } from "@/types";
 import { PrizeCalculator } from "@/components/leagues/PrizeCalculator";
 import { PaymentModal } from "@/components/leagues/PaymentModal";
+import { ClaimPrizeModal } from "@/components/leagues/ClaimPrizeModal";
 import { InvitationManager } from "@/components/leagues/InvitationManager";
 import { getOnChainLeague, OnChainLeagueState } from "@/lib/stellar/sorobanAudit";
 import { LiveMatchdayBar } from "@/components/live/LiveMatchdayBar";
@@ -67,6 +68,7 @@ export function LeagueInteractivePanel({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [copiedCode, setCopiedCode] = useState<boolean>(false);
   const [showPaymentModal, setShowPaymentModal] = useState<boolean>(false);
+  const [showClaimModal, setShowClaimModal] = useState<boolean>(false);
   const [liveSquadUserId, setLiveSquadUserId] = useState<string | null>(null);
   const [onChainLeague, setOnChainLeague] = useState<OnChainLeagueState | null>(null);
   const [auditError, setAuditError] = useState<string | null>(null);
@@ -407,6 +409,17 @@ export function LeagueInteractivePanel({
             >
               Pay {league.entryFee} USDC Entry Fee
             </Button>
+          ) : isMember && (league.status === LeagueStatus.COMPLETED || onChainLeague?.isSettled) ? (
+            <Button
+              type="button"
+              variant="primary"
+              size="md"
+              onClick={() => setShowClaimModal(true)}
+              className="uppercase font-bold tracking-wide text-xs bg-emerald-500 hover:bg-emerald-400 text-slate-950 flex items-center gap-1.5"
+            >
+              <IconTrophy className="w-4 h-4" />
+              Claim Prize
+            </Button>
           ) : !isMember && !league.isPrivate ? (
             <Button
               type="button"
@@ -650,6 +663,25 @@ export function LeagueInteractivePanel({
           entryFee={league.entryFee}
           onPaymentSuccess={(deposit) => {
             setDepositEvidence(deposit);
+            loadLeagueData();
+          }}
+        />
+      )}
+
+      {/* Soroban Escrow Prize Claim Modal */}
+      {showClaimModal && (
+        <ClaimPrizeModal
+          isOpen={showClaimModal}
+          onClose={() => setShowClaimModal(false)}
+          leagueId={league.id}
+          leagueName={league.name}
+          prizeAmount={
+            league.prizePool > 0
+              ? Math.round(league.prizePool * 0.6 * 100) / 100
+              : 0
+          }
+          escrowContractId={escrowContractId}
+          onClaimSuccess={() => {
             loadLeagueData();
           }}
         />

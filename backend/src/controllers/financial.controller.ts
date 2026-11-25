@@ -687,3 +687,48 @@ export async function executeMerkleSettlementHandler(
     next(error);
   }
 }
+
+export async function sponsorFeeHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const { signedXdr, transactionXdr, xdr, leagueId, squadId } = req.body ?? {};
+    const candidateXdr = signedXdr || transactionXdr || xdr;
+
+    if (!candidateXdr || typeof candidateXdr !== "string" || !candidateXdr.trim()) {
+      res.status(400).json({
+        success: false,
+        message: "A valid signed transaction XDR is required in request body.",
+      });
+      return;
+    }
+
+    const { FeeBumpService } = await import("../services/financial/feeBumpService.js");
+    const feeBumpService = new FeeBumpService();
+
+    const result = await feeBumpService.submitFeeBump(candidateXdr.trim(), {
+      leagueId: leagueId || null,
+      userId: req.user?.id || null,
+    });
+
+    if (!result.success) {
+      res.status(400).json({
+        success: false,
+        message: result.error || "Failed to sponsor and submit fee-bump transaction",
+        data: result,
+      });
+      return;
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Transaction sponsored and submitted successfully",
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+

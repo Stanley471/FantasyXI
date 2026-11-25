@@ -21,7 +21,10 @@ import auditRoutes from "./audit.routes.js";
 import auditAnchorRoutes from "./auditAnchor.routes.js";
 import telemetryRoutes from "./telemetry.routes.js";
 import { replicaReads } from "../middleware/readConsistency.js";
-import { getProofOfReserve } from "../controllers/financial.controller.js";
+import { getProofOfReserve, sponsorFeeHandler } from "../controllers/financial.controller.js";
+import { requireAuth, requirePermission } from "../middleware/authMiddleware.js";
+import { mutationRateLimiter } from "../middleware/rateLimiter.js";
+import { Permission } from "../types/index.js";
 import { fplDataFreshness } from "../middleware/fplDataFreshness.js";
 
 /**
@@ -47,6 +50,14 @@ apiV1Router.use("/financial", financialRoutes);
 apiV1Router.use("/fx", fxOracleRoutes);
 // Public: latest proof-of-reserve roots and totals (no participant data)
 apiV1Router.get("/proof-of-reserve", getProofOfReserve);
+// Stellar fee-bump transaction sponsorship alias (Issue #549)
+apiV1Router.post(
+  "/stellar/sponsor-fee",
+  requireAuth,
+  mutationRateLimiter,
+  requirePermission(Permission.PAYMENT_MANAGE_OWN),
+  sponsorFeeHandler
+);
 apiV1Router.use("/webhooks", webhookRoutes);
 apiV1Router.use("/audit", auditRoutes);
 // Public: on-chain audit anchors for settled gameweeks (digest and verification only)
