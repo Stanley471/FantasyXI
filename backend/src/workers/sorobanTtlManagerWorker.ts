@@ -26,8 +26,8 @@ import {
 } from "../services/financial/sorobanContractClient.js";
 import { toContractLeagueId } from "../services/financial/contractLeagueId.js";
 
-/** Default safety margin: 5 days in ledgers (1 ledger ~ 5s => 17,280 ledgers/day => 86,400 ledgers). */
-export const DEFAULT_TTL_MARGIN_LEDGERS = 86_400;
+/** Default safety margin: 100,000 ledgers (per issue #548, ~5.7 days at 5s/ledger). */
+export const DEFAULT_TTL_MARGIN_LEDGERS = 100_000;
 
 /** Default bump amount: 30 days in ledgers (518,400 ledgers). */
 export const DEFAULT_TTL_EXTEND_TO_LEDGERS = 518_400;
@@ -225,13 +225,31 @@ export class SorobanTtlManagerWorker extends EventEmitter {
         });
 
         if (this.adminSecret) {
-          // Any active league ID can be used with extend_league_ttl to bump instance TTL,
-          // or we trigger instance extension directly.
-          this.emit("ttl:instance_extended", {
-            liveUntilLedgerSeq: instanceTtl.liveUntilLedgerSeq,
-            targetLedgers: this.extendToLedgers,
-          });
-          summary.instanceExtended = true;
+          if (typeof this.contractClient.extendContractInstanceTtl === "function") {
+            const extResult = await this.contractClient.extendContractInstanceTtl(
+              this.adminSecret,
+              this.extendToLedgers
+            );
+            if (extResult && !extResult.success) {
+              summary.errors.push(`Failed to extend instance TTL: ${extResult.error}`);
+            } else {
+              summary.instanceExtended = true;
+              this.emit("ttl:instance_extended", {
+                liveUntilLedgerSeq: instanceTtl.liveUntilLedgerSeq,
+                targetLedgers: this.extendToLedgers,
+                txHash: extResult?.txHash,
+                gasConsumed: extResult?.gasConsumed,
+              });
+            }
+          } else {
+            // Any active league ID can be used with extend_league_ttl to bump instance TTL,
+            // or we trigger instance extension directly.
+            this.emit("ttl:instance_extended", {
+              liveUntilLedgerSeq: instanceTtl.liveUntilLedgerSeq,
+              targetLedgers: this.extendToLedgers,
+            });
+            summary.instanceExtended = true;
+          }
         } else {
           summary.errors.push("Cannot extend instance TTL: admin secret not configured");
         }
@@ -318,12 +336,21 @@ export class SorobanTtlManagerWorker extends EventEmitter {
         };
       }
 
-      const extResult: InvocationResult = await this.contractClient.extendLeagueTtl(
-        this.adminSecret,
-        contractLeagueId,
-        this.marginThresholdLedgers,
-        this.extendToLedgers
-      );
+      let extResult: InvocationResult;
+      if (typeof this.contractClient.extendContractDataTtl === "function") {
+        extResult = await this.contractClient.extendContractDataTtl(
+          this.adminSecret,
+          contractLeagueId,
+          this.extendToLedgers
+        );
+      } else {
+        extResult = await this.contractClient.extendLeagueTtl(
+          this.adminSecret,
+          contractLeagueId,
+          this.marginThresholdLedgers,
+          this.extendToLedgers
+        );
+      }
 
       if (extResult.success) {
         summary.leaguesExtended++;
@@ -331,6 +358,7 @@ export class SorobanTtlManagerWorker extends EventEmitter {
           leagueId,
           contractLeagueId: contractLeagueId.toString(),
           txHash: extResult.txHash,
+          gasConsumed: extResult.gasConsumed,
         });
         return {
           leagueId,

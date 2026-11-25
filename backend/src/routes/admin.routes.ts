@@ -13,7 +13,11 @@ import {
   applyTierTransitions,
   listH2HAnomalies,
 } from "../controllers/leagueAdmin.controller.js";
-import { listSecurityAnomalies, getLeagueSybilReport } from "../controllers/securityAdmin.controller.js";
+import {
+  listSecurityAnomalies,
+  getLeagueSybilReport,
+  releaseSybilPayoutHold,
+} from "../controllers/securityAdmin.controller.js";
 import { verifyAuditChainHandler } from "../controllers/audit.controller.js";
 import {
   runLedgerReconciliation,
@@ -76,6 +80,12 @@ router.get(
   "/security/sybil/leagues/:leagueId",
   requirePermission(Permission.SECURITY_REVIEW),
   getLeagueSybilReport
+);
+
+router.delete(
+  "/security/sybil/leagues/:leagueId/holds/:userId",
+  requirePermission(Permission.SECURITY_REVIEW),
+  releaseSybilPayoutHold
 );
 
 // GET /api/v1/admin/leagues/:leagueId/h2h-anomalies

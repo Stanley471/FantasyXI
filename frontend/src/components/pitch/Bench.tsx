@@ -5,6 +5,7 @@ import { Position, SquadPlayer, Player } from "@/types";
 import { PlayerCard } from "./PlayerCard";
 
 import { useTeamStore } from "@/store/teamStore";
+import { useFlipAnimation } from "@/lib/flipAnimation";
 
 interface BenchProps {
   isLoading?: boolean;
@@ -27,8 +28,11 @@ export const Bench: React.FC<BenchProps> = ({ isLoading = false }) => {
     Position.FWD,
   ];
 
+  // FLIP re-ordering animation (#462), as on the pitch.
+  const benchRef = useFlipAnimation(benchPlayers);
+
   return (
-    <div className="w-full bg-slate-950/90 border border-pitch-border rounded-xl p-4 sm:p-5 shadow-inner" data-testid="bench">
+    <div ref={benchRef} className="w-full bg-slate-950/90 border border-pitch-border rounded-xl p-4 sm:p-5 shadow-inner" data-testid="bench">
       <div className="flex items-center justify-between mb-3 px-1">
         <div className="flex items-center gap-2">
           <span className="w-2 h-2 rounded-full bg-amber-400" />

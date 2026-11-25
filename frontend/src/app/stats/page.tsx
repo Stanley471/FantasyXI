@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import { IconChart, IconTrendingUp } from "@/components/ui/Icons";
+import { PositionBadge } from "@/components/ui/PositionBadge";
 
 interface PlayerStat {
   id: number;
@@ -97,8 +98,8 @@ export default function StatsDashboardPage() {
                     <div key={player.id} className="flex items-center text-xs gap-4">
                       <span className="w-6 text-slate-400 font-mono text-right font-bold">{idx + 1}.</span>
                       <span className="w-40 font-bold truncate text-slate-900">{player.displayName}</span>
-                      <span className="w-14 text-[10px] font-bold text-slate-500 text-center font-mono bg-slate-100 rounded-md py-0.5">
-                        {player.position}
+                      <span className="w-14 flex justify-center">
+                        <PositionBadge position={player.position} />
                       </span>
                       <span className="w-24 text-xs text-slate-500 truncate">{player.teamName}</span>
                       <div className="flex-1 bg-slate-100 rounded-full h-3 overflow-hidden border border-slate-200 relative">
@@ -159,9 +160,7 @@ export default function StatsDashboardPage() {
                       <tr key={player.id} className="hover:bg-slate-50 transition">
                         <td className="py-2.5 px-4 font-bold text-slate-900">{player.displayName}</td>
                         <td className="py-2.5 px-4">
-                          <span className="text-[10px] font-bold font-mono text-slate-600 bg-slate-100 px-1.5 py-0.5 rounded">
-                            {player.position}
-                          </span>
+                          <PositionBadge position={player.position} />
                         </td>
                         <td className="py-2.5 px-4 text-slate-500">{player.teamName}</td>
                         <td className="py-2.5 px-4 text-right font-mono font-medium">£{player.price.toFixed(1)}m</td>

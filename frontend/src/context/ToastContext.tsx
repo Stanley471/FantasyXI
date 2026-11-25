@@ -53,7 +53,8 @@ export function emitToast(
   options?: ToastOptions
 ): void {
   if (typeof window !== "undefined") {
-    const event = new CustomEvent<ToastCustomEventDetail>(TOAST_EVENT_NAME, {
+    const EventCtor = (window as unknown as { CustomEvent?: typeof CustomEvent }).CustomEvent ?? CustomEvent;
+    const event = new EventCtor<ToastCustomEventDetail>(TOAST_EVENT_NAME, {
       detail: { message, type, options },
     });
     window.dispatchEvent(event);

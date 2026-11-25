@@ -45,6 +45,23 @@ function createMockAuthDb() {
         }
         return null;
       },
+      update: async ({
+        where,
+        data,
+      }: {
+        where: { id: string };
+        data: { passwordHash?: string };
+      }) => {
+        const user = users.find((u) => u.id === where.id);
+        if (!user) {
+          throw new Error("User not found");
+        }
+        if (data.passwordHash !== undefined) {
+          user.passwordHash = data.passwordHash;
+        }
+        user.updatedAt = new Date();
+        return user;
+      },
       create: async ({
         data,
       }: {
@@ -136,7 +153,7 @@ describe("AuthService Registration & Login Domain Rules", () => {
 
     const result = await service.register({
       email: "stanley@example.com",
-      password: "password123",
+      password: "Password123!",
       name: "Stanley",
     });
 
@@ -152,8 +169,8 @@ describe("AuthService Registration & Login Domain Rules", () => {
 
     // 3. Password was hashed in the database
     const saved = mockDb.users[0];
-    assert.notEqual(saved.passwordHash, "password123");
-    const isMatch = await bcrypt.compare("password123", saved.passwordHash);
+    assert.notEqual(saved.passwordHash, "Password123!");
+    const isMatch = await bcrypt.compare("Password123!", saved.passwordHash);
     assert.equal(isMatch, true);
 
     // 4. Token is valid JWT
@@ -169,7 +186,7 @@ describe("AuthService Registration & Login Domain Rules", () => {
 
     await service.register({
       email: "  Stanley.Test@EXAMPLE.COM  ",
-      password: "password123",
+      password: "Password123!",
     });
 
     const saved = mockDb.users[0];
@@ -178,7 +195,7 @@ describe("AuthService Registration & Login Domain Rules", () => {
     // Login with mixed case should also succeed
     const loginResult = await service.login({
       email: "STANLEY.TEST@example.com",
-      password: "password123",
+      password: "Password123!",
     });
 
     assert.equal(loginResult.user.email, "stanley.test@example.com");
@@ -192,7 +209,7 @@ describe("AuthService Registration & Login Domain Rules", () => {
       async () => {
         await service.register({
           email: "not-an-email",
-          password: "password123",
+          password: "Password123!",
         });
       },
       (err: unknown) => {
@@ -228,14 +245,14 @@ describe("AuthService Registration & Login Domain Rules", () => {
 
     await service.register({
       email: "user@example.com",
-      password: "password123",
+      password: "Password123!",
     });
 
     await assert.rejects(
       async () => {
         await service.register({
           email: "USER@example.com",
-          password: "anotherPassword123",
+          password: "AnotherPassword123!",
         });
       },
       (err: unknown) => {
@@ -252,13 +269,13 @@ describe("AuthService Registration & Login Domain Rules", () => {
 
     await service.register({
       email: "user@example.com",
-      password: "correct_password",
+      password: "Correct_Password1!",
       name: "Player 1",
     });
 
     const loginResult = await service.login({
       email: "user@example.com",
-      password: "correct_password",
+      password: "Correct_Password1!",
     });
 
     assert.equal(loginResult.user.email, "user@example.com");
@@ -276,7 +293,7 @@ describe("AuthService Registration & Login Domain Rules", () => {
 
     await service.register({
       email: "user@example.com",
-      password: "correct_password",
+      password: "Correct_Password1!",
     });
 
     await assert.rejects(
@@ -303,7 +320,7 @@ describe("AuthService Registration & Login Domain Rules", () => {
       async () => {
         await service.login({
           email: "nonexistent@example.com",
-          password: "password123",
+          password: "Password123!",
         });
       },
       (err: unknown) => {
@@ -320,7 +337,7 @@ describe("AuthService Registration & Login Domain Rules", () => {
 
     const { user } = await service.register({
       email: "user@example.com",
-      password: "password123",
+      password: "Password123!",
       name: "Stanley S",
     });
 
@@ -333,13 +350,175 @@ describe("AuthService Registration & Login Domain Rules", () => {
   });
 });
 
+describe("AuthService Password Complexity Validation", () => {
+  it("should accept compliant passwords with uppercase, digit, special character, and >= 8 chars", () => {
+    const service = new AuthService(createMockAuthDb());
+    const compliantPasswords = [
+      "Password1!",
+      "Str0ng@Pass",
+      "A1!aaaaa",
+      "My-Super-Secret-99",
+      "Complex_Pass#2026",
+    ];
+
+    for (const password of compliantPasswords) {
+      assert.doesNotThrow(() => service.validatePassword(password));
+    }
+  });
+
+  it("should reject missing or empty passwords", () => {
+    const service = new AuthService(createMockAuthDb());
+
+    for (const invalid of ["", undefined, null, 12345678]) {
+      assert.throws(
+        () => service.validatePassword(invalid),
+        (err: unknown) => {
+          assert.ok(err instanceof AuthValidationError);
+          assert.match(err.message, /password is required/i);
+          return true;
+        }
+      );
+    }
+  });
+
+  it("should reject password missing an uppercase letter and report the specific rule", () => {
+    const service = new AuthService(createMockAuthDb());
+
+    assert.throws(
+      () => service.validatePassword("lowercase1!"),
+      (err: unknown) => {
+        assert.ok(err instanceof AuthValidationError);
+        assert.match(err.message, /uppercase letter/i);
+        assert.doesNotMatch(err.message, /digit/i);
+        assert.doesNotMatch(err.message, /special character/i);
+        assert.doesNotMatch(err.message, /at least 8 characters/i);
+        return true;
+      }
+    );
+  });
+
+  it("should reject password missing a digit and report the specific rule", () => {
+    const service = new AuthService(createMockAuthDb());
+
+    assert.throws(
+      () => service.validatePassword("NoDigitsHere!"),
+      (err: unknown) => {
+        assert.ok(err instanceof AuthValidationError);
+        assert.match(err.message, /digit/i);
+        assert.doesNotMatch(err.message, /uppercase letter/i);
+        assert.doesNotMatch(err.message, /special character/i);
+        return true;
+      }
+    );
+  });
+
+  it("should reject password missing a special character (including whitespace-only non-alphanumerics)", () => {
+    const service = new AuthService(createMockAuthDb());
+
+    for (const password of ["NoSpecial123", "HasSpace123 "]) {
+      assert.throws(
+        () => service.validatePassword(password),
+        (err: unknown) => {
+          assert.ok(err instanceof AuthValidationError);
+          assert.match(err.message, /special character/i);
+          assert.doesNotMatch(err.message, /uppercase letter/i);
+          assert.doesNotMatch(err.message, /digit/i);
+          return true;
+        }
+      );
+    }
+  });
+
+  it("should enumerate all failed complexity rules when multiple criteria are missing", () => {
+    const service = new AuthService(createMockAuthDb());
+
+    assert.throws(
+      () => service.validatePassword("weak"),
+      (err: unknown) => {
+        assert.ok(err instanceof AuthValidationError);
+        assert.match(err.message, /at least 8 characters/i);
+        assert.match(err.message, /uppercase letter/i);
+        assert.match(err.message, /digit/i);
+        assert.match(err.message, /special character/i);
+        return true;
+      }
+    );
+  });
+
+  it("should enforce complexity rules consistently on setPassword", async () => {
+    const mockDb = createMockAuthDb();
+    const service = new AuthService(mockDb);
+
+    const { user } = await service.register({
+      email: "reset@example.com",
+      password: "OldPassword1!",
+    });
+
+    await assert.rejects(
+      async () => {
+        await service.setPassword(user.id, {
+          currentPassword: "OldPassword1!",
+          password: "weakpassword",
+        });
+      },
+      (err: unknown) => {
+        assert.ok(err instanceof AuthValidationError);
+        assert.match(err.message, /uppercase letter/i);
+        assert.match(err.message, /digit/i);
+        assert.match(err.message, /special character/i);
+        return true;
+      }
+    );
+
+    const { user: updated } = await service.setPassword(user.id, {
+      currentPassword: "OldPassword1!",
+      password: "NewPassword2@",
+    });
+    assert.equal(updated.id, user.id);
+    const isMatch = await bcrypt.compare("NewPassword2@", mockDb.users[0].passwordHash);
+    assert.equal(isMatch, true);
+  });
+
+  it("should return HTTP 400 with enumerated rules from register controller on weak password", async () => {
+    const { register } = await import("../controllers/auth.controller.js");
+    let statusCode = 0;
+    let body: { success?: boolean; message?: string } = {};
+
+    const req = {
+      body: {
+        email: "weak@example.com",
+        password: "weakpassword",
+      },
+    } as Parameters<typeof register>[0];
+
+    const res = {
+      status(code: number) {
+        statusCode = code;
+        return this;
+      },
+      json(payload: { success?: boolean; message?: string }) {
+        body = payload;
+        return this;
+      },
+    } as unknown as Parameters<typeof register>[1];
+
+    await register(req, res, () => {});
+
+    assert.equal(statusCode, 400);
+    assert.equal(body.success, false);
+    assert.match(body.message ?? "", /uppercase letter/i);
+    assert.match(body.message ?? "", /digit/i);
+    assert.match(body.message ?? "", /special character/i);
+  });
+});
+
 describe("AuthService.setPassword password change & session revocation (issue #501)", () => {
   it("rejects the change when the current password does not match", async () => {
     const mockDb = withMockRefreshTokens(createMockAuthDb());
     const service = new AuthService(mockDb);
     const { user } = await service.register({
       email: "user@example.com",
-      password: "original-pass-1",
+      password: "Password1!",
       name: "User One",
     });
 
@@ -347,7 +526,7 @@ describe("AuthService.setPassword password change & session revocation (issue #5
       () =>
         service.setPassword(user.id, {
           currentPassword: "wrong-password",
-          password: "new-password-1",
+          password: "NewPassword1!",
         }),
       (err: unknown) => {
         assert.ok(err instanceof AuthUnauthorizedError);
@@ -362,19 +541,19 @@ describe("AuthService.setPassword password change & session revocation (issue #5
     const service = new AuthService(mockDb);
     const { user } = await service.register({
       email: "user@example.com",
-      password: "original-pass-1",
+      password: "Password1!",
       name: "User One",
     });
 
     const { user: updated, revokedSessions } = await service.setPassword(user.id, {
-      currentPassword: "original-pass-1",
-      password: "new-password-1",
+      currentPassword: "Password1!",
+      password: "NewPassword1!",
     });
 
     assert.equal(updated.id, user.id);
     assert.equal(revokedSessions, 0);
     const stored = mockDb.users.find((u) => u.id === user.id)!;
-    assert.ok(await bcrypt.compare("new-password-1", stored.passwordHash));
+    assert.ok(await bcrypt.compare("NewPassword1!", stored.passwordHash));
   });
 
   it("leaves refresh tokens and sessions untouched when revocation is not requested", async () => {
@@ -382,15 +561,15 @@ describe("AuthService.setPassword password change & session revocation (issue #5
     const service = new AuthService(mockDb);
     const { user } = await service.register({
       email: "user@example.com",
-      password: "original-pass-1",
+      password: "Password1!",
       name: "User One",
     });
     await mockDb.refreshToken.create({ data: { userId: user.id, familyId: "fam-1", tokenHash: "hash-1", expiresAt: new Date(Date.now() + 1000) } });
     const session = await sessionRegistryService.createSession(user.id, { ip: "1.2.3.4" });
 
     await service.setPassword(user.id, {
-      currentPassword: "original-pass-1",
-      password: "new-password-1",
+      currentPassword: "Password1!",
+      password: "NewPassword1!",
     });
 
     assert.equal(mockDb.refreshTokens[0].revokedAt, null);
@@ -402,7 +581,7 @@ describe("AuthService.setPassword password change & session revocation (issue #5
     const service = new AuthService(mockDb);
     const { user } = await service.register({
       email: "user@example.com",
-      password: "original-pass-1",
+      password: "Password1!",
       name: "User One",
     });
     await mockDb.refreshToken.create({ data: { userId: user.id, familyId: "fam-1", tokenHash: "hash-1", expiresAt: new Date(Date.now() + 1000) } });
@@ -411,8 +590,8 @@ describe("AuthService.setPassword password change & session revocation (issue #5
     const sessionB = await sessionRegistryService.createSession(user.id, { ip: "5.6.7.8" });
 
     const { revokedSessions } = await service.setPassword(user.id, {
-      currentPassword: "original-pass-1",
-      password: "new-password-1",
+      currentPassword: "Password1!",
+      password: "NewPassword1!",
       revokeOtherSessions: true,
     });
 
@@ -429,7 +608,7 @@ describe("AuthService.setPassword password change & session revocation (issue #5
     const service = new AuthService(mockDb);
     const { user } = await service.register({
       email: "user@example.com",
-      password: "original-pass-1",
+      password: "Password1!",
       name: "User One",
     });
     const { RefreshTokenService, RefreshTokenUnauthorizedError } = await import(
@@ -439,8 +618,8 @@ describe("AuthService.setPassword password change & session revocation (issue #5
     const issued = await refreshTokenService.issue(user);
 
     await service.setPassword(user.id, {
-      currentPassword: "original-pass-1",
-      password: "new-password-1",
+      currentPassword: "Password1!",
+      password: "NewPassword1!",
       revokeOtherSessions: true,
     });
 
@@ -448,5 +627,6 @@ describe("AuthService.setPassword password change & session revocation (issue #5
       () => refreshTokenService.rotate(issued.refreshToken),
       RefreshTokenUnauthorizedError
     );
+  });
   });
 });
