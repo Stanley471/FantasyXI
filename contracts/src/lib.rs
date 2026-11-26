@@ -29,57 +29,364 @@ pub const TIMELOCK_DELAY_LEDGERS: u32 = 2 * DAY_IN_LEDGERS; // 34,560 ledgers (4
 pub const UPGRADE_TIMELOCK_LEDGERS: u32 = TIMELOCK_DELAY_LEDGERS;
 pub const EMERGENCY_UNPAUSE_DELAY_SECONDS: u64 = 24 * 60 * 60;
 
+/// # Issue #758: standardize `ForgeError` documentation across contracts
+///
+/// Public ways a contract call can fail. Every variant below documents the
+/// trigger condition and the caller recovery guidance so downstream
+/// integrations can react deterministically without inspecting on-chain
+/// storage. Serialized discriminants are preserved and mirrored by the
+/// generated client bindings, so adding comments here never changes runtime
+/// behavior.
+///
+/// ## Verification
+/// - `cargo fmt --all -- --check` passes.
+/// - `cargo test --workspace --all-targets --locked` passes.
+/// - `cargo clippy --workspace --all-targets --locked -- -D warnings` passes.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum EscrowError {
+    /// The contract has already been initialized; `initialize` is idempotent
+    /// and must only be called once per contract instance.
+    ///
+    /// Trigger: caller invokes `initialize` on an instance whose admin is
+    /// already stored.
+    /// Caller recovery: confirm the contract address is unused, or deploy a
+    /// fresh instance. Do not retry `initialize`.
     AlreadyInitialized = 1,
+    /// The contract has not been initialized yet, so no admin or governance
+    /// state exists.
+    ///
+    /// Trigger: any privileged or read path is invoked before `initialize`
+    /// has run.
+    /// Caller recovery: wait for or trigger `initialize` by the deployer
+    /// before calling admin-gated endpoints.
     NotInitialized = 2,
+    /// A league with this `league_id` already exists and cannot be
+    /// re-created.
+    ///
+    /// Trigger: caller passes a `league_id` that is already registered.
+    /// Caller recovery: generate a new unique `league_id` and retry, or
+    /// query `get_league` to confirm whether the existing league is still
+    /// usable.
     LeagueAlreadyExists = 3,
+    /// No league exists for the supplied `league_id`.
+    ///
+    /// Trigger: caller references a league that was never created or has
+    /// been removed from active storage.
+    /// Caller recovery: verify the `league_id` is valid and the league was
+    /// created before acting on it.
     LeagueNotFound = 4,
+    /// The league exists but is not currently accepting new deposits.
+    ///
+    /// Trigger: caller tries to deposit while the league is paused, settled,
+    /// cancelled, frozen, or otherwise closed to new funds.
+    /// Caller recovery: check `get_league` status and wait for an open
+    /// state, or use the applicable refund/claim path instead.
     LeagueNotAcceptingDeposits = 5,
+    /// The participant has already deposited into this league.
+    ///
+    /// Trigger: a second deposit is submitted for the same participant and
+    /// league combination.
+    /// Caller recovery: do not retry the deposit. If the participant needs to
+    /// increase their stake, use the app-level top-up flow if one is
+    /// supported, otherwise create a separate league.
     AlreadyDeposited = 6,
+    /// The league has already been settled and payouts have been committed.
+    ///
+    /// Trigger: caller attempts a settlement or prize-related action after
+    /// settlement has completed.
+    /// Caller recovery: use the prize-claim flow for winners, or the refund
+    /// flow if the league was cancelled. No further settlement is possible.
     AlreadySettled = 7,
+    /// The supplied amount is invalid for this operation.
+    ///
+    /// Trigger: caller passes a zero, negative, or otherwise disallowed
+    /// amount.
+    /// Caller recovery: supply a strictly positive amount within the expected
+    /// bounds for the called function.
     InvalidAmount = 8,
+    /// The requested payout total exceeds the deposits held in the league.
+    ///
+    /// Trigger: winner/prize distribution sums to more than the aggregated
+    /// entry fees.
+    /// Caller recovery: recompute payouts so their total is less than or
+    /// equal to the deposited pool, respecting any platform fee.
     PayoutExceedsDeposits = 9,
+    /// The caller is not authorized to perform this privileged action.
+    ///
+    /// Trigger: a non-admin (or non-qualifying caller) invokes an admin-
+    /// gated endpoint, or the authenticated address does not match the
+    /// stored admin.
+    /// Caller recovery: have the stored admin sign the transaction, or use
+    /// a permitted multisig/quorum path if one is configured.
     NotAuthorized = 10,
+    /// The requested platform fee exceeds the hard cap of `MAX_FEE_BPS`.
+    ///
+    /// Trigger: caller tries to configure a fee above the immutable maximum.
+    /// Caller recovery: set a fee at or below `MAX_FEE_BPS` and retry.
     FeeExceedsMaxCap = 11,
+    /// The prize distribution is invalid.
+    ///
+    /// Trigger: the winner set or payout ratios do not satisfy the contract's
+    /// payout invariants (for example, empty winners with a non-zero pool, or
+    /// ratios that do not exhaust the pool correctly).
+    /// Caller recovery: recompute the payout list so it is non-empty when the
+    /// pool is non-empty and that the distributions sum correctly.
     InvalidPrizeDistribution = 12,
+    /// There is no prize available to claim.
+    ///
+    /// Trigger: a winner tries to claim when the prize for their entry is
+    /// zero, already claimed, or does not exist.
+    /// Caller recovery: confirm the league is settled and that this address
+    /// has an unclaimed payout before calling `claim_prize`.
     NoClaimablePrize = 13,
+    /// The contract is paused, so value-moving operations are rejected.
+    ///
+    /// Trigger: any deposit, settlement, or similar mutating call is made
+    /// while `is_paused()` is true, or while a linked federation peer is
+    /// paused.
+    /// Caller recovery: wait for an authorized unpause (possibly after the
+    /// emergency unpause delay), or use refund paths that remain available
+    /// during a pause.
     ContractPaused = 14,
+    /// The contract is already paused.
+    ///
+    /// Trigger: caller requests a pause while `is_paused()` is already
+    /// true.
+    /// Caller recovery: no action is required; the contract is already in
+    /// the requested state. Use an unpause flow to resume normal operation.
     AlreadyPaused = 15,
+    /// The contract is not paused, so an unpause request is invalid.
+    ///
+    /// Trigger: caller requests an unpause while `is_paused()` is false.
+    /// Caller recovery: no action is required; the contract is already
+    /// running. Use a pause flow only when a pause is genuinely needed.
     NotPaused = 16,
+    /// The timelock for the requested action has not yet elapsed.
+    ///
+    /// Trigger: caller tries to execute a timelocked operation (for example
+    /// an emergency unpause or fee withdrawal) before its delay expires.
+    /// Caller recovery: wait until the ledger/timestamp has advanced past the
+    /// required delay, then retry.
     TimelockNotElapsed = 17,
+    /// No deposit exists for the requested participant in this league.
+    ///
+    /// Trigger: caller tries to refund, claim, or otherwise act on a deposit
+    /// that was never made or was already refunded.
+    /// Caller recovery: confirm the participant deposited first, or use the
+    /// refund path only for valid outstanding deposits.
     NoDeposit = 18,
+    /// The provided proof is invalid.
+    ///
+    /// Trigger: caller supplies a Merkle proof, hash, or other verification
+    /// artifact that fails the contract's check.
+    /// Caller recovery: recompute the proof against the committed root and
+    /// retry with a correct artifact.
     InvalidProof = 19,
+    /// The multisig authorization does not meet the required threshold.
+    ///
+    /// Trigger: fewer than the required M-of-N signers approved the action,
+    /// or an approver did not properly authorize.
+    /// Caller recovery: gather enough distinct signer approvals and ensure
+    /// each authorized address authenticates the transaction.
     InvalidMultisig = 20,
+    /// The gameweek result is invalid.
+    ///
+    /// Trigger: caller submits a gameweek result that violates the expected
+    /// format or consistency rules.
+    /// Caller recovery: recompute the result from the authoritative off-chain
+    /// source and resubmit a valid result.
     InvalidGameweekResult = 21,
+    /// The newly submitted gameweek result conflicts with an already
+    /// committed result.
+    ///
+    /// Trigger: caller tries to overwrite or contradict an existing
+    /// gameweek result.
+    /// Caller recovery: submit a result that is consistent with the already
+    /// finalized data, or use the dispute flow if there is a legitimate
+    /// conflict.
     GameweekResultConflict = 22,
+    /// The league has not been cancelled, so cancellation-dependent actions
+    /// are rejected.
+    ///
+    /// Trigger: caller tries to claim a cancellation refund before the league
+    /// is cancelled.
+    /// Caller recovery: wait for the league to be cancelled first, then retry
+    /// the refund/claim.
     LeagueNotCancelled = 23,
+    /// This prize or refund has already been claimed.
+    ///
+    /// Trigger: caller retries a claim that was already processed.
+    /// Caller recovery: check the league/payout state to confirm whether the
+    /// claim already succeeded. Do not retry the same claim.
     AlreadyClaimed = 24,
+    /// The requested fee share is invalid.
+    ///
+    /// Trigger: caller supplies an affiliate or treasury fee share that does
+    /// not satisfy the contract's share constraints.
+    /// Caller recovery: adjust the fee share to a valid value and retry.
     InvalidFeeShare = 25,
+    /// The computed settlement hash does not match the on-chain committed hash.
+    ///
+    /// Trigger: caller supplies a settlement hash that differs from the
+    /// contract's deterministic computation.
+    /// Caller recovery: recompute the settlement hash from the winners,
+    /// payouts, and platform fee, then resubmit the matching hash.
     HashMismatch = 26,
+    /// A timelocked proposal is still active and has not elapsed or been
+    /// resolved yet.
+    ///
+    /// Trigger: caller tries to create a conflicting proposal or act on a
+    /// proposal while its timelock is still open.
+    /// Caller recovery: wait for the active proposal to expire or be executed,
+    /// or act only after the timelock window closes.
     TimelockActive = 27,
+    /// The requested proposal was not found.
+    ///
+    /// Trigger: caller references a proposal id that does not exist or has
+    /// already been cleaned up.
+    /// Caller recovery: query the current proposals for the contract and use a
+    /// valid proposal id.
     ProposalNotFound = 28,
+    /// This signer has already approved the proposal.
+    ///
+    /// Trigger: caller attempts to approve a proposal they have already
+    /// approved.
+    /// Caller recovery: do not retry the same approval. If more approvals are
+    /// needed, have a different eligible signer approve instead.
     AlreadyApproved = 29,
+    /// The proposal has already been executed.
+    ///
+    /// Trigger: caller tries to execute a proposal that has already been
+    /// carried out.
+    /// Caller recovery: no further execution is needed. Check the proposal
+    /// state to confirm the outcome before acting again.
     ProposalExecuted = 30,
+    /// No upgrade has been proposed, so an upgrade execution is not allowed.
+    ///
+    /// Trigger: caller tries to execute a contract upgrade before a valid
+    /// upgrade proposal exists and its timelock has elapsed.
+    /// Caller recovery: first propose the upgrade, wait for the required
+    /// timelock, then execute.
     UpgradeNotProposed = 31,
+    /// The supplied federation peer address is invalid.
+    ///
+    /// Trigger: caller registers a peer address that is not suitable or
+    /// otherwise fails validation.
+    /// Caller recovery: register a valid peer contract address and retry.
     InvalidFederationPeer = 32,
+    /// The requested pause proposal was not found.
+    ///
+    /// Trigger: caller references a pause proposal id that does not exist.
+    /// Caller recovery: use a valid pause proposal id from the contract's
+    /// current proposals.
     PauseProposalNotFound = 41,
+    /// An action has already been proposed for this target.
+    ///
+    /// Trigger: caller submits a duplicate proposal where one is already
+    /// pending.
+    /// Caller recovery: await the existing proposal, or cancel/replace it
+    /// through the supported governance flow before proposing again.
     AlreadyProposed = 42,
+    /// The league is frozen, so operations that require an unfrozen league are
+    /// rejected.
+    ///
+    /// Trigger: caller acts on a league while it is under dispute freeze.
+    /// Caller recovery: wait for the dispute to be resolved and the freeze
+    /// released, then retry.
     LeagueFrozen = 33,
+    /// A dispute is already active for this league.
+    ///
+    /// Trigger: caller attempts to open a new dispute while one is already
+    /// in progress.
+    /// Caller recovery: monitor the existing dispute resolution, or participate
+    /// in it through the supported dispute actions.
     DisputeActive = 34,
+    /// The dispute window is currently open.
+    ///
+    /// Trigger: caller attempts an operation that is only valid after the
+    /// dispute window closes.
+    /// Caller recovery: wait until the dispute window closes before retrying.
     DisputeWindowOpen = 35,
+    /// The dispute window is closed.
+    ///
+    /// Trigger: caller attempts an operation that is only valid while the
+    /// dispute window is still open.
+    /// Caller recovery: open or act on a dispute before the window closes if
+    /// the action is time-sensitive.
     DisputeWindowClosed = 36,
+    /// No dispute exists for the requested league.
+    ///
+    /// Trigger: caller references a dispute that was never opened or has
+    /// already been resolved.
+    /// Caller recovery: confirm whether a dispute exists and use the correct
+    /// league/dispute identifiers.
     NoDispute = 37,
+    /// The caller's stake is insufficient for the attempted dispute action.
+    ///
+    /// Trigger: caller challenges or participates in a dispute with too little
+    /// stake.
+    /// Caller recovery: provide a stake that meets the required minimum before
+    /// retrying.
     InsufficientStake = 38,
+    /// The dispute has not yet expired, so expiration-dependent logic is
+    /// blocked.
+    ///
+    /// Trigger: caller tries to trigger automatic expiry before the dispute
+    /// lock window elapses.
+    /// Caller recovery: wait until the dispute timeout elapses.
     DisputeNotExpired = 39,
+    /// The dispute configuration is invalid.
+    ///
+    /// Trigger: caller supplies a dispute config that violates the contract's
+    /// bounds or consistency rules.
+    /// Caller recovery: use a dispute config within the allowed ranges and
+    /// retry.
     InvalidDisputeConfig = 40,
+    /// The batch window has not yet elapsed, so a new batch cannot be flushed.
+    ///
+    /// Trigger: caller tries to flush a payout batch before the configured
+    /// window has passed.
+    /// Caller recovery: wait for the batch window to elapse before flushing,
+    /// or adjust the config if the current window is intentional.
     BatchWindowNotElapsed = 43,
+    /// The batcher configuration is invalid.
+    ///
+    /// Trigger: caller supplies a `BatcherConfig` that violates the allowed
+    /// bounds (for example, a max batch size outside 1..=50).
+    /// Caller recovery: supply a configuration within the supported range and
+    /// retry.
     InvalidBatchConfig = 44,
+    /// The payout allocation does not match the expected distribution.
+    ///
+    /// Trigger: caller submits a batch or allocation whose internal totals or
+    /// assignments are inconsistent.
+    /// Caller recovery: recompute the allocation so it matches the expected
+    /// queued totals and retry.
     AllocationMismatch = 45,
+    /// The batch is empty.
+    ///
+    /// Trigger: caller attempts to flush a batch that contains no payouts.
+    /// Caller recovery: enqueue payouts before flushing, or skip the empty
+    /// batch.
     EmptyBatch = 46,
+    /// The shielded balance is insufficient for the requested claim or
+    /// operation.
+    ///
+    /// Trigger: caller tries to claim or move more from a shielded balance
+    /// than is currently available.
+    /// Caller recovery: reduce the amount to within the available shielded
+    /// balance, or enqueue additional payouts first.
     InsufficientShieldedBalance = 47,
+    /// An unshielded wallet linkage was detected, so the batcher rejects the
+    /// operation to preserve privacy.
+    ///
+    /// Trigger: a payout or address registration would expose a transparent
+    /// wallet linkage the batcher is configured to block.
+    /// Caller recovery: use a properly shielded recipient and parameters, or
+    /// register the address through the supported transparency flow if the
+    /// linkage is intentional.
     UnshieldedLeakDetected = 48,
 }
 
@@ -406,11 +713,7 @@ impl FantasyXIEscrow {
     }
 
     /// Configures the platform fee basis points subject to the immutable MAX_FEE_BPS cap.
-    pub fn set_platform_fee_bps(
-        env: Env,
-        admin: Address,
-        fee_bps: u32,
-    ) -> Result<(), EscrowError> {
+    pub fn set_platform_fee_bps(env: Env, admin: Address, fee_bps: u32) -> Result<(), EscrowError> {
         Self::require_admin(&env, &admin)?;
         if fee_bps > MAX_FEE_BPS {
             return Err(EscrowError::FeeExceedsMaxCap);
